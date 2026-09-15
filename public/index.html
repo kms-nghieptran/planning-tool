@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Automation Planning Tool</title>
+<link rel="icon" href="kms/kms-mark-blue.svg" type="image/svg+xml">
+<link rel="stylesheet" href="kms/tokens.css">
+<link rel="stylesheet" href="kms/fonts.css">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="shell">
+
+  <aside class="sidebar" id="sidebar">
+    <div class="brand">
+      <img class="mark" src="kms/kms-mark-blue.svg" alt="KMS Technology" width="26" height="26">
+      <div>
+        <div class="eyebrow"><i></i>KMS · Automation</div>
+        <h1>Planning Tool</h1>
+      </div>
+    </div>
+
+    <label class="field team-picker">
+      <span>Team</span>
+      <select id="teamSelect"></select>
+    </label>
+
+    <nav class="nav" id="nav"></nav>
+
+    <div class="sidebar-foot">
+      <button class="btn ghost sm" id="syncBtn">Sync Jira</button>
+      <button class="btn ghost sm icon" id="themeBtn" title="Light / dark">◐</button>
+      <div class="sync-state" id="syncState">—</div>
+    </div>
+  </aside>
+
+  <div class="main-col">
+    <header class="topbar">
+      <div class="crumbs" id="crumbs"></div>
+      <div class="spacer"></div>
+      <label class="field inline" id="sprintField">
+        <span>Sprint</span>
+        <select id="sprintSelect"></select>
+      </label>
+      <button class="btn ghost sm menu-btn" id="menuBtn" aria-label="Menu">☰</button>
+    </header>
+
+    <div id="staleBanner" hidden></div>
+    <main id="main"><div class="loading">Loading…</div></main>
+  </div>
+</div>
+
+<div id="toast" class="toast" hidden></div>
+<div id="drawer" class="drawer" hidden>
+  <div class="drawer-panel">
+    <button class="drawer-close" id="drawerClose" aria-label="Close">×</button>
+    <div id="drawerBody"></div>
+  </div>
+</div>
+
+<script src="ui.js"></script>
+<script src="charts.js"></script>
+<script src="views/team.js"></script>
+<script src="views/backlog.js"></script>
+<script src="views/sprints.js"></script>
+<script src="views/capacity.js"></script>
+<script src="views/sprint.js"></script>
+<script src="views/forecast.js"></script>
+<script src="views/report-delivery.js"></script>
+<script src="views/report-automation.js"></script>
+<script src="views/report-coverage.js"></script>
+<script src="views/risks.js"></script>
+<script src="/shared/query.js"></script>
+<script src="views/search.js"></script>
+<script src="views/fields.js"></script>
+<script src="views/sources.js"></script>
+<script src="views/adjustments.js"></script>
+<script src="views/settings.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

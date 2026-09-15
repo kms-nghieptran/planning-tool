@@ -1,0 +1,646 @@
+{
+  "version": 1,
+  "updatedAt": null,
+  "teams": [
+    {
+      "id": "ruby",
+      "name": "Katalon Ruby",
+      "sprintKeywords": [
+        "ruby"
+      ],
+      "jiraTeams": [
+        "Katalon Auto Ruby"
+      ],
+      "components": [
+        "R&D_Sig_Regression",
+        "R&D_Evolve_Regression",
+        "KAT_Common_Maintenance"
+      ],
+      "testopsProjectIds": [],
+      "settings": {
+        "hoursPerDay": 7,
+        "hoursPerPoint": 2.9,
+        "ceremonyHours": 8.5,
+        "workloadOverPct": 110,
+        "workloadUnderPct": 85,
+        "pointsPerFailingTest": 0.25
+      },
+      "members": [
+        {
+          "id": "ruby-thao",
+          "name": "Thao Dang",
+          "role": "QA Lead",
+          "status": "Active",
+          "supportPct": 25
+        },
+        {
+          "id": "ruby-hy",
+          "name": "Hy Nguyen",
+          "role": "Auto QA",
+          "status": "Active",
+          "supportPct": 0
+        },
+        {
+          "id": "ruby-chau",
+          "name": "Tran Thi Minh Chau",
+          "role": "Auto QA",
+          "status": "Active",
+          "supportPct": 0,
+          "jiraNames": [
+            "Chau Tran",
+            "Minh Chau Tran"
+          ]
+        },
+        {
+          "id": "ruby-abiran",
+          "name": "Abiran Lopez",
+          "role": "Auto QA",
+          "status": "Active",
+          "supportPct": 0
+        }
+      ]
+    },
+    {
+      "id": "titan",
+      "name": "Katalon Titan",
+      "sprintKeywords": [
+        "titan"
+      ],
+      "jiraTeams": [
+        "Katalon Auto Titan"
+      ],
+      "components": [
+        "R&D_iGO_E2E",
+        "R&D_AFFIRM_E2E",
+        "KAT_Framework_Optimization",
+        "PS_iGO_NYL_Annuities"
+      ],
+      "testopsProjectIds": [],
+      "settings": {
+        "hoursPerDay": 7,
+        "hoursPerPoint": 2.9,
+        "ceremonyHours": 9,
+        "workloadOverPct": 110,
+        "workloadUnderPct": 85,
+        "pointsPerFailingTest": 0.25
+      },
+      "members": [
+        {
+          "id": "titan-thuan",
+          "name": "Thuan Dinh Cong Ngoc",
+          "role": "QA Lead",
+          "status": "Active",
+          "supportPct": 40
+        },
+        {
+          "id": "titan-hien",
+          "name": "Hien Phan",
+          "role": "Auto QA",
+          "status": "Active",
+          "supportPct": 0
+        },
+        {
+          "id": "titan-anh",
+          "name": "Anh Truong",
+          "role": "Auto QA",
+          "status": "Active",
+          "supportPct": 30
+        },
+        {
+          "id": "titan-luis",
+          "name": "Luis Romero",
+          "role": "Auto QA",
+          "status": "Active",
+          "supportPct": 0
+        },
+        {
+          "id": "titan-bao",
+          "name": "Bao Luong Gia Nguyen",
+          "role": "Auto QA",
+          "status": "Active",
+          "supportPct": 0
+        },
+        {
+          "id": "titan-nghia",
+          "name": "Nghia Bui",
+          "role": "Auto QA",
+          "status": "Active",
+          "supportPct": 0
+        },
+        {
+          "id": "titan-an",
+          "name": "An Nguyen",
+          "role": "Auto QA",
+          "status": "Active",
+          "supportPct": 0
+        },
+        {
+          "id": "titan-anthien",
+          "name": "An Thien Nguyen",
+          "role": "Auto QA",
+          "status": "Active",
+          "supportPct": 0
+        },
+        {
+          "id": "titan-huynh",
+          "name": "Huynh Nguyen",
+          "role": "Auto QA",
+          "status": "Released",
+          "supportPct": 0
+        }
+      ]
+    }
+  ],
+  "sprints": [
+    {
+      "id": "S26",
+      "number": 26,
+      "name": "Sprint 26",
+      "start": "2026-03-05",
+      "end": "2026-03-18"
+    },
+    {
+      "id": "S27",
+      "number": 27,
+      "name": "Sprint 27",
+      "start": "2026-03-19",
+      "end": "2026-04-01"
+    },
+    {
+      "id": "S28",
+      "number": 28,
+      "name": "Sprint 28",
+      "start": "2026-04-02",
+      "end": "2026-04-15"
+    },
+    {
+      "id": "S29",
+      "number": 29,
+      "name": "Sprint 29",
+      "start": "2026-04-16",
+      "end": "2026-04-29"
+    },
+    {
+      "id": "S30",
+      "number": 30,
+      "name": "Sprint 30",
+      "start": "2026-04-30",
+      "end": "2026-05-13"
+    },
+    {
+      "id": "S31",
+      "number": 31,
+      "name": "Sprint 31",
+      "start": "2026-05-14",
+      "end": "2026-05-27"
+    },
+    {
+      "id": "S32",
+      "number": 32,
+      "name": "Sprint 32",
+      "start": "2026-05-28",
+      "end": "2026-06-10"
+    },
+    {
+      "id": "S33",
+      "number": 33,
+      "name": "Sprint 33",
+      "start": "2026-06-11",
+      "end": "2026-06-24"
+    },
+    {
+      "id": "S34",
+      "number": 34,
+      "name": "Sprint 34",
+      "start": "2026-06-25",
+      "end": "2026-07-08"
+    },
+    {
+      "id": "S35",
+      "number": 35,
+      "name": "Sprint 35",
+      "start": "2026-07-09",
+      "end": "2026-07-22"
+    },
+    {
+      "id": "S36",
+      "number": 36,
+      "name": "Sprint 36",
+      "start": "2026-07-23",
+      "end": "2026-08-05"
+    },
+    {
+      "id": "S37",
+      "number": 37,
+      "name": "Sprint 37",
+      "start": "2026-08-06",
+      "end": "2026-08-19"
+    },
+    {
+      "id": "S38",
+      "number": 38,
+      "name": "Sprint 38",
+      "start": "2026-08-20",
+      "end": "2026-09-02"
+    },
+    {
+      "id": "S39",
+      "number": 39,
+      "name": "Sprint 39",
+      "start": "2026-09-03",
+      "end": "2026-09-16"
+    },
+    {
+      "id": "S40",
+      "number": 40,
+      "name": "Sprint 40",
+      "start": "2026-09-17",
+      "end": "2026-09-30"
+    },
+    {
+      "id": "S41",
+      "number": 41,
+      "name": "Sprint 41",
+      "start": "2026-10-01",
+      "end": "2026-10-14"
+    },
+    {
+      "id": "S42",
+      "number": 42,
+      "name": "Sprint 42",
+      "start": "2026-10-15",
+      "end": "2026-10-28"
+    },
+    {
+      "id": "S43",
+      "number": 43,
+      "name": "Sprint 43",
+      "start": "2026-10-29",
+      "end": "2026-11-11"
+    },
+    {
+      "id": "S44",
+      "number": 44,
+      "name": "Sprint 44",
+      "start": "2026-11-12",
+      "end": "2026-11-25"
+    },
+    {
+      "id": "S45",
+      "number": 45,
+      "name": "Sprint 45",
+      "start": "2026-11-26",
+      "end": "2026-12-09"
+    },
+    {
+      "id": "S46",
+      "number": 46,
+      "name": "Sprint 46",
+      "start": "2026-12-10",
+      "end": "2026-12-23"
+    },
+    {
+      "id": "S47",
+      "number": 47,
+      "name": "Sprint 47",
+      "start": "2026-12-24",
+      "end": "2027-01-06"
+    },
+    {
+      "id": "S48",
+      "number": 48,
+      "name": "Sprint 48",
+      "start": "2027-01-07",
+      "end": "2027-01-20"
+    }
+  ],
+  "holidays": [
+    "2026-04-30",
+    "2026-05-01",
+    "2026-09-02",
+    "2027-01-01"
+  ],
+  "availability": {
+    "ruby|S33|ruby-thao": [
+      "1",
+      "1",
+      "WO",
+      "WO",
+      "1",
+      "1",
+      "1",
+      "1",
+      "1",
+      "WO",
+      "WO",
+      "1",
+      "1",
+      "0"
+    ],
+    "ruby|S33|ruby-hy": [
+      "1",
+      "1",
+      "WO",
+      "WO",
+      "1",
+      "1",
+      "1",
+      "1",
+      "1",
+      "WO",
+      "WO",
+      "1",
+      "1",
+      "1"
+    ],
+    "ruby|S33|ruby-chau": [
+      "1",
+      "1",
+      "WO",
+      "WO",
+      "1",
+      "1",
+      "1",
+      "1",
+      "1",
+      "WO",
+      "WO",
+      "1",
+      "1",
+      "0"
+    ],
+    "ruby|S33|ruby-abiran": [
+      "1",
+      "1",
+      "WO",
+      "WO",
+      "1",
+      "1",
+      "1",
+      "1",
+      "1",
+      "WO",
+      "WO",
+      "1",
+      "1",
+      "1"
+    ],
+    "ruby|S38|ruby-thao": [
+      "1",
+      "1",
+      "WO",
+      "WO",
+      "1",
+      "1",
+      "1",
+      "1",
+      "1",
+      "WO",
+      "WO",
+      "0.5",
+      "0",
+      "H"
+    ],
+    "titan|S33|titan-thuan": [
+      "1",
+      "1",
+      "WO",
+      "WO",
+      "1",
+      "1",
+      "1",
+      "1",
+      "1",
+      "WO",
+      "WO",
+      "1",
+      "1",
+      "0.5"
+    ],
+    "titan|S34|titan-bao": [
+      "1",
+      "1",
+      "WO",
+      "WO",
+      "1",
+      "1",
+      "1",
+      "1",
+      "1",
+      "WO",
+      "WO",
+      "1",
+      "0.5",
+      "0"
+    ],
+    "titan|S37|titan-thuan": [
+      "1",
+      "1",
+      "WO",
+      "WO",
+      "1",
+      "1",
+      "1",
+      "1",
+      "1",
+      "WO",
+      "WO",
+      "1",
+      "1",
+      "1"
+    ],
+    "titan|S37|titan-hien": [
+      "1",
+      "1",
+      "WO",
+      "WO",
+      "1",
+      "1",
+      "1",
+      "1",
+      "1",
+      "WO",
+      "WO",
+      "1",
+      "1",
+      "1"
+    ],
+    "titan|S37|titan-luis": [
+      "1",
+      "1",
+      "WO",
+      "WO",
+      "1",
+      "1",
+      "1",
+      "1",
+      "1",
+      "WO",
+      "WO",
+      "0",
+      "0",
+      "0"
+    ],
+    "titan|S37|titan-anh": [
+      "1",
+      "1",
+      "WO",
+      "WO",
+      "1",
+      "1",
+      "1",
+      "1",
+      "1",
+      "WO",
+      "WO",
+      "1",
+      "1",
+      "1"
+    ],
+    "titan|S38|titan-thuan": [
+      "1",
+      "1",
+      "WO",
+      "WO",
+      "1",
+      "1",
+      "1",
+      "1",
+      "1",
+      "WO",
+      "WO",
+      "0",
+      "0",
+      "H"
+    ],
+    "titan|S38|titan-anh": [
+      "1",
+      "1",
+      "WO",
+      "WO",
+      "1",
+      "1",
+      "1",
+      "1",
+      "1",
+      "WO",
+      "WO",
+      "0",
+      "0",
+      "H"
+    ],
+    "titan|S39|titan-thuan": [
+      "1",
+      "1",
+      "WO",
+      "WO",
+      "1",
+      "1",
+      "1",
+      "1",
+      "1",
+      "WO",
+      "WO",
+      "1",
+      "1",
+      "1"
+    ],
+    "titan|S39|titan-hien": [
+      "1",
+      "1",
+      "WO",
+      "WO",
+      "1",
+      "1",
+      "1",
+      "1",
+      "1",
+      "WO",
+      "WO",
+      "1",
+      "1",
+      "0"
+    ],
+    "titan|S39|titan-anh": [
+      "1",
+      "1",
+      "WO",
+      "WO",
+      "1",
+      "1",
+      "1",
+      "1",
+      "1",
+      "WO",
+      "WO",
+      "1",
+      "1",
+      "1"
+    ]
+  },
+  "support": {
+    "ruby|S33|ruby-thao": 25,
+    "ruby|S33|ruby-hy": 0,
+    "ruby|S33|ruby-chau": 0,
+    "ruby|S33|ruby-abiran": 0,
+    "ruby|S38|ruby-thao": 30,
+    "titan|S33|titan-thuan": 30,
+    "titan|S34|titan-bao": 50,
+    "titan|S37|titan-thuan": 40,
+    "titan|S37|titan-hien": 0,
+    "titan|S37|titan-luis": 0,
+    "titan|S37|titan-anh": 40,
+    "titan|S38|titan-thuan": 40,
+    "titan|S38|titan-anh": 30,
+    "titan|S39|titan-thuan": 40,
+    "titan|S39|titan-hien": 0,
+    "titan|S39|titan-anh": 30
+  },
+  "ceremony": {
+    "ruby|S33": 8.5,
+    "ruby|S38": 8,
+    "ruby|S39": 9
+  },
+  "overrides": {},
+  "risks": [],
+  "categoryRules": null,
+  "mixTargets": {
+    "ruby": {
+      "new": [
+        45,
+        100
+      ],
+      "maintenance": [
+        0,
+        35
+      ],
+      "technical": [
+        5,
+        25
+      ],
+      "support": [
+        0,
+        15
+      ]
+    },
+    "titan": {
+      "new": [
+        45,
+        100
+      ],
+      "maintenance": [
+        0,
+        35
+      ],
+      "technical": [
+        5,
+        25
+      ],
+      "support": [
+        0,
+        15
+      ]
+    }
+  },
+  "notes": {}
+}

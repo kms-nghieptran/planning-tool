@@ -1,0 +1,20 @@
+{
+  "jira": {
+    "baseUrl": "https://ipipelinejira.atlassian.net",
+    "email": "you@kms-technology.com",
+    "apiToken": "",
+    "projectKey": "AUTOKAT"
+  },
+  "testops": {
+    "baseUrl": "https://testops.katalon.io",
+    "apiKey": "",
+    "projectIds": []
+  },
+  "github": {
+    "baseUrl": "https://api.github.com",
+    "token": "",
+    "repos": [],
+    "loginMap": {}
+  },
+  "server": { "port": 4322, "readOnly": false }
+}

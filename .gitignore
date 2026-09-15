@@ -1,0 +1,5 @@
+config.json
+data/store/
+data/audit.log
+node_modules/
+.DS_Store

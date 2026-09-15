@@ -1,0 +1,563 @@
+/* Automation Planning Tool — KMS Technology design system.
+   No raw colour or type literals below the theme block: everything is a token.
+   House rules applied: titles Light 300, ExtraBold 800 only for figures, flat
+   pill buttons with no shadow, --shadow-brand on the featured tile only,
+   wide-tracked all-caps eyebrows with the pink dot. */
+
+:root {
+  /* app-level roles mapped onto the KMS token layer */
+  --app-bg:        var(--color-bg, #FFFFFF);
+  --app-surface:   var(--color-bg-raised, #FFFFFF);
+  --app-subtle:    var(--color-bg-subtle, #F6F8FA);
+  --app-line:      var(--color-border, #DBE0E6);
+  --app-line-soft: var(--color-border, #ECEFF3);
+  --app-fg:        var(--color-fg-primary, #10112A);
+  --app-fg-2:      var(--color-fg-secondary, #4B5565);
+  --app-fg-3:      var(--color-fg-muted, #7A8598);
+  --brand-blue:    var(--color-brand-primary, #006AFE);
+  --brand-pink:    var(--color-brand-secondary, #FE006A);
+  --brand-teal:    var(--color-teal-500, #00B8A9);
+  --brand-purple:  var(--color-purple-500, #6E3AFF);
+  --brand-navy:    var(--color-navy-900, #10112A);
+
+  /* status — derived from brand hues so the palette stays one system */
+  --ok:    var(--brand-teal);
+  --warn:  #C97A00;
+  --risk:  var(--brand-pink);
+
+  /* work-mix categories, validated for adjacent contrast in both themes */
+  --cat-new:   var(--brand-blue);
+  --cat-maint: var(--brand-pink);
+  --cat-tech:  var(--brand-teal);
+  --cat-supp:  var(--brand-purple);
+  --cat-other: var(--app-fg-3);
+
+  /* day-grid cells */
+  --day-work: transparent;
+  --day-off:  color-mix(in srgb, var(--brand-pink) 16%, transparent);
+  --day-half: color-mix(in srgb, var(--brand-pink) 8%, transparent);
+  --day-hol:  color-mix(in srgb, var(--brand-purple) 16%, transparent);
+  --day-we:   color-mix(in srgb, var(--app-fg-3) 13%, transparent);
+
+  --radius:    var(--radius-card, 12px);
+  --radius-sm: var(--radius-sm, 8px);
+  --pill:      var(--radius-pill, 999px);
+}
+
+[data-theme="dark"] {
+  --app-bg:        #10112A;
+  --app-surface:   #181A38;
+  --app-subtle:    #1E2144;
+  --app-line:      #2C3060;
+  --app-line-soft: #23264B;
+  --app-fg:        #F4F6FB;
+  --app-fg-2:      #B9C0D6;
+  --app-fg-3:      #8A93AE;
+  --brand-blue:    #4D95FF;
+  --brand-pink:    #FF4D93;
+  --warn:          #F0A93B;
+  --day-we:        #1A1C3A;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  background: var(--app-bg);
+  color: var(--app-fg);
+  font-family: var(--font-family-sans, Poppins, system-ui, sans-serif);
+  font-size: 14px;
+  line-height: var(--line-height-normal, 1.5);
+  -webkit-font-smoothing: antialiased;
+}
+
+h1, h2, h3 { font-weight: var(--font-weight-light, 300); margin: 0; letter-spacing: -0.01em; }
+h1 { font-size: 20px; }
+h2 { font-size: 18px; }
+h3 { font-size: 15px; font-weight: var(--font-weight-semibold, 600); letter-spacing: 0; }
+
+a { color: var(--brand-blue); }
+
+.eyebrow {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 10px; font-weight: var(--font-weight-semibold, 600);
+  letter-spacing: 0.2em; text-transform: uppercase; color: var(--app-fg-3);
+}
+.eyebrow i { width: 5px; height: 5px; border-radius: 50%; background: var(--brand-pink); display: inline-block; }
+
+/* ───────── shell: sidebar + main column ───────── */
+
+.shell { display: grid; grid-template-columns: 248px minmax(0, 1fr); min-height: 100vh; }
+
+.sidebar {
+  display: flex; flex-direction: column; gap: 18px;
+  padding: 18px 16px; background: var(--app-surface);
+  border-right: 1px solid var(--app-line);
+  position: sticky; top: 0; height: 100vh; overflow-y: auto;
+}
+.sidebar > .brand { display: flex; align-items: center; gap: 11px; }
+/* The KMS mark, not a stand-in gradient.
+
+   Two files rather than one recoloured by CSS: the mark is a multi-path SVG
+   loaded through <img>, so `fill: currentColor` cannot reach inside it. The
+   blue mark (#245DB3) has too little contrast against the dark surface, so the
+   white one takes over with the theme — driven by the same `data-theme`
+   attribute the rest of the sheet uses, so it follows the toggle rather than
+   only the OS setting. */
+.sidebar > .brand .mark {
+  width: 26px; height: 26px; flex: none;
+  object-fit: contain;
+}
+[data-theme="dark"] .sidebar > .brand .mark { content: url("kms/kms-mark-white.svg"); }
+.sidebar > .brand h1 { font-size: 16px; }
+.team-picker > select { width: 100%; font-size: 13px; }
+
+/* Nav: two levels, the second indented under its section. */
+.nav { display: flex; flex-direction: column; gap: 1px; flex: 1; }
+.nav .group {
+  font-size: 9.5px; letter-spacing: 0.16em; text-transform: uppercase;
+  color: var(--app-fg-3); font-weight: var(--font-weight-semibold, 600);
+  padding: 14px 10px 5px;
+}
+.nav a {
+  display: flex; align-items: center; gap: 9px;
+  padding: 7px 10px; border-radius: var(--radius-sm);
+  font-size: 13px; color: var(--app-fg-2); text-decoration: none;
+  border-left: 2px solid transparent;
+}
+.nav a:hover { background: var(--app-subtle); color: var(--app-fg); }
+.nav a.active { background: color-mix(in srgb, var(--brand-blue) 10%, transparent); color: var(--brand-blue); font-weight: var(--font-weight-medium, 500); }
+.nav a.sub { padding-left: 24px; font-size: 12.5px; }
+.nav a.sub.active { border-left-color: var(--brand-blue); border-radius: 0 var(--radius-sm) var(--radius-sm) 0; }
+.nav .count {
+  margin-left: auto; font-size: 10.5px; color: var(--app-fg-3);
+  font-variant-numeric: tabular-nums; background: var(--app-subtle);
+  padding: 1px 7px; border-radius: var(--pill);
+}
+.nav a.active .count { background: transparent; color: inherit; }
+.nav .dot { width: 6px; height: 6px; border-radius: 50%; flex: none; }
+.nav .dot.active { background: var(--ok); }
+.nav .dot.future { background: var(--brand-blue); }
+.nav .dot.closed { background: var(--app-fg-3); }
+
+.sidebar-foot { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding-top: 14px; border-top: 1px solid var(--app-line-soft); }
+.sync-state { font-size: 10.5px; color: var(--app-fg-3); width: 100%; line-height: 1.4; }
+
+/* Top bar is now just breadcrumb + sprint context. */
+.main-col { display: flex; flex-direction: column; min-width: 0; }
+.topbar {
+  display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+  padding: 12px 24px; border-bottom: 1px solid var(--app-line);
+  background: var(--app-surface); position: sticky; top: 0; z-index: 20;
+}
+/* `hidden` must actually hide. Any `display:` rule outranks the attribute's UA
+   default, so an element given `display:flex` by its class stays on screen after
+   `el.hidden = true` — which is how the drawer overlay, and later the sprint
+   picker, kept rendering on pages that had explicitly hidden them. One rule
+   closes the whole class of bug rather than patching each component. */
+[hidden] { display: none !important; }
+
+.crumbs { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--app-fg-3); min-width: 0; }
+.crumbs b { color: var(--app-fg); font-weight: var(--font-weight-medium, 500); }
+.crumbs .sep { opacity: .5; }
+.field { display: flex; flex-direction: column; gap: 3px; }
+.field.inline { flex-direction: row; align-items: center; gap: 8px; }
+.field > span { font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--app-fg-3); }
+.menu-btn { display: none; }
+
+select, input[type="text"], input[type="number"], input[type="password"], input[type="file"], textarea {
+  font: inherit; font-size: 13px; color: var(--app-fg);
+  max-width: 100%; min-width: 0;
+  background: var(--app-bg); border: 1px solid var(--app-line);
+  border-radius: var(--radius-sm); padding: 6px 10px;
+}
+select:focus, input:focus, textarea:focus { outline: 2px solid var(--brand-blue); outline-offset: -1px; }
+textarea { width: 100%; resize: vertical; font-size: 13px; }
+
+.btn {
+  font: inherit; font-size: 13px; font-weight: var(--font-weight-medium, 500);
+  border-radius: var(--pill); padding: 7px 16px; cursor: pointer;
+  border: 1.5px solid transparent; background: var(--brand-blue); color: #fff;
+  box-shadow: none;                       /* house rule: buttons never carry a shadow */
+  transition: filter .12s ease;
+}
+.btn:hover { filter: brightness(1.08); }
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+.btn.ghost { background: transparent; color: var(--app-fg); border-color: var(--app-line); }
+.btn.pink { background: var(--brand-pink); }
+.btn.sm { padding: 4px 12px; font-size: 12px; }
+.btn.icon { padding: 4px 10px; }
+
+/* ───────── layout ───────── */
+
+main { padding: 24px; max-width: 1440px; width: 100%; }
+.loading { color: var(--app-fg-3); padding: 48px 0; text-align: center; }
+
+/* Loud on purpose: a stale server produces results that look right and are not. */
+.stale-banner {
+  margin: 0 0 4px; padding: 12px 16px; border-radius: var(--radius-sm);
+  background: var(--app-subtle); border-left: 3px solid var(--risk);
+  font-size: 13px; line-height: 1.5;
+}
+.stale-banner code {
+  background: var(--app-surface); padding: 1px 6px; border-radius: 4px;
+  font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px;
+}
+.section { margin-bottom: 28px; }
+.section-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
+.section-head .muted { font-size: 12px; color: var(--app-fg-3); }
+.spacer { flex: 1; }
+.row { display: flex; gap: 16px; flex-wrap: wrap; }
+.grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 16px; }
+.grid-3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
+/* Without this a grid item's min-content width wins and the row overflows its card. */
+.grid-2 > *, .grid-3 > *, .kpis > *, .conn-grid > * { min-width: 0; }
+
+/* Connection cards: a fixed 2×2 rather than auto-fit, so four cards never wrap
+   3 + 1 and leave a hole, and each field gets a sane amount of room. */
+.conn-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; align-items: start; }
+@media (max-width: 860px) { .conn-grid { grid-template-columns: minmax(0, 1fr); } }
+
+.card {
+  background: var(--app-surface); border: 1px solid var(--app-line);
+  border-radius: var(--radius); padding: 18px;
+}
+.card.featured { box-shadow: var(--shadow-brand, 0 8px 32px rgba(0,106,254,.18)); border-color: transparent; }
+.card h3 { margin-bottom: 4px; }
+.card .sub { font-size: 12px; color: var(--app-fg-3); margin-bottom: 14px; }
+
+/* KPI tiles — 800 weight is reserved for these figures */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+.kpi { background: var(--app-surface); border: 1px solid var(--app-line); border-radius: var(--radius); padding: 14px 16px; }
+.kpi .label { font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--app-fg-3); margin-bottom: 6px; }
+.kpi .value { font-size: 30px; font-weight: var(--font-weight-extrabold, 800); line-height: 1; letter-spacing: -0.02em; }
+.kpi .value.text {
+  font-size: 19px; font-weight: var(--font-weight-light, 300);
+  letter-spacing: -0.01em; line-height: 1.25;
+}
+.kpi .value small { font-size: 14px; font-weight: var(--font-weight-regular, 400); color: var(--app-fg-3); margin-left: 3px; letter-spacing: 0; }
+.kpi .foot { font-size: 11px; color: var(--app-fg-3); margin-top: 7px; }
+.kpi.t-ok .value    { color: var(--ok); }
+.kpi.t-warn .value  { color: var(--warn); }
+.kpi.t-risk .value  { color: var(--risk); }
+.kpi.t-brand .value { color: var(--brand-blue); }
+
+/* ───────── tables ───────── */
+
+.table-wrap { overflow-x: auto; border: 1px solid var(--app-line); border-radius: var(--radius); background: var(--app-surface); }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { padding: 9px 12px; text-align: left; border-bottom: 1px solid var(--app-line-soft); white-space: nowrap; }
+th {
+  font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--app-fg-3);
+  font-weight: var(--font-weight-semibold, 600); background: var(--app-subtle); position: sticky; top: 0; z-index: 2;
+}
+tbody tr:last-child td { border-bottom: none; }
+tbody tr:hover { background: color-mix(in srgb, var(--brand-blue) 4%, transparent); }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+td.wrap { white-space: normal; min-width: 260px; }
+tr.total td { font-weight: var(--font-weight-semibold, 600); background: var(--app-subtle); border-top: 2px solid var(--app-line); }
+tr.released td { opacity: .55; }
+
+.name-cell { display: flex; align-items: center; gap: 8px; }
+.avatar {
+  width: 24px; height: 24px; border-radius: 50%; flex: none;
+  display: grid; place-items: center; font-size: 10px; font-weight: 600; color: #fff;
+  background: var(--brand-blue);
+}
+
+/* ───────── small parts ───────── */
+
+.tag {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 11px; padding: 2px 9px; border-radius: var(--pill);
+  background: var(--app-subtle); color: var(--app-fg-2); border: 1px solid var(--app-line-soft);
+}
+.tag .dot { width: 7px; height: 7px; border-radius: 50%; }
+.tag.ok   { color: var(--ok);   border-color: color-mix(in srgb, var(--ok) 40%, transparent); }
+.tag.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, transparent); }
+.tag.risk { color: var(--risk); border-color: color-mix(in srgb, var(--risk) 40%, transparent); }
+
+.pct { font-variant-numeric: tabular-nums; font-weight: var(--font-weight-medium, 500); }
+.pct.over  { color: var(--risk); }
+.pct.under { color: var(--warn); }
+.pct.good  { color: var(--ok); }
+.muted { color: var(--app-fg-3); }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+
+/* An issue key that goes to Jira.
+
+   Deliberately NOT styled as a link at rest. These sit in dense tables — a
+   column of blue underlined keys turns the first column into the loudest thing
+   on the screen, and the key is a label you read far more often than a link you
+   click. It stays the same colour as the text around it and reveals itself on
+   hover, which is the moment the affordance is actually needed.
+
+   `a.issue-key` beats the bare `a { color: … }` rule on specificity. A key with
+   no Jira URL configured renders as a <span> and simply matches .mono. */
+
+/* ── type-to-filter component picker ──────────────────────────────────────
+   A native <select> cannot be searched by anything but the first characters
+   of an option, which is useless when 125 names all start "PS_" or "R&D_".
+   The list is absolutely positioned so opening it never reflows the card. */
+.combo { position: relative; }
+.combo-list {
+  position: absolute; top: 100%; left: 0; right: 0; z-index: 40;
+  margin-top: 4px; max-height: 320px; overflow-y: auto;
+  background: var(--app-bg); border: 1px solid var(--app-line);
+  border-radius: var(--radius-sm); box-shadow: 0 10px 28px rgba(0,0,0,.18);
+}
+.combo-opt {
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 7px 11px; cursor: pointer; font-size: 13px;
+}
+.combo-opt > strong { font-weight: 600; }
+.combo-opt .combo-fam { margin-left: auto; font-size: 11px; }
+/* `.on` is the keyboard cursor, `.active` is what is actually selected —
+   different things, and a list that conflates them is a list you get lost in. */
+.combo-opt.on { background: var(--app-subtle); }
+.combo-opt.active > strong { color: var(--brand-blue); }
+.combo-opt:hover { background: var(--app-subtle); }
+.combo-empty { padding: 10px 11px; font-size: 12px; }
+
+/* A component name links to Jira; the ⌖ beside it narrows this screen.
+
+   The name is NOT styled as a link at rest, for the same reason issue keys are
+   not: a column of blue in a 125-row table is the loudest thing on the page and
+   the name is read far more often than it is clicked. */
+.comp-cell { display: flex; align-items: center; gap: 6px; }
+a.comp-jira { color: inherit; text-decoration: none; border-bottom: 1px dotted var(--app-line); }
+a.comp-jira:hover, a.comp-jira:focus-visible { color: var(--brand-blue); border-bottom-color: currentColor; }
+.comp-filter {
+  border: none; background: none; cursor: pointer; padding: 0 3px;
+  color: var(--app-fg-3); font-size: 13px; line-height: 1; border-radius: 3px;
+  /* Hidden until the row is hovered or the button itself is focused, so 125
+     rows do not each carry a second glyph competing with the name. */
+  opacity: 0; transition: opacity .12s;
+}
+tr:hover .comp-filter, .comp-filter:focus-visible { opacity: 1; }
+.comp-filter:hover { color: var(--brand-blue); }
+a.comp-jira:focus-visible, .comp-filter:focus-visible { outline: 2px solid var(--brand-blue); outline-offset: 2px; }
+
+/* An expanded per-component breakdown sits inside the table it came from, so
+   it must not inherit the row padding or it reads as a cell. */
+tr.detail-row > td { background: var(--app-subtle); }
+tr.detail-row .card { margin: 10px; }
+
+a.issue-key { color: inherit; text-decoration: none; border-bottom: 1px dotted var(--app-line); }
+a.issue-key:hover,
+a.issue-key:focus-visible { color: var(--brand-blue); border-bottom-color: currentColor; }
+a.issue-key:focus-visible { outline: 2px solid var(--brand-blue); outline-offset: 2px; border-radius: 2px; }
+.tag a.issue-key { border-bottom: none; }
+.tag a.issue-key:hover { text-decoration: underline; }
+
+.bar { height: 6px; border-radius: var(--pill); background: var(--app-subtle); overflow: hidden; min-width: 60px; }
+.bar > i { display: block; height: 100%; background: var(--brand-blue); border-radius: var(--pill); }
+.bar.over > i { background: var(--risk); }
+.bar.under > i { background: var(--warn); }
+
+.rag { display: inline-flex; align-items: center; gap: 7px; font-weight: var(--font-weight-medium, 500); }
+.rag .dot { width: 10px; height: 10px; border-radius: 50%; }
+.rag.green .dot { background: var(--ok); }
+.rag.amber .dot { background: var(--warn); }
+.rag.red   .dot { background: var(--risk); }
+
+/* day availability grid */
+.daygrid { display: flex; gap: 2px; }
+.daygrid .day {
+  width: 26px; height: 26px; border-radius: 5px; border: 1px solid var(--app-line-soft);
+  display: grid; place-items: center; font-size: 10px; cursor: pointer; user-select: none;
+  background: var(--day-work); color: var(--app-fg-2);
+}
+.daygrid .day[data-v="0"]   { background: var(--day-off);  color: var(--risk); font-weight: 600; }
+.daygrid .day[data-v="0.5"] { background: var(--day-half); color: var(--risk); }
+.daygrid .day[data-v="H"]   { background: var(--day-hol);  color: var(--brand-purple); }
+.daygrid .day[data-v="WO"]  { background: var(--day-we);   color: var(--app-fg-3); cursor: default; }
+.daygrid .day:hover { outline: 1.5px solid var(--brand-blue); }
+.dayhead { display: flex; gap: 2px; margin-bottom: 4px; }
+.dayhead div { width: 26px; text-align: center; font-size: 9px; color: var(--app-fg-3); letter-spacing: .04em; }
+.dayhead div.we { color: var(--app-fg-3); opacity: .6; }
+
+.legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 11px; color: var(--app-fg-3); margin-top: 10px; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend i { width: 12px; height: 12px; border-radius: 3px; border: 1px solid var(--app-line-soft); display: inline-block; }
+
+/* flags / reasons */
+.reasons { list-style: none; padding: 0; margin: 10px 0 0; display: grid; gap: 8px; }
+.reasons li { display: flex; gap: 9px; font-size: 12.5px; line-height: 1.45; align-items: flex-start; }
+.reasons li::before { content: ''; width: 6px; height: 6px; border-radius: 50%; margin-top: 6px; flex: none; background: var(--app-fg-3); }
+.reasons li.risk::before { background: var(--risk); }
+.reasons li.warn::before { background: var(--warn); }
+.reasons li.ok::before   { background: var(--ok); }
+
+/* risk cards */
+.risk-card { border-left: 3px solid var(--app-line); padding: 14px 16px; background: var(--app-surface); border-radius: var(--radius-sm); border-top: 1px solid var(--app-line); border-right: 1px solid var(--app-line); border-bottom: 1px solid var(--app-line); }
+.risk-card.high   { border-left-color: var(--risk); }
+.risk-card.medium { border-left-color: var(--warn); }
+.risk-card.low    { border-left-color: var(--brand-blue); }
+.risk-card .title { font-weight: var(--font-weight-semibold, 600); font-size: 13.5px; margin-bottom: 5px; }
+.risk-card .detail { font-size: 12.5px; color: var(--app-fg-2); margin-bottom: 8px; line-height: 1.5; }
+.risk-card .action { font-size: 12.5px; display: flex; gap: 7px; align-items: flex-start; }
+.risk-card .action::before { content: '→'; color: var(--brand-blue); flex: none; }
+.risk-card .meta { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+
+/* mix bar */
+.mixbar { display: flex; height: 10px; border-radius: var(--pill); overflow: hidden; background: var(--app-subtle); }
+.mixbar > i { display: block; height: 100%; }
+.mixkey { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 10px; font-size: 12px; }
+.mixkey span { display: inline-flex; align-items: center; gap: 6px; }
+.mixkey i { width: 9px; height: 9px; border-radius: 2px; }
+
+/* drawer */
+/* The host page's reset gives [hidden] no weight against display:flex, so say it here. */
+/* (the global [hidden] rule near the top covers these — kept as documentation
+   of where the problem first showed up) */
+.drawer { position: fixed; inset: 0; background: rgba(16,17,42,.45); z-index: 50; display: flex; justify-content: flex-end; }
+.drawer-panel { background: var(--app-surface); width: min(560px, 94vw); height: 100%; overflow-y: auto; padding: 26px; position: relative; border-left: 1px solid var(--app-line); }
+.drawer-close { position: absolute; top: 14px; right: 16px; background: none; border: none; font-size: 26px; line-height: 1; cursor: pointer; color: var(--app-fg-3); }
+
+/* toast */
+.toast {
+  position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%);
+  background: var(--brand-navy); color: #fff; padding: 11px 20px;
+  border-radius: var(--pill); font-size: 13px; z-index: 90; max-width: 80vw;
+}
+.toast.err { background: var(--brand-pink); }
+
+/* filters */
+.filters { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; margin-bottom: 14px; }
+.btn-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
+.card { min-width: 0; overflow-wrap: break-word; }
+input[type="file"] { padding: 5px 8px; font-size: 12px; }
+.chip {
+  font: inherit; font-size: 12px; padding: 5px 13px; border-radius: var(--pill);
+  border: 1px solid var(--app-line); background: transparent; color: var(--app-fg-2); cursor: pointer;
+}
+.chip.active { background: var(--brand-blue); border-color: var(--brand-blue); color: #fff; }
+
+.empty { padding: 36px; text-align: center; color: var(--app-fg-3); font-size: 13px; }
+
+.setting-row {
+  display: grid; grid-template-columns: minmax(0, 1fr); gap: 5px;
+  padding: 10px 0; border-bottom: 1px solid var(--app-line-soft);
+}
+.setting-row:last-child { border-bottom: none; }
+.setting-row > label {
+  font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase;
+  color: var(--app-fg-3); font-weight: var(--font-weight-semibold, 600);
+}
+.setting-row > input, .setting-row > select, .setting-row > textarea { width: 100%; }
+.setting-row .hint { font-size: 11px; color: var(--app-fg-3); }
+/* Wide containers (the drawer, a full-width card) get the label beside the control. */
+@media (min-width: 1100px) {
+  .card.wide > .setting-row, .drawer-panel .setting-row {
+    grid-template-columns: minmax(0, 170px) minmax(0, 1fr); gap: 14px; align-items: center;
+  }
+  .card.wide > .setting-row .hint, .drawer-panel .setting-row .hint { grid-column: 2; }
+  /* Rows already sitting in a multi-column grid stay stacked — a label beside a
+     control inside a 1/3-width column is the same overflow bug in miniature. */
+  .card.wide .grid-2 .setting-row, .card.wide .grid-3 .setting-row {
+    grid-template-columns: minmax(0, 1fr); gap: 5px;
+  }
+  .card.wide .grid-2 .setting-row .hint, .card.wide .grid-3 .setting-row .hint { grid-column: 1; }
+}
+
+svg text { font-family: var(--font-family-sans, Poppins, system-ui, sans-serif); }
+
+/* Below 1000px the sidebar becomes a slide-over. */
+@media (max-width: 1000px) {
+  .shell { grid-template-columns: minmax(0, 1fr); }
+  .sidebar {
+    position: fixed; top: 0; left: 0; bottom: 0; width: 262px; z-index: 40;
+    transform: translateX(-100%); transition: transform .18s ease;
+    box-shadow: 0 0 40px rgba(0, 0, 0, .18);
+  }
+  .sidebar.open { transform: none; }
+  .menu-btn { display: inline-block; order: -1; }
+  main { padding: 16px; }
+  .topbar { padding: 12px 16px; gap: 12px; }
+}
+@media (max-width: 720px) {
+  .setting-row { grid-template-columns: 1fr; }
+  .crumbs { font-size: 12px; }
+}
+
+/* ─────────────────────── Search work items ─────────────────────── */
+
+.searchbar {
+  display: flex; flex-direction: column; gap: 12px;
+  padding: 14px 16px; border: 1px solid var(--app-line);
+  border-radius: var(--radius); background: var(--app-surface);
+}
+.searchbar-row { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
+.chips-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+
+/* The dropdown is positioned against its own chip, so the row can wrap freely. */
+.chip-wrap { position: relative; }
+.chip .caret { font-style: normal; opacity: .55; margin-left: 4px; font-size: 10px; }
+.chip.clear { border-style: dashed; }
+
+.facet-menu {
+  position: absolute; z-index: 40; top: calc(100% + 6px); left: 0;
+  min-width: 250px; max-width: 380px;
+  background: var(--app-surface); border: 1px solid var(--app-line);
+  border-radius: var(--radius); box-shadow: 0 10px 30px rgba(0, 0, 0, .14);
+  padding: 6px;
+}
+.facet-search {
+  width: 100%; margin-bottom: 6px; font-size: 12px; padding: 6px 8px;
+  border: 1px solid var(--app-line); border-radius: var(--radius-sm); background: var(--app-bg);
+  color: var(--app-fg);
+}
+.facet-list { max-height: 280px; overflow-y: auto; }
+.facet-opt {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 8px; border-radius: var(--radius-sm); cursor: pointer; font-size: 13px;
+}
+.facet-opt:hover { background: var(--app-subtle); }
+.facet-opt span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The count is the point of the menu — it says what is there before you click. */
+.facet-opt b { font-variant-numeric: tabular-nums; color: var(--app-fg-3); font-weight: 600; font-size: 11.5px; }
+.facet-clear {
+  width: 100%; margin-top: 4px; padding: 6px; font-size: 12px; cursor: pointer;
+  background: none; border: none; border-top: 1px solid var(--app-line-soft);
+  color: var(--brand-blue); font-family: inherit;
+}
+
+.raw-row { display: flex; flex-direction: column; gap: 8px; }
+.raw-row textarea {
+  width: 100%; max-width: 100%; font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12.5px; line-height: 1.6; padding: 10px 12px; resize: vertical;
+  border: 1px solid var(--app-line); border-radius: var(--radius-sm);
+  background: var(--app-bg); color: var(--app-fg);
+}
+.raw-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+
+.col-picker {
+  display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center;
+  padding: 10px 12px; border-radius: var(--radius-sm); background: var(--app-subtle);
+}
+.col-opt { display: flex; align-items: center; gap: 6px; font-size: 12.5px; cursor: pointer; }
+
+.result-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+.result-table th.sortable { cursor: pointer; user-select: none; }
+.result-table th.sortable:hover { color: var(--app-fg); }
+.result-table td.wrap { white-space: normal; min-width: 280px; }
+
+.pager { display: flex; align-items: center; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+
+.saved-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.saved-chip {
+  display: inline-flex; align-items: stretch;
+  border: 1px solid var(--app-line); border-radius: 999px; overflow: hidden; background: var(--app-surface);
+}
+.saved-chip button {
+  background: none; border: none; font: inherit; font-size: 12.5px;
+  padding: 6px 12px; cursor: pointer; color: var(--app-fg);
+}
+.saved-chip button:hover { background: var(--app-subtle); }
+.saved-chip .x { padding: 6px 10px; color: var(--app-fg-3); border-left: 1px solid var(--app-line-soft); }
+.saved-chip .x:hover { color: var(--risk); }
+
+@media (max-width: 700px) {
+  .facet-menu { min-width: 220px; max-width: calc(100vw - 48px); }
+}

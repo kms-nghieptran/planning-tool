@@ -1,0 +1,13 @@
+{
+  "name": "automation-planning-tool",
+  "version": "1.1.0",
+  "description": "Capacity, backlog, sprint health, forecast, delivery metrics and automation coverage for the Katalon automation teams",
+  "private": true,
+  "engines": {
+    "node": ">=22.5"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test/capacity.test.js && node test/insights.test.js && node test/reconcile.test.js && node test/metrics.test.js && node test/reset.test.js && node test/staleness.test.js && node test/search.test.js && node test/fields.test.js && node test/ui-wiring.test.js && node test/links.test.js && node test/coverage.test.js && node test/roster.test.js && node test/sprint-api.test.js && node test/epics.test.js && node test/db.test.js && node test/migrate.test.js"
+  }
+}
