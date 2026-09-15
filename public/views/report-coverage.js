@@ -91,7 +91,11 @@ const CoverageReport = (() => {
       }
     });
 
-    wirePicker(mount);
+    UI.wireCombo(mount, 'covSearch', (value) => {
+      component = value || null;
+      family = null;
+      App.refresh();
+    });
   }
 
   const share = (d) => (d.total ? Math.round((d.toolTotals.truetest.total / d.total) * 1000) / 10 : 0);
@@ -129,43 +133,30 @@ const CoverageReport = (() => {
   /* ── the component selector ───────────────────────────────────────── */
 
   /**
-   * A TYPE-TO-FILTER COMPONENT PICKER.
+   * The component picker, built on the shared `UI.combo`.
    *
-   * 125 components in a native <select> means scrolling a list the length of
-   * three screens to find PS_iGO_Nationwide. A browser's own type-ahead only
-   * matches from the START of the option, which is useless when every name in
-   * the list begins "PS_" or "R&D_".
-   *
-   * So: a text box that filters, and an option list underneath it. Filtering
-   * happens IN THE DOM, never through App.refresh() — a re-render would rebuild
-   * the input, lose focus and close the list on every keystroke.
+   * It started here, for 125 components a native <select> could not search;
+   * the team and sprint pickers then wanted the same thing, so the control
+   * moved into ui.js and this is now one caller of three. Behaviour — DOM
+   * filtering, mousedown selection, keyboard nav — lives there.
    */
   function picker(d) {
-    const label = d.component || '';
     return `
       <section class="section">
-        <div class="card" style="display:flex;gap:16px;align-items:flex-end;flex-wrap:wrap">
-          <label class="field combo" style="min-width:340px;position:relative">
-            <span>Component</span>
-            <input type="text" id="covSearch" autocomplete="off" spellcheck="false"
-              role="combobox" aria-expanded="false" aria-controls="covList" aria-autocomplete="list"
-              placeholder="All components (${d.components.length}) — type to search"
-              value="${UI.esc(label)}">
-            <div class="combo-list" id="covList" hidden>
-              <div class="combo-opt${d.component ? '' : ' active'}" data-component="" data-name="all components">
-                <strong>All components</strong> <span class="muted">${d.components.length}</span>
-              </div>
-              ${d.components.map(c => `
-                <div class="combo-opt${d.component === c.name ? ' active' : ''}"
-                     data-component="${UI.esc(c.name)}" data-name="${UI.esc(c.name.toLowerCase())}">
-                  <strong>${UI.esc(c.name)}</strong>
-                  <span class="muted">${c.count}</span>
-                  <span class="muted combo-fam">${UI.esc(c.family.split(' —')[0])}</span>
-                </div>`).join('')}
-              <div class="combo-empty muted" hidden>No component matches that</div>
-            </div>
-          </label>
-          <div style="flex:1;min-width:240px">
+        <div class="card picker-card">
+          ${UI.combo({
+            id: 'covSearch', label: 'Component',
+            value: d.component || '',
+            placeholder: `All components (${d.components.length}) — type to search`,
+            options: [
+              { value: '', label: 'All components', meta: String(d.components.length), active: !d.component },
+              ...d.components.map(c => ({
+                value: c.name, label: c.name, meta: String(c.count),
+                tag: c.family.split(' —')[0], active: d.component === c.name,
+              })),
+            ],
+          })}
+          <div class="picker-note">
             <div class="muted" style="font-size:12px">${UI.esc(d.basis)}</div>
             ${d.componentUnknown ? `<div class="tag warn" style="margin-top:6px">
               No component named "${UI.esc(d.componentRequested)}" — showing all instead
@@ -178,93 +169,6 @@ const CoverageReport = (() => {
             <button class="btn ghost sm" data-component="">Clear</button>` : ''}
         </div>
       </section>`;
-  }
-
-  /**
-   * Does this component name match what was typed?
-   *
-   * Tokenised and order-free, because the names are compound and nobody
-   * remembers which part comes first: "nlg igo" has to find PS_iGO_NLG, and
-   * "affirm morgan" has to find PS_AFFIRM_MorganStanley. A plain substring
-   * test finds neither. Separators in the query are treated as spaces so
-   * "ps_igo" and "ps igo" behave the same.
-   */
-  function matchComponent(name, query) {
-    const hay = String(name || '').toLowerCase();
-    const tokens = String(query || '').toLowerCase().split(/[\s_\-/]+/).filter(Boolean);
-    return tokens.every(t => hay.includes(t));
-  }
-
-  /** Wire the picker up. Called with the freshly rendered container. */
-  function wirePicker(mount) {
-    const input = UI.$('#covSearch', mount);
-    const list = UI.$('#covList', mount);
-    if (!input || !list) return;
-
-    const opts = () => UI.$$('.combo-opt', list);
-    const visible = () => opts().filter(o => !o.hidden);
-    const empty = UI.$('.combo-empty', list);
-
-    const open = () => { list.hidden = false; input.setAttribute('aria-expanded', 'true'); };
-    const close = () => { list.hidden = true; input.setAttribute('aria-expanded', 'false'); };
-
-    function filter() {
-      const q = input.value.trim();
-      for (const o of opts()) {
-        // "All components" stays offered while the box is empty, and drops out
-        // as soon as you are searching for something specific.
-        o.hidden = o.dataset.component === ''
-          ? Boolean(q)
-          : !matchComponent(o.dataset.name, q);
-      }
-      const n = visible().length;
-      if (empty) empty.hidden = n > 0;
-      mark(visible()[0] || null);
-    }
-
-    function mark(el) {
-      for (const o of opts()) o.classList.toggle('on', o === el);
-      if (el && el.scrollIntoView) el.scrollIntoView({ block: 'nearest' });
-    }
-
-    const choose = (el) => {
-      if (!el) return;
-      component = el.dataset.component || null;
-      family = null;
-      App.refresh();
-    };
-
-    input.addEventListener('focus', () => { input.select(); open(); filter(); });
-    input.addEventListener('input', () => { open(); filter(); });
-    // `blur` fires before a click on an option would land, so selection is wired
-    // to mousedown below and this only tidies up.
-    input.addEventListener('blur', () => setTimeout(close, 120));
-
-    input.addEventListener('keydown', (e) => {
-      const rows = visible();
-      const at = rows.findIndex(o => o.classList.contains('on'));
-      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-        e.preventDefault();
-        if (list.hidden) { open(); filter(); return; }
-        const next = e.key === 'ArrowDown' ? Math.min(at + 1, rows.length - 1) : Math.max(at - 1, 0);
-        mark(rows[next] || rows[0]);
-      } else if (e.key === 'Enter') {
-        e.preventDefault();
-        choose(rows[at] || rows[0]);
-      } else if (e.key === 'Escape') {
-        // Back to what is actually selected, not to empty — the box shows the
-        // current filter, and clearing the text would imply "all components".
-        input.value = component || '';
-        close();
-      }
-    });
-
-    list.addEventListener('mousedown', (e) => {
-      const el = e.target.closest('.combo-opt');
-      if (!el) return;
-      e.preventDefault();          // keep focus so blur does not race the choice
-      choose(el);
-    });
   }
 
   /* ── 1. overall automation status ─────────────────────────────────── */
@@ -388,7 +292,7 @@ const CoverageReport = (() => {
    */
   function toolColumn(t, row, total) {
     return `
-      <div style="flex:1;min-width:230px">
+      <div class="tool-col">
         <div class="eyebrow"><i style="background:${TOOL_COLOR[t.key]}"></i>${UI.esc(t.label)}</div>
         <div style="display:flex;align-items:baseline;gap:8px;margin:6px 0 10px">
           <span style="font-size:26px;font-weight:800;line-height:1">${UI.int(row.total)}</span>
@@ -516,7 +420,5 @@ const CoverageReport = (() => {
       </section>`;
   }
 
-  // `matchComponent` is exported so the search behaviour is unit-tested rather
-  // than only eyeballed in a browser — it is the whole picker in one function.
-  return { render, matchComponent };
+  return { render };
 })();

@@ -202,6 +202,215 @@ check('a selected component still has a way into Jira', () => {
   assert.match(picker, /componentSearchUrl/, 'no Jira link beside Clear');
 });
 
+/* ── the shared type-to-search picker ─────────────────────────────────── */
+
+check('SEARCH MATCHES ANY PART OF THE TEXT, IN ANY ORDER', () => {
+  // The reason the native <select> had to go from all three pickers: its
+  // type-ahead only matches the FIRST characters of an option, and every
+  // component begins "PS_"/"R&D_" while every sprint begins "Katalon ".
+  const UI = loadUI();
+  assert.ok(UI.matchText('PS_iGO_NLG', 'nlg'));
+  assert.ok(UI.matchText('Katalon Ruby Sprint 44', '44 ruby'), 'tokens in any order');
+  assert.ok(UI.matchText('PS_AFFIRM_MorganStanley', 'morgan'));
+  assert.ok(UI.matchText('PS_iGO_NLG', 'ps_igo'), 'separators count as spaces');
+  assert.ok(!UI.matchText('PS_iGO_NLG', 'nlg nationwide'), 'EVERY token must match');
+  assert.ok(UI.matchText('anything', ''), 'an empty query matches everything');
+});
+
+check('AN OPTION CAN BE HIDDEN FROM THE RESTING LIST BUT STILL FOUND BY TYPING', () => {
+  // This is what makes the sprint picker rest on active + future while still
+  // searching all 42. The markup has to carry the flag, or the behaviour has
+  // nowhere to live.
+  const UI = loadUI();
+  const html = UI.combo({
+    id: 'x', label: 'Sprint', value: 'S39',
+    options: [
+      { value: 'S39', label: 'Sprint 39', tag: 'active', active: true },
+      { value: 'S33', label: 'Sprint 33', tag: 'closed', hidden: true },
+    ],
+    note: '38 closed sprints — type to find them',
+  });
+  assert.match(html, /data-value="S33"[^>]*data-rest-hidden="1"/s, 'the closed one must be marked');
+  assert.ok(!/data-value="S39"[^>]*data-rest-hidden/s.test(html), 'the open one must not be');
+  assert.match(html, /combo-note[^>]*>38 closed sprints/, 'and the list says what it is holding back');
+  assert.match(html, /data-search="[^"]*closed[^"]*"/, 'the tag is searchable, so "closed" finds them');
+});
+
+check('OPENING A PICKER SHOWS THE OPTIONS, NOT JUST THE ONE ALREADY CHOSEN', () => {
+  // The input holds the current selection. Filtering by its value on focus
+  // gives a list of exactly one item and hides the note — which is what this
+  // did until a browser run showed 1 of 42 sprints and "note: (hidden)".
+  const ui = read(PUBLIC, 'ui.js');
+  const wire = ui.slice(ui.indexOf('function wireCombo'));
+  const onFocus = wire.slice(wire.indexOf("addEventListener('focus'"), wire.indexOf("addEventListener('blur'"));
+  assert.match(onFocus, /filter\(''\)/,
+    "focus must filter by '' — reading the box shows only the current selection");
+  assert.match(wire, /function filter\(q0\)/, 'filter has to accept an explicit query for that to be possible');
+});
+
+/**
+ * A DOM double just big enough to run `wireCombo` and read what it hid.
+ *
+ * The filtering rules are the feature — "rest on active and future, find
+ * everything by typing" — and asserting them against the SOURCE only proves
+ * the words are still there. This drives the real handlers.
+ */
+function driveCombo(options) {
+  const UI = loadUI();
+  const listeners = new Map();
+  const mk = (extra) => ({
+    hidden: false, dataset: {}, value: '', classList: {
+      _s: new Set(),
+      toggle(c, on) { if (on) this._s.add(c); else this._s.delete(c); },
+      contains(c) { return this._s.has(c); },
+      add(c) { this._s.add(c); },
+    },
+    addEventListener(t, fn) { listeners.set(`${extra && extra.tag}:${t}`, fn); },
+    setAttribute() {}, select() {}, scrollIntoView() {},
+    querySelector: () => ({ textContent: '' }),
+    ...extra,
+  });
+
+  const opts = options.map(o => {
+    const e = mk({});
+    e.dataset.search = o.search;
+    e.dataset.value = o.value;
+    if (o.hidden) e.dataset.restHidden = '1';
+    if (o.active) e.classList.add('active');
+    e.querySelector = () => ({ textContent: o.search });
+    return e;
+  });
+  const note = mk({ tag: 'note' });
+  const empty = mk({ tag: 'empty' });
+  const input = mk({ tag: 'input' });
+  const list = mk({
+    tag: 'list',
+    querySelector: (sel) => (sel === '.combo-empty' ? empty : sel === '.combo-note' ? note : null),
+    querySelectorAll: () => opts,
+  });
+  const root = { querySelector: (sel) => (sel.endsWith('List') ? list : input), querySelectorAll: () => [] };
+
+  let picked = null;
+  UI.wireCombo(root, 'x', (v) => { picked = v; });
+
+  return {
+    focus() { listeners.get('input:focus')(); return this; },
+    type(v) { input.value = v; listeners.get('input:input')(); return this; },
+    visible: () => opts.filter(o => !o.hidden).map(o => o.dataset.value),
+    noteShown: () => !note.hidden,
+    picked: () => picked,
+  };
+}
+
+const SPRINTS = [
+  { value: 'S42', search: 'katalon ruby sprint 42 planned' },
+  { value: 'S39', search: 'katalon ruby sprint 39 active', active: true },
+  { value: 'S33', search: 'katalon ruby sprint 33 closed', hidden: true },
+  { value: 'S12', search: 'katalon ruby sprint 12 closed', hidden: true },
+];
+
+check('AT REST THE SPRINT LIST SHOWS ONLY ACTIVE AND FUTURE', () => {
+  const c = driveCombo(SPRINTS).focus();
+  assert.deepStrictEqual(c.visible(), ['S42', 'S39'], 'closed sprints must not be in the resting list');
+  assert.ok(c.noteShown(), 'and the list has to say it is holding some back');
+});
+
+check('TYPING SEARCHES ALL SPRINTS, CLOSED ONES INCLUDED', () => {
+  // The other half of his ask, and the half a "hide closed" filter would break.
+  const c = driveCombo(SPRINTS).focus().type('33');
+  assert.deepStrictEqual(c.visible(), ['S33'], 'a closed sprint must be findable by typing');
+  assert.ok(!c.noteShown(), 'and the note about hidden entries goes away while searching');
+});
+
+check('searching by state finds them too', () => {
+  const c = driveCombo(SPRINTS).focus().type('closed');
+  assert.deepStrictEqual(c.visible(), ['S33', 'S12']);
+});
+
+check('THE CURRENT SELECTION IS ALWAYS IN THE LIST, EVEN IF ITS KIND RESTS HIDDEN', () => {
+  // Select a closed sprint: the box shows its name, so a list that cannot show
+  // it contradicts the control it belongs to.
+  const c = driveCombo([
+    { value: 'S42', search: 'sprint 42 planned' },
+    { value: 'S33', search: 'sprint 33 closed', hidden: true, active: true },
+  ]).focus();
+  assert.deepStrictEqual(c.visible(), ['S42', 'S33']);
+});
+
+check('and clearing the box brings the resting list back', () => {
+  const c = driveCombo(SPRINTS).focus().type('33');
+  assert.deepStrictEqual(c.visible(), ['S33']);
+  c.type('');
+  assert.deepStrictEqual(c.visible(), ['S42', 'S39'], 'an emptied box is the resting state again');
+});
+
+check('AN OPTION SHOWS ITS FULL TEXT ON ONE LINE', () => {
+  // The sprint box is ~270px in the topbar. Constraining the list to the
+  // control's width wrapped every option onto two lines — "Katalon Ruby
+  // Sprint / 42" — which is what a dropdown is for NOT doing.
+  const css = read(PUBLIC, 'styles.css');
+  // Anchored at the start of a line: `.sprint-picker .combo-list` also contains
+  // the substring ".combo-list {" and comes first in the file, so an unanchored
+  // indexOf reads the wrong rule and the check is meaningless.
+  const at = css.search(/^\.combo-list \{/m);
+  assert.ok(at > 0, 'the base .combo-list rule has gone');
+  const list = css.slice(at, css.indexOf('}', at));
+  assert.match(list, /width: max-content/, 'the panel must size to its longest row, not to the input');
+  assert.match(list, /min-width: 100%/, 'and never be narrower than the control it belongs to');
+  assert.match(list, /max-width: min\(/, 'while still fitting on a phone');
+  assert.ok(!/right: 0/.test(list), 'pinning both edges is what forced it to the input width');
+  assert.match(css, /\.combo-opt > strong \{[^}]*white-space: nowrap/, 'the name itself must not wrap');
+});
+
+check('THE OPTION LIST IS CHOSEN ON MOUSEDOWN, WHICH BEATS THE BLUR THAT CLOSES IT', () => {
+  // `blur` fires first and hides the list, so a click handler lands on nothing.
+  // The classic dropdown bug, and invisible in review.
+  const wire = read(PUBLIC, 'ui.js').slice(read(PUBLIC, 'ui.js').indexOf('function wireCombo'));
+  assert.match(wire, /list\.addEventListener\('mousedown'/);
+  assert.match(wire, /e\.preventDefault\(\)/);
+});
+
+check('NO AUTO-FIT GRID CAN BE WIDER THAN A PHONE', () => {
+  // `minmax(420px, 1fr)` forces a 420px track even when only ONE column fits,
+  // so raising that floor to make the two-up layout collapse sooner made every
+  // page scroll sideways on a 390px screen. `min(420px, 100%)` lets the last
+  // column fall back to the container. Caught by measuring, not by looking.
+  const css = read(PUBLIC, 'styles.css');
+  const bad = [...css.matchAll(/^(\.[\w-]+) \{[^}]*repeat\(auto-fit, minmax\((\d+)px/gm)]
+    .map(m => `${m[1]} has a hard ${m[2]}px floor`);
+  assert.deepStrictEqual(bad, [], `use minmax(min(Npx, 100%), 1fr):\n      ${bad.join('\n      ')}`);
+});
+
+check('A FLEX COLUMN THAT HOLDS A TABLE CAN SHRINK', () => {
+  // Without `min-width: 0` a flex item refuses to go narrower than its content,
+  // and the per-tool tables pushed the WHOLE PAGE sideways at 600px — 7px of
+  // horizontal scroll on every screen, found by measuring rather than looking.
+  assert.match(read(PUBLIC, 'styles.css'), /\.tool-col \{[^}]*min-width: 0/);
+});
+
+check('ALL THREE PICKERS USE THE ONE CONTROL', () => {
+  // It was written inside the Coverage view first. Two more copies is how the
+  // keyboard handling ends up subtly different on each screen.
+  const app = read(PUBLIC, 'app.js');
+  assert.match(app, /UI\.combo\(\{\s*\n?\s*id: 'teamSelect'/, 'the team picker');
+  assert.match(app, /id: 'sprintSelect'/, 'the sprint picker');
+  assert.match(read(VIEWS, 'report-coverage.js'), /id: 'covSearch'/, 'the component picker');
+  for (const [file, src] of [['app.js', app], ['report-coverage.js', read(VIEWS, 'report-coverage.js')]]) {
+    assert.ok(!/function wireCombo|function matchComponent/.test(src), `${file} has its own copy of the control`);
+  }
+});
+
+check('and no native select is left behind for team or sprint', () => {
+  const html = read(PUBLIC, 'index.html');
+  assert.ok(!/<select id="(teamSelect|sprintSelect)"/.test(html), 'the unsearchable controls must be gone');
+  assert.match(html, /id="teamPicker"/);
+  assert.match(html, /id="sprintPicker"/);
+  // The route handler hides the sprint picker on screens that are not sprint
+  // scoped; it referenced an element id that no longer existed, which threw on
+  // every render until a browser run caught it.
+  assert.match(read(PUBLIC, 'app.js'), /UI\.\$\('#sprintPicker'\)\.hidden/);
+});
+
 /* ── every screen the app promises actually exists ────────────────────── */
 
 /**

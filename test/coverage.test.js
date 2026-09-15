@@ -275,78 +275,26 @@ check('THIS SCREEN AND THE EXISTING REPORT CANNOT DISAGREE', () => {
 
 /* ── the component picker ─────────────────────────────────────────────── */
 
-/** Load the view the way the browser does, for its exported pure helpers. */
-function loadView() {
-  const vm = require('node:vm');
-  const ctx = { console, UI: new Proxy({}, { get: () => () => '' }), Charts: {}, App: {}, CSS: {} };
-  vm.createContext(ctx);
-  vm.runInContext(`${VIEW}\n;globalThis.__v = CoverageReport;`, ctx);
-  return ctx.__v;
-}
+/*
+ * The picker's own behaviour — tokenised search, DOM filtering, mousedown
+ * selection, keyboard navigation — moved into `UI.combo`/`UI.wireCombo` when
+ * the team and sprint pickers wanted the same control, and is checked in
+ * test/links.test.js. What belongs HERE is that this screen still uses it, and
+ * feeds it the right options.
+ */
 
-check('SEARCHING THE COMPONENT LIST MATCHES ANY PART OF THE NAME', () => {
-  // The whole reason the native <select> had to go: its type-ahead only matches
-  // from the START of an option, and 125 of his components begin "PS_" or
-  // "R&D_". Typing "nlg" has to find PS_iGO_NLG.
-  const { matchComponent } = loadView();
-  assert.ok(matchComponent('PS_iGO_NLG', 'nlg'));
-  assert.ok(matchComponent('PS_AFFIRM_MorganStanley', 'morgan'));
-  assert.ok(!matchComponent('PS_iGO_NLG', 'zzz'));
+check('THE COMPONENT PICKER IS THE SHARED SEARCHABLE CONTROL', () => {
+  assert.match(VIEW, /UI\.combo\(\{/, 'not its own private copy');
+  assert.match(VIEW, /id: 'covSearch'/);
+  assert.match(VIEW, /UI\.wireCombo\(mount, 'covSearch'/);
+  assert.ok(!/<select id="covComponent"/.test(VIEW), 'the unsearchable select must stay gone');
 });
 
-check('and it is case-insensitive and order-free', () => {
-  // Nobody remembers which half of a compound name comes first.
-  const { matchComponent } = loadView();
-  assert.ok(matchComponent('PS_iGO_NLG', 'NLG igo'), 'tokens in any order');
-  assert.ok(matchComponent('PS_iGO_NLG', 'ps nlg'));
-  assert.ok(matchComponent('R&D_Sig_Regression', 'REGRESSION sig'));
-  assert.ok(!matchComponent('PS_iGO_NLG', 'nlg nationwide'), 'every token must match, not just one');
-});
-
-check('a separator in the query is treated as a space', () => {
-  // "ps_igo" is what a person types when copying from Jira; "ps igo" is what
-  // they type from memory. Both have to work.
-  const { matchComponent } = loadView();
-  assert.ok(matchComponent('PS_iGO_NLG', 'ps_igo'));
-  assert.ok(matchComponent('PS_iGO_NLG', 'ps-igo'));
-  assert.ok(matchComponent('PS_iGO_NLG', 'ps/igo'));
-});
-
-check('an empty query matches everything', () => {
-  const { matchComponent } = loadView();
-  assert.ok(matchComponent('PS_iGO_NLG', ''));
-  assert.ok(matchComponent('PS_iGO_NLG', '   '));
-});
-
-check('THE PICKER IS A SEARCHABLE INPUT, NOT A PLAIN SELECT', () => {
-  assert.ok(!/<select id="covComponent"/.test(VIEW), 'the unsearchable select must be gone');
-  assert.match(VIEW, /<input type="text" id="covSearch"/);
-  assert.match(VIEW, /role="combobox"/, 'a listbox that screen readers cannot name is not a control');
-});
-
-check('TYPING FILTERS IN THE DOM AND NEVER THROUGH A RE-RENDER', () => {
-  // App.refresh() rebuilds the whole view. Calling it per keystroke would
-  // destroy the input, lose focus and close the list — the control would be
-  // unusable after exactly one character.
-  const wire = VIEW.slice(VIEW.indexOf('function wirePicker'), VIEW.indexOf('/* ── 1. overall'));
-  const onInput = wire.slice(wire.indexOf("addEventListener('input'"), wire.indexOf("addEventListener('input'") + 120);
-  assert.ok(!/App\.refresh/.test(onInput), 'filtering must not refresh — it would eat the keystroke');
-  assert.match(wire, /function filter\(\)/);
-  assert.match(wire, /App\.refresh\(\)/, 'but CHOOSING one does refresh');
-});
-
-check('the option list is chosen on mousedown, which beats the blur that closes it', () => {
-  // `blur` fires first and hides the list, so a click handler would land on
-  // nothing. This is the classic dropdown bug and it is invisible in review.
-  const wire = VIEW.slice(VIEW.indexOf('function wirePicker'));
-  assert.match(wire, /list\.addEventListener\('mousedown'/);
-  assert.match(wire, /e\.preventDefault\(\)/);
-});
-
-check('the keyboard can reach it: arrows, Enter, Escape', () => {
-  const wire = VIEW.slice(VIEW.indexOf('function wirePicker'));
-  for (const key of ['ArrowDown', 'ArrowUp', 'Enter', 'Escape']) {
-    assert.ok(wire.includes(`'${key}'`), `${key} is unhandled — the picker is mouse-only`);
+check('and it is offered every product component, plus "All"', async () => {
+  const { html, payload } = await renderHtml({});
+  assert.ok(html.includes('<strong>All components</strong>'), 'no way back to everything');
+  for (const c of payload.components) {
+    assert.ok(html.includes(`data-value="${c.name.replace(/&/g, '&amp;')}"`), `${c.name} is not in the list`);
   }
 });
 
@@ -408,7 +356,13 @@ async function renderHtml(opts = {}) {
   const vm = require('node:vm');
   const payload = { ...cov.view(fixture(), opts), project: 'AUTOKAT' };
   let html = '';
-  const el = () => ({ addEventListener() {}, value: '', hidden: false, dataset: {}, setAttribute() {}, classList: { toggle() {}, contains: () => false }, select() {} });
+  // Every fake element is itself queryable: wireCombo looks the list up inside
+  // the mount, then the options inside the list.
+  const el = () => ({
+    addEventListener() {}, value: '', hidden: false, dataset: {}, setAttribute() {},
+    classList: { toggle() {}, contains: () => false }, select() {},
+    querySelector: () => el(), querySelectorAll: () => [],
+  });
   const ctx = {
     console, Promise, setTimeout, encodeURIComponent, CSS: { escape: String },
     App: { refresh() {} },
@@ -421,12 +375,17 @@ async function renderHtml(opts = {}) {
   // helper the view had started using, which says nothing about the view.
   vm.runInContext(`${fs.readFileSync(path.join(__dirname, '..', 'public', 'ui.js'), 'utf8')}\n;globalThis.UI = UI;`, ctx);
   ctx.UI.setJiraBase('https://ipipelinejira.atlassian.net');
-  ctx.UI.$ = () => el();
-  ctx.UI.$$ = () => [];
   ctx.UI.api = async () => payload;
 
   vm.runInContext(`${VIEW}\n;globalThis.__v = CoverageReport;`, ctx);
-  const mount = { style: {}, addEventListener() {}, set innerHTML(v) { html = v; }, get innerHTML() { return html; } };
+  // `wireCombo` closes over ui.js's own `$`, which calls `root.querySelector` —
+  // overriding `UI.$` from outside cannot reach it. The mount has to be
+  // DOM-shaped, which is more faithful than a stub anyway.
+  const mount = {
+    style: {}, addEventListener() {},
+    querySelector: () => el(), querySelectorAll: () => [],
+    set innerHTML(v) { html = v; }, get innerHTML() { return html; },
+  };
   await ctx.__v.render({}, mount);
   return { html, payload };
 }

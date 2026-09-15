@@ -184,5 +184,151 @@ const UI = (() => {
     return jiraSearch(`${parts.join(' AND ')} ORDER BY created DESC`);
   }
 
-  return { esc, el, $, $$, num, pct, int, date, dateTime, ago, initials, avatar, personColor, workloadClass, toast, drawer, closeDrawer, api, jsonPut, jsonPost, jsonDelete, kpi, bar, mixBar, pointsFieldNote, CATEGORY_COLORS, setJiraBase, issueUrl, issueKey, issueKeys, jiraSearch, componentSearchUrl };
+  /* ── a type-to-search picker ───────────────────────────────────────────
+     Built for the Coverage screen's 125 components and then wanted by the team
+     and sprint pickers too, so it lives here rather than in one view. A native
+     <select> cannot be searched by anything but the FIRST characters of an
+     option, which is useless when every component starts "PS_" or every sprint
+     starts "Katalon ".
+
+     Two halves: `combo()` renders the markup, `wireCombo()` gives it behaviour.
+     They are separate because views build their HTML as one string and attach
+     listeners afterwards, which is also what makes the fresh-container render
+     loop safe. */
+
+  /**
+   * Does this text match what was typed?
+   *
+   * Tokenised and order-free: "nlg igo" finds PS_iGO_NLG, "44 ruby" finds
+   * "Katalon Ruby Sprint 44". Separators in the query count as spaces, so
+   * "ps_igo" and "ps igo" behave the same. A plain substring test finds
+   * neither, and that is the whole reason the native control was replaced.
+   */
+  const matchText = (hay, query) => {
+    const h = String(hay == null ? '' : hay).toLowerCase();
+    return String(query || '').toLowerCase().split(/[\s_\-/]+/).filter(Boolean).every(t => h.includes(t));
+  };
+
+  /**
+   * @param {object} o
+   * @param {string} o.id        input id; the list becomes `${id}List`
+   * @param {string} o.label     field label above the box
+   * @param {string} o.value     the current selection's display text
+   * @param {string} o.placeholder
+   * @param {Array}  o.options   {value, label, meta, tag, hidden, active}
+   *                             `hidden` keeps an option OUT of the resting
+   *                             list but still findable by typing.
+   * @param {string} o.note      one line under the list, e.g. what is hidden
+   * @param {string} o.cls       extra classes on the wrapping label
+   */
+  function combo(o) {
+    const opt = (c) => `
+      <div class="combo-opt${c.active ? ' active' : ''}"
+           data-value="${esc(c.value == null ? '' : c.value)}"
+           data-search="${esc([c.label, c.meta, c.tag].filter(Boolean).join(' ').toLowerCase())}"
+           ${c.hidden ? 'data-rest-hidden="1"' : ''}>
+        <strong>${esc(c.label)}</strong>
+        ${c.meta ? `<span class="muted">${esc(c.meta)}</span>` : ''}
+        ${c.tag ? `<span class="muted combo-fam">${esc(c.tag)}</span>` : ''}
+      </div>`;
+    return `
+      <label class="field combo${o.cls ? ` ${o.cls}` : ''}">
+        ${o.label ? `<span>${esc(o.label)}</span>` : ''}
+        <input type="text" id="${esc(o.id)}" autocomplete="off" spellcheck="false"
+          role="combobox" aria-expanded="false" aria-controls="${esc(o.id)}List" aria-autocomplete="list"
+          placeholder="${esc(o.placeholder || 'Type to search')}" value="${esc(o.value || '')}">
+        <div class="combo-list" id="${esc(o.id)}List" hidden>
+          ${(o.options || []).map(opt).join('')}
+          <div class="combo-empty muted" hidden>Nothing matches that</div>
+          ${o.note ? `<div class="combo-note muted">${esc(o.note)}</div>` : ''}
+        </div>
+      </label>`;
+  }
+
+  /**
+   * @param {Element} root   where to look the combo up
+   * @param {string}  id     the input id passed to combo()
+   * @param {function} onPick called with the chosen option's value
+   */
+  function wireCombo(root, id, onPick) {
+    const input = $(`#${id}`, root);
+    const list = $(`#${id}List`, root);
+    if (!input || !list) return;
+
+    const opts = () => $$('.combo-opt', list);
+    const shown = () => opts().filter(o => !o.hidden);
+    const empty = $('.combo-empty', list);
+    const note = $('.combo-note', list);
+
+    const open = () => { list.hidden = false; input.setAttribute('aria-expanded', 'true'); };
+    const close = () => { list.hidden = true; input.setAttribute('aria-expanded', 'false'); };
+
+    /**
+     * @param {string|null} q  the query to filter by; null means "read the box"
+     *
+     * Focus passes '' rather than letting it read the box, because the box
+     * holds the CURRENT SELECTION. Filtering by that shows a list of exactly
+     * one item — the thing already chosen — and hides the note explaining what
+     * is being left out. Opening a picker has to show you the options.
+     */
+    function filter(q0) {
+      const q = (q0 == null ? input.value : q0).trim();
+      for (const o of opts()) {
+        // With an empty box, options marked `data-rest-hidden` stay out of the
+        // list — that is how the sprint picker shows active and future only.
+        // The moment you type, EVERYTHING is searchable, including them, which
+        // is the whole point: hidden from the resting list, not from search.
+        // The current selection is always visible, or the box would show a
+        // value the list does not contain.
+        o.hidden = q
+          ? !matchText(o.dataset.search, q)
+          : (o.dataset.restHidden === '1' && !o.classList.contains('active'));
+      }
+      const n = shown().length;
+      if (empty) empty.hidden = n > 0;
+      if (note) note.hidden = Boolean(q);
+      mark(shown()[0] || null);
+    }
+
+    function mark(el2) {
+      for (const o of opts()) o.classList.toggle('on', o === el2);
+      if (el2 && el2.scrollIntoView) el2.scrollIntoView({ block: 'nearest' });
+    }
+
+    const choose = (el2) => { if (el2) onPick(el2.dataset.value); };
+
+    input.addEventListener('focus', () => { input.select(); open(); filter(''); });
+    input.addEventListener('input', () => { open(); filter(); });
+    // `blur` fires BEFORE a click on an option would land, so choosing is wired
+    // to mousedown below and this only tidies up.
+    input.addEventListener('blur', () => setTimeout(close, 130));
+
+    input.addEventListener('keydown', (e) => {
+      const rows = shown();
+      const at = rows.findIndex(o => o.classList.contains('on'));
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        if (list.hidden) { open(); filter(''); return; }
+        mark(rows[e.key === 'ArrowDown' ? Math.min(at + 1, rows.length - 1) : Math.max(at - 1, 0)] || rows[0]);
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        choose(rows[at] || rows[0]);
+      } else if (e.key === 'Escape') {
+        // Back to what is selected, not to empty: an empty box would imply a
+        // selection the app has not made.
+        const active = opts().find(o => o.classList.contains('active'));
+        input.value = active ? active.querySelector('strong').textContent.trim() : '';
+        close();
+      }
+    });
+
+    list.addEventListener('mousedown', (e) => {
+      const el2 = e.target.closest('.combo-opt');
+      if (!el2) return;
+      e.preventDefault();       // keep focus, so blur does not race the choice
+      choose(el2);
+    });
+  }
+
+  return { esc, el, $, $$, num, pct, int, date, dateTime, ago, initials, avatar, personColor, workloadClass, toast, drawer, closeDrawer, api, jsonPut, jsonPost, jsonDelete, kpi, bar, mixBar, pointsFieldNote, CATEGORY_COLORS, setJiraBase, issueUrl, issueKey, issueKeys, jiraSearch, componentSearchUrl, combo, wireCombo, matchText };
 })();

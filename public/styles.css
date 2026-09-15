@@ -110,7 +110,15 @@ a { color: var(--brand-blue); }
 }
 [data-theme="dark"] .sidebar > .brand .mark { content: url("kms/kms-mark-white.svg"); }
 .sidebar > .brand h1 { font-size: 16px; }
-.team-picker > select { width: 100%; font-size: 13px; }
+.team-picker .combo { width: 100%; }
+.team-picker input { width: 100%; font-size: 13px; }
+/* The sprint picker sits in the topbar; its list must not stretch the header,
+   so it is anchored to the control and allowed to be wider than it. */
+.sprint-picker { min-width: 0; }
+.sprint-picker .combo { flex-direction: row; align-items: center; gap: 8px; }
+.sprint-picker .combo > span { white-space: nowrap; }
+.sprint-picker input { min-width: 210px; font-size: 13px; }
+.sprint-picker .combo-list { right: 0; left: auto; }
 
 /* Nav: two levels, the second indented under its section. */
 .nav { display: flex; flex-direction: column; gap: 1px; flex: 1; }
@@ -208,8 +216,16 @@ main { padding: 24px; max-width: 1440px; width: 100%; }
 .section-head .muted { font-size: 12px; color: var(--app-fg-3); }
 .spacer { flex: 1; }
 .row { display: flex; gap: 16px; flex-wrap: wrap; }
-.grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 16px; }
-.grid-3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
+/* 420px, not 340: at 340 a two-column split survives down to ~700px and the
+   cards inside it — tables, prose, mix bars — are unreadable long before that.
+   Raising the floor makes the pair collapse to one column while each half is
+   still wide enough to be worth reading. */
+/* `min(Npx, 100%)`, never a bare minmax floor: `minmax(420px, 1fr)` forces a
+   420px track even when only ONE column fits, so on a 390px phone the grid is
+   wider than the screen and the whole page scrolls sideways. The min() lets the
+   single column fall back to the container's width. */
+.grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); gap: 16px; }
+.grid-3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr)); gap: 16px; }
 /* Without this a grid item's min-content width wins and the row overflows its card. */
 .grid-2 > *, .grid-3 > *, .kpis > *, .conn-grid > * { min-width: 0; }
 
@@ -227,7 +243,7 @@ main { padding: 24px; max-width: 1440px; width: 100%; }
 .card .sub { font-size: 12px; color: var(--app-fg-3); margin-bottom: 14px; }
 
 /* KPI tiles — 800 weight is reserved for these figures */
-.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(150px, 100%), 1fr)); gap: 12px; }
 .kpi { background: var(--app-surface); border: 1px solid var(--app-line); border-radius: var(--radius); padding: 14px 16px; }
 .kpi .label { font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--app-fg-3); margin-bottom: 6px; }
 .kpi .value { font-size: 30px; font-weight: var(--font-weight-extrabold, 800); line-height: 1; letter-spacing: -0.02em; }
@@ -301,7 +317,14 @@ tr.released td { opacity: .55; }
    The list is absolutely positioned so opening it never reflows the card. */
 .combo { position: relative; }
 .combo-list {
-  position: absolute; top: 100%; left: 0; right: 0; z-index: 40;
+  position: absolute; top: 100%; left: 0; z-index: 40;
+  /* Sized to its CONTENT, not to the input. The sprint box is 270px in the
+     topbar, and constraining the list to that wrapped every option onto two
+     lines — "Katalon Ruby Sprint / 42". `max-content` lets the panel be as wide
+     as its longest row; `min-width: 100%` keeps it at least as wide as the
+     control; the max-width stops a long name pushing it off a phone. */
+  width: max-content; min-width: 100%;
+  max-width: min(560px, calc(100vw - 32px));
   margin-top: 4px; max-height: 320px; overflow-y: auto;
   background: var(--app-bg); border: 1px solid var(--app-line);
   border-radius: var(--radius-sm); box-shadow: 0 10px 28px rgba(0,0,0,.18);
@@ -310,8 +333,23 @@ tr.released td { opacity: .55; }
   display: flex; align-items: baseline; gap: 8px;
   padding: 7px 11px; cursor: pointer; font-size: 13px;
 }
-.combo-opt > strong { font-weight: 600; }
+/* The name is the thing you are reading; it never wraps. The columns after it
+   are supporting detail and may shrink. */
+.combo-opt > strong { font-weight: 600; white-space: nowrap; }
+.combo-opt > .muted { white-space: nowrap; }
 .combo-opt .combo-fam { margin-left: auto; font-size: 11px; }
+.combo-note { padding: 8px 11px; font-size: 11.5px; border-top: 1px solid var(--app-line-soft); }
+/* The picker row: box, explanation, actions. Wraps rather than squashing the
+   box, because a search field narrower than its own placeholder is useless. */
+.picker-card { display: flex; gap: 16px; align-items: flex-end; flex-wrap: wrap; }
+.picker-card > .combo { min-width: 340px; flex: 1 1 340px; }
+.picker-note { flex: 1 1 240px; min-width: 0; }
+
+/* One tool's status table inside the side-by-side breakdown.
+   `min-width: 0` is the load-bearing part: without it a flex item refuses to
+   shrink below its content, and the table pushes the whole page sideways at
+   narrow widths — 7px of horizontal scroll on the entire app. */
+.tool-col { flex: 1 1 230px; min-width: 0; overflow-x: auto; }
 /* `.on` is the keyboard cursor, `.active` is what is actually selected —
    different things, and a list that conflates them is a list you get lost in. */
 .combo-opt.on { background: var(--app-subtle); }

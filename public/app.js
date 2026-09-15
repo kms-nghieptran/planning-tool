@@ -136,7 +136,7 @@ const App = (() => {
     ].join(' ');
 
     // The sprint picker only belongs on views that are about one sprint.
-    UI.$('#sprintField').hidden = !r.sprintScoped;
+    UI.$('#sprintPicker').hidden = !r.sprintScoped;
   }
 
   function groupOf(id) {
@@ -150,14 +150,50 @@ const App = (() => {
 
   /* ─────────────────────────── context pickers ─────────────────────────── */
 
+  /**
+   * The team and sprint pickers.
+   *
+   * Both are type-to-search rather than native <select>s: the sprint list runs
+   * to hundreds of entries across seven boards, and a browser's own type-ahead
+   * only matches the FIRST characters of an option — useless when every sprint
+   * begins "Katalon ".
+   *
+   * THE SPRINT LIST RESTS ON ACTIVE + FUTURE. Closed sprints are the bulk of
+   * the list and almost never what you are reaching for, but they are exactly
+   * what you want when you go looking. So they are marked `hidden`: out of the
+   * resting list, found the moment you type. The note under the list says so,
+   * because a list that silently omits most of its contents is a list you stop
+   * trusting.
+   */
   function fillSelects() {
+    const teamHost = UI.$('#teamPicker');
+    const sprintHost = UI.$('#sprintPicker');
     if (!state.teams.length) {
-      UI.$('#teamSelect').innerHTML = '<option>— no teams yet —</option>';
-      UI.$('#sprintSelect').innerHTML = '<option>— sync Jira first —</option>';
+      teamHost.innerHTML = '<div class="muted" style="font-size:12px">— no teams yet —</div>';
+      sprintHost.innerHTML = '<div class="muted" style="font-size:12px">— sync Jira first —</div>';
       return;
     }
-    UI.$('#teamSelect').innerHTML = state.teams
-      .map(t => `<option value="${t.id}"${t.id === state.teamId ? ' selected' : ''}>${UI.esc(t.jiraName || t.name)}</option>`).join('');
+
+    const team = state.teams.find(t => t.id === state.teamId);
+    teamHost.innerHTML = UI.combo({
+      id: 'teamSelect', label: 'Team',
+      value: team ? (team.jiraName || team.name) : '',
+      placeholder: `${state.teams.length} teams — type to search`,
+      options: state.teams.map(t => ({
+        value: t.id,
+        label: t.jiraName || t.name,
+        meta: (state.teamIndex[t.id] || {}).members ? `${state.teamIndex[t.id].members} people` : '',
+        active: t.id === state.teamId,
+      })),
+    });
+    UI.wireCombo(teamHost, 'teamSelect', (id) => {
+      if (!id || id === state.teamId) return;
+      state.teamId = id;
+      localStorage.setItem('pt-team', id);
+      const active = (state.currentSprintByTeam || {})[state.teamId];
+      if (active) { state.sprintId = active; localStorage.setItem('pt-sprint', active); }
+      fillSelects(); renderNav(); refresh();
+    });
 
     // This team's own Jira sprints; local cadence guesses only when it has none.
     const mine = state.sprints.filter(sp => (sp.byTeam || {})[state.teamId]);
@@ -165,13 +201,39 @@ const App = (() => {
       ? mine.concat(state.sprints.filter(sp => sp.id === state.sprintId && !(sp.byTeam || {})[state.teamId]))
       : state.sprints;
 
-    // Newest first, by date — a date-named sprint has no number to sort on.
-    UI.$('#sprintSelect').innerHTML = list.slice().sort(newestFirst).map(sp => {
-      const t = (sp.byTeam || {})[state.teamId] || {};
-      const badge = t.state === 'active' ? ' · active' : t.state === 'closed' ? ' · closed'
-        : t.state === 'future' ? ' · planned' : ' · not in Jira';
-      return `<option value="${sp.id}"${sp.id === state.sprintId ? ' selected' : ''}>${UI.esc(t.name || sp.name)} (${UI.date(t.start || sp.start)}–${UI.date(t.end || sp.end)})${badge}</option>`;
-    }).join('');
+    const sorted = list.slice().sort(newestFirst);
+    const current = sorted.find(sp => sp.id === state.sprintId);
+    const stateOf = (sp) => ((sp.byTeam || {})[state.teamId] || {}).state;
+    const restingCount = sorted.filter(sp => stateOf(sp) === 'active' || stateOf(sp) === 'future').length;
+    const closedCount = sorted.length - restingCount;
+
+    sprintHost.innerHTML = UI.combo({
+      id: 'sprintSelect', label: 'Sprint', cls: 'inline',
+      value: current ? sprintLabel(current, (current.byTeam || {})[state.teamId]) : '',
+      placeholder: `${sorted.length} sprints — type to search`,
+      note: closedCount ? `${closedCount} closed sprint${closedCount > 1 ? 's' : ''} — type to find them` : '',
+      options: sorted.map(sp => {
+        const t = (sp.byTeam || {})[state.teamId] || {};
+        const tag = t.state === 'active' ? 'active' : t.state === 'closed' ? 'closed'
+          : t.state === 'future' ? 'planned' : 'not in Jira';
+        return {
+          value: sp.id,
+          label: sprintLabel(sp, t),
+          meta: `${UI.date(t.start || sp.start)}–${UI.date(t.end || sp.end)}`,
+          tag,
+          // Everything that is not active or future rests out of sight. A
+          // sprint with no Jira state is a local guess, and equally noisy.
+          hidden: !(t.state === 'active' || t.state === 'future'),
+          active: sp.id === state.sprintId,
+        };
+      }),
+    });
+    UI.wireCombo(sprintHost, 'sprintSelect', (id) => {
+      if (!id || id === state.sprintId) return;
+      state.sprintId = id;
+      localStorage.setItem('pt-sprint', id);
+      refresh();
+    });
   }
 
   /** Most recent sprint first. Mirrors reconcile.compareSprints, reversed. */
@@ -217,19 +279,7 @@ const App = (() => {
       UI.$('#sidebar').classList.remove('open');
     });
 
-    UI.$('#teamSelect').addEventListener('change', e => {
-      state.teamId = e.target.value;
-      localStorage.setItem('pt-team', state.teamId);
-      const active = (state.currentSprintByTeam || {})[state.teamId];
-      if (active) { state.sprintId = active; localStorage.setItem('pt-sprint', active); }
-      fillSelects(); renderNav(); refresh();
-    });
-
-    UI.$('#sprintSelect').addEventListener('change', e => {
-      state.sprintId = e.target.value;
-      localStorage.setItem('pt-sprint', state.sprintId);
-      refresh();
-    });
+    // Team and sprint are wired by fillSelects(), which rebuilds both pickers.
 
     UI.$('#menuBtn').addEventListener('click', () => UI.$('#sidebar').classList.toggle('open'));
 
