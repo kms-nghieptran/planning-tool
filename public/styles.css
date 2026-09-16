@@ -207,7 +207,19 @@ textarea { width: 100%; resize: vertical; font-size: 13px; }
 .btn.ghost { background: transparent; color: var(--app-fg); border-color: var(--app-line); }
 .btn.pink { background: var(--brand-pink); }
 .btn.sm { padding: 4px 12px; font-size: 12px; }
+.btn.xs { padding: 1px 8px; font-size: 12px; line-height: 1.5; }
 .btn.icon { padding: 4px 10px; }
+
+/* Rule editor. The controls sit inside table cells, so they shed the default
+   block sizing and the row keeps a normal table rhythm. The value column gets a
+   floor because a rule is unreadable when its value is three characters wide. */
+.rules-table td { vertical-align: middle; }
+.rules-table select,
+.rules-table input[type="text"] { padding: 3px 8px; font-size: 12px; width: 100%; min-width: 0; }
+.rules-table td:nth-child(4) { min-width: 180px; }
+.rules-table .rule-wins { white-space: nowrap; }
+.rules-table .rule-ops { white-space: nowrap; text-align: right; }
+.rules-table .rule-ops .btn { margin-left: 4px; }
 
 /* ───────── layout ───────── */
 
@@ -476,6 +488,41 @@ a.issue-key:focus-visible { outline: 2px solid var(--brand-blue); outline-offset
 .reasons li.warn::before { background: var(--warn); }
 .reasons li.ok::before   { background: var(--ok); }
 
+/* Coverage movement — the delta headline above the trend chart.
+   The number is the point of the section, so it carries the stat weight and the
+   direction is in the glyph rather than in colour alone. */
+.move-head { display: flex; align-items: baseline; gap: 18px; flex-wrap: wrap; margin: 14px 0 10px; }
+.move-delta { display: flex; align-items: baseline; gap: 6px; color: var(--app-fg-3); }
+.move-delta.up { color: var(--ok); }
+.move-delta.down { color: var(--risk); }
+.move-arrow { font-size: 20px; line-height: 1; }
+.move-value { font-size: 30px; font-weight: 800; line-height: 1; letter-spacing: -.5px; }
+.move-delta small { font-size: 12px; font-weight: 500; }
+.move-from { font-size: 13px; color: var(--app-fg-2); }
+.move-buckets { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 12px; }
+
+/* Findings — the "Major risks & attention" list on Coverage.
+   Each one is a claim with its own number beside it, so the severity stripe
+   carries the ranking and the type stays plain: colour ranks, it does not shout. */
+.findings { list-style: none; padding: 0; margin: 14px 0 0; display: grid; gap: 10px; }
+.finding {
+  border: 1px solid var(--app-line); border-left: 3px solid var(--app-fg-3);
+  border-radius: var(--radius-sm); padding: 11px 14px; background: var(--app-surface);
+}
+.finding.sev-risk  { border-left-color: var(--risk); }
+.finding.sev-watch { border-left-color: var(--warn); }
+.finding.sev-note  { border-left-color: var(--app-line); }
+.finding-head { display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap; }
+.finding-head strong { font-size: 13.5px; }
+.finding-value { font-size: 19px; font-weight: 800; line-height: 1; white-space: nowrap; }
+.finding-value small { font-size: 11.5px; font-weight: 500; color: var(--app-fg-3); margin-left: 4px; }
+.finding-detail { margin: 7px 0 0; font-size: 12.5px; line-height: 1.5; color: var(--app-fg-2); }
+.finding-action { margin: 7px 0 0; font-size: 12px; color: var(--app-fg-3); }
+.finding-action::before { content: '→ '; }
+.finding-comps { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 9px; }
+.finding-comps .chip { font-size: 11.5px; }
+.finding-comps .chip .muted { margin-left: 5px; }
+
 /* risk cards */
 .risk-card { border-left: 3px solid var(--app-line); padding: 14px 16px; background: var(--app-surface); border-radius: var(--radius-sm); border-top: 1px solid var(--app-line); border-right: 1px solid var(--app-line); border-bottom: 1px solid var(--app-line); }
 .risk-card.high   { border-left-color: var(--risk); }
@@ -648,3 +695,144 @@ svg text { font-family: var(--font-family-sans, Poppins, system-ui, sans-serif);
 @media (max-width: 700px) {
   .facet-menu { min-width: 220px; max-width: calc(100vw - 48px); }
 }
+
+/* ── printing, and therefore "Export PDF" ──────────────────────────────────
+   There is no PDF library here and there should not be: the app has no
+   dependencies, and the browser already has a renderer that produces exactly
+   what the reader saw. "Export PDF" prints, and the browser saves. That also
+   means the export cannot drift from the screen — it IS the screen.
+
+   What print has to undo is everything that makes a screen a screen: the
+   furniture you cannot click on paper, the scroll containers that would clip a
+   table at the page edge, and the dark theme, which prints as a black page. */
+@media print {
+  @page { size: A4 portrait; margin: 13mm 11mm; }
+
+  /* The dark theme back to ink on paper. Only the tokens it overrides need
+     restoring, which is the whole benefit of there being no raw colours below
+     the theme block. */
+  :root[data-theme="dark"] {
+    --app-bg: #FFFFFF; --app-surface: #FFFFFF; --app-subtle: #F6F8FA;
+    --app-line: #DBE0E6; --app-line-soft: #ECEFF3;
+    --app-fg: #10112A; --app-fg-2: #4B5565; --app-fg-3: #7A8598;
+    --brand-blue: #006AFE; --brand-pink: #FE006A; --warn: #C97A00;
+    --day-we: color-mix(in srgb, #7A8598 13%, transparent);
+  }
+
+  html, body { background: #fff; }
+  /* Backgrounds carry meaning here — a red workload cell, a category dot, the
+     bars. Without this most browsers drop them and the report loses its
+     signal. */
+  * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+
+  /* The furniture. Nothing here can be used on paper. */
+  .sidebar, .topbar, .drawer, .toast, .menu-btn, #staleBanner,
+  .btn, .scenario-bar, .print-hide { display: none !important; }
+
+  .shell, .main-col { display: block; }
+  main { padding: 0 !important; max-width: none !important; }
+
+  /* A scroll container clips at the page edge instead of wrapping onto the
+     next one, which silently truncates the widest tables. */
+  .table-wrap, [style*="overflow-x"] { overflow: visible !important; max-height: none !important; }
+  .table-wrap { border: 1px solid var(--app-line); }
+
+  /* THE TABLE HAS TO FIT THE PAGE, not merely stop being scrolled.
+     Letting the wrapper overflow stops a wide table being cut off by its own
+     container and does nothing about the table being wider than A4 — the item
+     table printed with Component truncated mid-word and Epic missing
+     altogether, which is worse than an obviously broken layout because the
+     page still looks complete.
+
+     Three rules, all three needed. `white-space: nowrap` is the default for
+     every cell in this app: right on screen, where a table scrolls, and fatal
+     on paper, where it makes the table's minimum width the sum of its longest
+     unbroken lines. `overflow-wrap: anywhere` is what lets a 29-character
+     component name with no spaces in it stop dictating a column's width, and
+     it has to be `anywhere` rather than `break-word` because only `anywhere`
+     reduces MIN-CONTENT width. The 260px floor under the summary column is a
+     screen affordance and goes with them. */
+  table { width: 100%; }
+  th, td { white-space: normal; overflow-wrap: break-word; padding: 6px 7px; }
+  td.wrap { min-width: 0 !important; }
+
+  /* The item table is the wide one — eight columns, and the only one that
+     cannot be made to fit by wrapping alone. `table-layout: fixed` with named
+     widths is the difference between a readable page and one where the browser
+     gives the key column three characters and stacks "AUTOKAT-9795" down the
+     left edge, which is what an even split produced. */
+  .items-table { table-layout: fixed; }
+  .items-table .col-key { width: 14%; }
+  .items-table .col-summary { width: 17%; }
+  .items-table .col-category { width: 11%; }
+  .items-table .col-assignee { width: 10%; }
+  .items-table .col-status { width: 7%; }
+  .items-table .col-points { width: 5%; }
+  .items-table .col-component { width: 10%; }
+  .items-table .col-epic { width: 16%; }
+  .items-table .col-tests { width: 10%; }
+
+  /* An issue key broken across two lines is not an issue key any more — it is
+     the one string on the page someone will retype into Jira. Component names
+     are the opposite case: 29 characters with no space in them, and they have
+     to break somewhere. */
+  .issue-key, a.issue-key { white-space: nowrap; }
+
+  /* A heading broken mid-word — "CATEGOR / Y", "POIN / TS" — reads as damage.
+     They are single words that only failed to fit because of the tracking the
+     screen style gives them, so the tracking goes rather than the word. */
+  th { font-size: 9px; letter-spacing: 0.04em; overflow-wrap: normal; }
+  .items-table .col-component, .items-table td:nth-child(7) { overflow-wrap: anywhere; }
+
+  /* A pill that wraps mid-word is unreadable; they are short, so let them be
+     the one thing that still refuses to break, and shrink instead.
+     With `table-layout: fixed` a pill that cannot wrap does not widen its
+     column — it hangs out of it and off the page, which is how the item table
+     still measured 917px inside a 709px table after the widths were right. So
+     the two columns that hold pills get to wrap BETWEEN their parts, while the
+     issue key inside them stays whole. */
+  .tag { white-space: nowrap; font-size: 9.5px; padding: 1px 6px; }
+  .items-table td:nth-child(3), .items-table td:nth-child(8) { overflow-wrap: anywhere; }
+  /* `flex-wrap` and not only `white-space`: a `.tag` is an inline-flex box, and
+     a flex line does not wrap unless it is told to — so the epic pill kept its
+     key and its name on one line whatever the white-space rule said, and hung
+     23px past the column. */
+  .items-table td:nth-child(3) .tag, .items-table td:nth-child(8) .tag {
+    white-space: normal; flex-wrap: wrap;
+    /* The pill's own padding is most of a narrow column. Trimming it is what
+       lets "New implementation" break after the space instead of inside the
+       second word. */
+    font-size: 9px; padding: 1px 4px;
+  }
+  /* Initials in a coloured circle are a screen affordance for scanning; on
+     paper the name is right there beside them. */
+  .avatar { display: none; }
+
+  /* Keep a thing on one page where it can be; never orphan a heading from what
+     it introduces, and repeat a long table's header on each page. */
+  .card, .kpi, tr, .section-head { break-inside: avoid; }
+  section { break-inside: auto; }
+  h2, h3, .section-head { break-after: avoid; }
+  thead { display: table-header-group; }
+  tfoot { display: table-footer-group; }
+
+  /* Shadows and hovers are screen effects; on paper they are grey smudges. */
+  .card, .kpi, .featured { box-shadow: none !important; }
+  tbody tr:hover { background: transparent !important; }
+
+  /* A link's colour means nothing in a PDF, and the key itself is what you
+     paste into Jira. */
+  a.issue-key, a { color: var(--app-fg); text-decoration: none; }
+
+  table { font-size: 10.5px; }
+  .section { margin-bottom: 14px; }
+
+  /* The page's own title block — see `printHeader` in the sprint view. It is
+     the only thing that exists solely for print, because a PDF that does not
+     say which team, which sprint and when it was taken is a page of numbers
+     nobody can file. */
+  .print-only { display: block !important; }
+}
+
+/* Off-screen until the page is printed. */
+.print-only { display: none; }

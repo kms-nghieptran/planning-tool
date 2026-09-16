@@ -14,6 +14,42 @@ const Charts = (() => {
   const nice = (max) => { if (max <= 0) return 10; const p = 10 ** Math.floor(Math.log10(max)); return Math.ceil(max / p * 2) / 2 * p; };
 
   /**
+   * THE X-AXIS TICK FOR A SPRINT.
+   *
+   * NOT EVERY SPRINT HAS A NUMBER. Two naming conventions run in this project
+   * and reconcile deliberately keeps both: "Katalon Ruby Sprint 39" becomes a
+   * numbered calendar entry, while the TrueTest boards run dated weekly windows
+   * — "TT Week 18May-24May" — with no number to take. `sprint.number` is null
+   * for those on purpose, and that is the right model.
+   *
+   * These charts did not know it. Both printed `row.number` straight onto the
+   * axis, so Malphite — whose sprints are ALL dated — got a row of bars labelled
+   * "null" under an axis captioned "Sprint", and the forecast chart would have
+   * said "Snull". The bars were correct the whole time; only the labels were
+   * claiming the data was missing.
+   *
+   * A dated sprint keeps the part of its name that tells it apart from its
+   * neighbours. The leading words every sprint on a board shares — "TT Week" —
+   * carry nothing on an axis where every tick repeats them, and spending a 60px
+   * band on them is how the half that identifies the sprint gets truncated.
+   */
+  const HAS_DIGIT = /\d/;
+  function sprintTick(row, { prefix = '', max = 12 } = {}) {
+    const r = row || {};
+    if (r.number != null && r.number !== '') return `${prefix}${r.number}`;
+
+    const name = String(r.name || r.calendarName || '').trim();
+    if (name) {
+      const words = name.split(/\s+/);
+      const from = words.findIndex(w => HAS_DIGIT.test(w));
+      const short = (from > 0 ? words.slice(from) : words).join(' ');
+      return short.length > max ? `${short.slice(0, max - 1)}…` : short;
+    }
+    // An id is a poor label and still a true one. "null" is neither.
+    return String(r.sprintId || r.id || '—');
+  }
+
+  /**
    * Grouped columns: capacity vs planned vs actual across sprints.
    * Three series is the maximum a grouped column reads cleanly at this size.
    */
@@ -46,7 +82,10 @@ const Charts = (() => {
         const v = d[s.key] || 0, yy = y(v);
         body += `<rect x="${x0 + si * (barW + 2)}" y="${yy}" width="${barW}" height="${Math.max(0, padT + ih - yy)}" rx="2" fill="${s.color}"><title>${esc(d.name)} — ${s.label}: ${v} pts</title></rect>`;
       });
-      body += `<text x="${padL + i * bandW + bandW / 2}" y="${H - 12}" text-anchor="middle" font-size="9" fill="${AXIS}">${d.number}</text>`;
+      // A title on the tick too: a shortened label is only safe when the full
+      // name is one hover away.
+      body += `<text x="${padL + i * bandW + bandW / 2}" y="${H - 12}" text-anchor="middle" font-size="9" fill="${AXIS}">`
+        + `${esc(sprintTick(d, { max: 11 }))}<title>${esc(d.name || '')}</title></text>`;
     });
     body += `<text x="${padL}" y="${H - 1}" font-size="9" fill="${AXIS}">Sprint</text>`;
 
@@ -110,7 +149,8 @@ const Charts = (() => {
       const over = r.committedPoints > r.capacityPoints;
       body += `<rect x="${cx - w / 2}" y="${y(r.committedPoints)}" width="${w}" height="${Math.max(0, padT + ih - y(r.committedPoints))}" rx="3" fill="${over ? 'var(--brand-pink)' : 'var(--brand-blue)'}" opacity="${over ? 1 : .9}"><title>${esc(r.name)} committed: ${r.committedPoints} pts</title></rect>`;
       body += `<text x="${cx}" y="${y(Math.max(r.capacityPoints, r.committedPoints)) - 6}" text-anchor="middle" font-size="10" font-weight="700" fill="${over ? 'var(--brand-pink)' : 'var(--app-fg-2)'}">${r.utilisationPct}%</text>`;
-      body += `<text x="${cx}" y="${H - 26}" text-anchor="middle" font-size="10" fill="var(--app-fg-2)">S${r.number}</text>`;
+      body += `<text x="${cx}" y="${H - 26}" text-anchor="middle" font-size="10" fill="var(--app-fg-2)">`
+        + `${esc(sprintTick(r, { prefix: 'S' }))}<title>${esc(r.name || '')}</title></text>`;
       body += `<text x="${cx}" y="${H - 13}" text-anchor="middle" font-size="9" fill="${AXIS}">${r.headcount}p · ${r.availableDays}d</text>`;
     });
     return `${frame(W, H, body)}<div class="mixkey"><span><i style="width:9px;height:9px;border-radius:2px;background:var(--brand-blue)"></i>Committed</span><span><i style="width:9px;height:9px;border:1.5px dashed var(--app-line);border-radius:2px"></i>Capacity</span><span><i style="width:9px;height:9px;border-radius:2px;background:var(--brand-pink)"></i>Over capacity</span></div>`;
@@ -167,5 +207,63 @@ const Charts = (() => {
     return frame(W, H, body);
   }
 
-  return { velocity, burndown, supplyDemand, ranked, spark, load };
+  /**
+   * A percentage over time, with the readings marked.
+   *
+   * MARKED ON PURPOSE. This series is not sampled at a regular interval — it has
+   * a point on every day a sync ran, which is whenever he happened to press the
+   * button, plus whatever a changelog backfill reconstructed. Drawing it as a
+   * smooth line implies a continuous measurement that was never taken, and the
+   * gap between two dots three weeks apart is exactly the thing a reader needs
+   * to see before trusting the slope between them.
+   *
+   * INFERRED POINTS ARE HOLLOW. A reading reconstructed from Jira's transition
+   * history is a good guess and not an observation, and a chart that draws the
+   * two identically is asking to be quoted as though they were the same.
+   */
+  function trend(points, { height = 170, band = null } = {}) {
+    const data = (points || []).filter(p => p && p.at);
+    if (data.length < 2) return '';
+
+    const W = 760, H = height, padL = 34, padR = 12, padT = 14, padB = 26;
+    const iw = W - padL - padR, ih = H - padT - padB;
+
+    // Anchored to 0–100 unless the whole series sits in a narrow band, where a
+    // full axis would flatten every real move into a straight line.
+    const vals = data.map(p => p.coveragePct);
+    const lo = Math.max(0, Math.min(...vals) - 8), hi = Math.min(100, Math.max(...vals) + 8);
+    const span = hi - lo < 12 ? [Math.max(0, lo - 6), Math.min(100, hi + 6)] : [lo, hi];
+    const t0 = new Date(data[0].at).getTime(), t1 = new Date(data[data.length - 1].at).getTime();
+    // Spaced by DATE, not by index: evenly spaced dots would hide a three-week
+    // gap between two syncs and show a fortnight's drift as a single step.
+    const x = (at) => padL + (t1 === t0 ? iw / 2 : ((new Date(at).getTime() - t0) / (t1 - t0)) * iw);
+    const y = (v) => padT + ih - ((v - span[0]) / (span[1] - span[0])) * ih;
+
+    let body = '';
+    for (let g = 0; g <= 4; g++) {
+      const v = span[0] + (span[1] - span[0]) * g / 4, yy = y(v);
+      body += `<line x1="${padL}" x2="${W - padR}" y1="${yy}" y2="${yy}" stroke="${GRID}"/>`;
+      body += `<text x="${padL - 6}" y="${yy + 3.5}" text-anchor="end" font-size="9" fill="${AXIS}">${Math.round(v)}%</text>`;
+    }
+    if (band && band.length === 2) {
+      body += `<rect x="${padL}" y="${y(band[1])}" width="${iw}" height="${Math.max(0, y(band[0]) - y(band[1]))}" fill="var(--ok)" opacity=".07"/>`;
+    }
+
+    const pts = data.map(p => `${x(p.at)},${y(p.coveragePct)}`).join(' ');
+    body += `<polyline fill="none" stroke="var(--brand-blue)" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" points="${pts}"/>`;
+    for (const p of data) {
+      const inferred = p.source && p.source !== 'sync';
+      body += `<circle cx="${x(p.at)}" cy="${y(p.coveragePct)}" r="${inferred ? 3 : 3.5}"`
+        + ` fill="${inferred ? 'var(--app-surface)' : 'var(--brand-blue)'}" stroke="var(--brand-blue)" stroke-width="1.5">`
+        + `<title>${esc(p.at)} — ${p.coveragePct}% (${p.covered}/${p.automatable})`
+        + `${inferred ? ' · reconstructed from Jira history' : ''}</title></circle>`;
+    }
+
+    const first = data[0], last = data[data.length - 1];
+    body += `<text x="${padL}" y="${H - 8}" font-size="9" fill="${AXIS}">${esc(first.at)}</text>`;
+    body += `<text x="${W - padR}" y="${H - 8}" text-anchor="end" font-size="9" fill="${AXIS}">${esc(last.at)}</text>`;
+    return frame(W, H, body);
+  }
+
+  return { velocity, burndown, supplyDemand, ranked, spark, load, trend };
 })();

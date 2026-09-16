@@ -61,11 +61,11 @@ const PLAN = {
 };
 
 const issue = (o) => ({
-  key: o.key, summary: o.summary || `Work item ${o.key}`, issueType: 'Story',
+  key: o.key, summary: o.summary || `Work item ${o.key}`, issueType: o.type || 'Story',
   status: o.status || 'Open', statusCategory: o.status === 'Done' ? 'done' : 'new',
   assignee: o.assignee || null, labels: [], components: o.components || [],
   points: 'points' in o ? o.points : 3, sprintNames: ['Katalon Titan Sprint 40'],
-  sprints: [{ name: 'Katalon Titan Sprint 40' }], blockedBy: [],
+  sprints: [{ name: 'Katalon Titan Sprint 40' }], blockedBy: [], relatesTo: o.relatesTo || [],
   updated: '2026-09-20T00:00:00.000Z',
   resolved: o.status === 'Done' ? '2026-09-21T00:00:00.000Z' : null,
   team: 'Katalon Auto Titan', priority: 'Medium',
@@ -87,6 +87,11 @@ const SNAP = {
     issue({ key: 'A-4', assignee: 'Hien Phan', points: 2, components: ['KAT_Common'] }),
     issue({ key: 'A-8', assignee: null, points: 4 }),
     issue({ key: 'A-9', assignee: null, points: 6, status: 'Done' }),
+    // Bucket stories, which is where maintenance work lives: one maintaining
+    // three test cases, one maintaining none.
+    issue({ key: 'A-20', assignee: 'Hien Phan', points: 3, type: 'Bucket Story',
+      relatesTo: [{ key: 'AUTOKAT-1' }, { key: 'AUTOKAT-2' }, { key: 'AUTOKAT-3' }] }),
+    issue({ key: 'A-21', assignee: 'Hien Phan', points: 1, type: 'Bucket Story', relatesTo: [] }),
   ].map(i => [i.key, i])),
   testops: { projects: [] }, github: {}, verification: [],
 };
@@ -132,11 +137,23 @@ async function renderHtml(snap = SNAP, plan = PLAN) {
     classList: { toggle() {}, contains: () => false }, select() {},
     querySelector: () => el(), querySelectorAll: () => [],
   });
+  // Enough of a window for the export: it prints, and renames the document
+  // while it does, so both have to be observable.
+  const printed = [];
   const ctx = {
     console, Promise, setTimeout, encodeURIComponent, CSS: { escape: String },
     App: { refresh() {} },
     Charts: new Proxy({}, { get: () => () => '' }),
-    document: { createElement: () => ({ set innerHTML(_) {}, content: { firstElementChild: null } }) },
+    document: {
+      title: 'Planning Tool',
+      createElement: () => ({ set innerHTML(_) {}, content: { firstElementChild: null } }),
+    },
+    window: {
+      print() { printed.push(ctx.document.title); },
+      addEventListener(t, fn) { (ctx.window._on = ctx.window._on || {})[t] = fn; },
+      removeEventListener() {},
+      _on: {},
+    },
   };
   vm.createContext(ctx);
   // The real ui.js — a hand-written stub drifts from the thing it stands in for.
@@ -145,13 +162,24 @@ async function renderHtml(snap = SNAP, plan = PLAN) {
   ctx.UI.api = async () => payload;
 
   vm.runInContext(`${VIEW}\n;globalThis.__v = SprintView;`, ctx);
+  const clicks = [];
   const mount = {
-    style: {}, addEventListener() {},
+    style: {},
+    addEventListener: (t, fn) => { if (t === 'click') clicks.push(fn); },
     querySelector: () => el(), querySelectorAll: () => [],
     set innerHTML(v) { html = v; }, get innerHTML() { return html; },
+    /** Fire a click as the browser would, with a target that can be `closest`ed. */
+    click(act) {
+      const target = { closest: (sel) => (sel.includes(act) ? { dataset: { act } } : null) };
+      for (const fn of clicks.slice()) fn({ target, preventDefault() {} });
+    },
   };
-  await ctx.__v.render({ teamId: 'titan', sprintId: 'S40', categories: {} }, mount);
-  return { html, payload };
+  await ctx.__v.render({
+    teamId: 'titan', sprintId: 'S40', categories: {},
+    teams: [{ id: 'titan', name: 'Katalon Titan', jiraName: 'Katalon Auto Titan' }],
+    syncedAt: '2026-09-24T09:00:00.000Z',
+  }, mount);
+  return { html, payload, mount, ctx, printed };
 }
 
 const CAPACITY_VIEW = fs.readFileSync(path.join(__dirname, '..', 'public', 'views', 'capacity.js'), 'utf8');
@@ -235,8 +263,12 @@ check('an item with no assignee says so in the Assignee column', async () => {
 });
 
 check('and the caption counts them, so the gap is visible without scanning', async () => {
-  const { html } = await renderHtml();
-  assert.match(html, /6 items · 2 with no assignee/);
+  // Derived, not typed: a literal here breaks every time the fixture grows,
+  // for a reason that has nothing to do with what this check is about.
+  const { html, payload } = await renderHtml();
+  const unowned = payload.items.filter(i => !i.assignee).length;
+  assert.ok(html.includes(`${payload.items.length} items · ${unowned} with no assignee`),
+    `caption does not read "${payload.items.length} items · ${unowned} with no assignee"`);
 });
 
 check('a sprint where everything is owned says nothing about assignees', async () => {
@@ -244,8 +276,8 @@ check('a sprint where everything is owned says nothing about assignees', async (
     ...SNAP,
     issues: Object.fromEntries(Object.entries(SNAP.issues).filter(([k]) => !UNOWNED.includes(k))),
   };
-  const { html } = await renderHtml(owned);
-  assert.match(html, /4 items</);
+  const { html, payload } = await renderHtml(owned);
+  assert.ok(html.includes(`${payload.items.length} items`));
   assert.ok(!/with no assignee/.test(html), 'no zero-count noise on a clean sprint');
 });
 
@@ -335,8 +367,9 @@ check('and it is the SAME table, not a second one that will drift', async () => 
 
 check('the capacity payload carries the items at all', async () => {
   const { payload } = await renderCapacity();
-  assert.ok(Array.isArray(payload.items) && payload.items.length === 6,
-    'the view can only show what the model returns');
+  const { payload: sprint } = await renderHtml();
+  assert.ok(Array.isArray(payload.items) && payload.items.length === sprint.items.length,
+    'the capacity screen must carry the same items the sprint screen does');
 });
 
 check('EVERY ROW HAS AS MANY CELLS AS THE HEADER HAS COLUMNS', async () => {
@@ -361,6 +394,19 @@ check('EVERY ROW HAS AS MANY CELLS AS THE HEADER HAS COLUMNS', async () => {
 });
 
 /* ── per-component progress ───────────────────────────────────────────── */
+
+/**
+ * The whole `<tr>` an issue key sits in.
+ *
+ * Slicing from the key itself starts INSIDE the first cell, so the row comes
+ * back one cell short and a count of its cells is quietly wrong.
+ */
+const rowFor = (html, key) => {
+  const at = html.indexOf(`>${key}<`);
+  if (at < 0) return '';
+  const start = html.lastIndexOf('<tr', at);
+  return html.slice(start, html.indexOf('</tr>', at));
+};
 
 /** Just the "Per-component progress" card. */
 const componentSection = (html) => {
@@ -425,6 +471,220 @@ check('a sprint with no components at all renders no empty section', async () =>
   // What must not happen is a section with no rows under it.
   const body = componentSection(html);
   if (body) assert.ok(body.split('<tr>').length > 2, 'a section with a header and nothing in it');
+});
+
+/* ── test cases under maintenance ─────────────────────────────────────── */
+
+check('THE ITEM TABLE COUNTS TEST CASES UNDER MAINTENANCE', async () => {
+  const { html, payload } = await renderHtml();
+  const body = itemsSection(html);
+  assert.ok(body.includes('Test cases'), 'no column for it');
+  const a20 = payload.items.find(i => i.key === 'A-20');
+  assert.strictEqual(a20.maintains, 3, 'fixture check: three relates-to links');
+  // Read the LAST cell of the row, not just any cell holding a 3: this item is
+  // also worth 3 points, so a looser match passed happily with the column
+  // deleted altogether.
+  const row = rowFor(body, 'A-20');
+  const cells = [...row.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)].map(m => m[1].trim());
+  assert.strictEqual(cells.length, 9, `expected 9 cells in the row, got ${cells.length}`);
+  assert.strictEqual(cells[8], '3', `the test-case cell reads "${cells[8]}"`);
+});
+
+check('a bucket story maintaining nothing says zero, and says it loudly', async () => {
+  // The zero is the answer here, and usually the one worth acting on: a
+  // maintenance container with no links to what it maintains.
+  const body = itemsSection((await renderHtml()).html);
+  const row = rowFor(body, 'A-21');
+  assert.ok(row.includes('>0<'), 'no count on an empty bucket story');
+  assert.ok(row.includes('tag warn'), 'and nothing draws the eye to it');
+});
+
+check('ANYTHING THAT IS NOT A BUCKET STORY IS NOT ASKED', async () => {
+  // A Story's relates-to links are not test cases, and a column of zeroes
+  // against them invites someone to total it.
+  const { html, payload } = await renderHtml();
+  const body = itemsSection(html);
+  const story = payload.items.find(i => i.key === 'A-1');
+  assert.strictEqual(story.maintains, null, 'the model must not put a number on a Story');
+  const cells = [...rowFor(body, 'A-1').matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)].map(m => m[1].trim());
+  assert.ok(cells[8] && cells[8].includes('—'), `the cell should be blank, not "${cells[8]}"`);
+});
+
+check('and the caption totals the sprint\'s maintenance load', async () => {
+  const { html } = await renderHtml();
+  assert.match(html, /3 test cases maintained across 2 bucket stories/);
+});
+
+check('a sprint with no bucket stories says nothing about test cases', async () => {
+  const none = {
+    ...SNAP,
+    issues: Object.fromEntries(Object.entries(SNAP.issues).filter(([k]) => !['A-20', 'A-21'].includes(k))),
+  };
+  const { html } = await renderHtml(none);
+  assert.ok(!/test cases maintained/.test(html), 'no zero-count noise on a sprint with no maintenance');
+});
+
+/* ── the KPI row ──────────────────────────────────────────────────────── */
+
+/** The KPI strip, label and value, in the order they appear. */
+const kpis = (html) => [...html.matchAll(/<div class="label">([^<]*)<\/div>\s*<div class="value[^"]*">([^<]*)/g)]
+  .map(m => [m[1].trim(), m[2].trim()]);
+
+check('CAPACITY LEADS THE KPI ROW, immediately before Committed', async () => {
+  const { html } = await renderHtml();
+  const labels = kpis(html).map(([l]) => l);
+  const at = labels.indexOf('Capacity');
+  assert.ok(at >= 0, `no Capacity KPI — got ${JSON.stringify(labels)}`);
+  assert.strictEqual(labels[at + 1], 'Committed', 'Capacity has to read directly into what was committed against it');
+});
+
+check('and it shows the capacity the grid computed', async () => {
+  const { html, payload } = await renderHtml();
+  const cap = kpis(html).find(([l]) => l === 'Capacity');
+  assert.strictEqual(cap[1], String(Math.round(payload.totals.predicted)));
+});
+
+check('THE HEADROOM IS MEASURED AGAINST THIS SCREEN\'S OWN COMMITMENT', async () => {
+  // The grid's `totals.planned` counts only work on roster members; this
+  // screen's commitment also counts work that landed on nobody. Printing the
+  // grid's own over/under beside them would be a number that does not
+  // reconcile with the two cards either side of it.
+  const { html, payload } = await renderHtml(OFF_ROSTER, OFF_ROSTER_PLAN);
+  const gap = Math.round((payload.totals.predicted - payload.progress.committed) * 10) / 10;
+  assert.notStrictEqual(payload.totals.planned, payload.progress.committed,
+    'fixture check: this sprint has work outside the roster, or the check proves nothing');
+  const strip = html.slice(html.indexOf('<div class="kpis">'), html.indexOf('</section>', html.indexOf('<div class="kpis">')));
+  assert.ok(strip.includes(`${gap} pts of headroom`) || strip.includes(`${Math.abs(gap)} pts over capacity`),
+    `the headroom does not match capacity minus commitment (${gap})`);
+});
+
+check('a sprint with no capacity says so rather than claiming zero headroom', async () => {
+  // Everyone off for the whole sprint, so the grid really does compute zero —
+  // an EMPTY availability map would not do it, because a missing row falls back
+  // to a full working fortnight and the check would pass without asserting
+  // anything. It did, until a mutation that deleted the guard stayed green.
+  const off = new Array(14).fill('0');
+  const noCapacity = { ...PLAN, availability: { 'titan|S40|m1': off, 'titan|S40|m2': off } };
+  const { html, payload } = await renderHtml(SNAP, noCapacity);
+  assert.strictEqual(payload.totals.predicted, 0, 'fixture check: this sprint has to have no capacity');
+  assert.ok(html.includes('no capacity entered'), 'zero capacity must not read as zero headroom');
+  assert.ok(!html.includes('pts of headroom'), 'and must not claim headroom it does not have');
+});
+
+/* ── export to PDF ────────────────────────────────────────────────────── */
+
+const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'styles.css'), 'utf8');
+const printRules = css.slice(css.indexOf('@media print'));
+
+check('THE SCREEN OFFERS AN EXPORT, and the export is a print', async () => {
+  const { html } = await renderHtml();
+  assert.ok(html.includes('data-act="export-pdf"'), 'no Export PDF control');
+  assert.ok(html.includes('Export PDF'), 'the control is not labelled');
+});
+
+check('CLICKING IT PRINTS', async () => {
+  const { mount, printed } = await renderHtml();
+  mount.click('export-pdf');
+  assert.strictEqual(printed.length, 1, 'the browser was never asked to print');
+});
+
+check('and the file is named after the sprint, not after the app', async () => {
+  // The browser names the download from the document title. Left alone, every
+  // sprint report in a folder is called "Planning Tool.pdf".
+  const { mount, printed, ctx } = await renderHtml();
+  mount.click('export-pdf');
+  assert.match(printed[0], /Katalon Auto Titan/, `title at print time was "${printed[0]}"`);
+  assert.match(printed[0], /Sprint 40/);
+  assert.ok(!/[\\/:*?"<>|]/.test(printed[0]), 'a filename cannot carry path characters');
+  ctx.window._on.afterprint();
+  assert.strictEqual(ctx.document.title, 'Planning Tool', 'the title has to go back afterwards');
+});
+
+check('THE PDF SAYS WHICH TEAM, WHICH SPRINT AND WHEN', async () => {
+  // All three are in the furniture on screen — sidebar, topbar, sync line —
+  // and print hides every bit of it.
+  const { html } = await renderHtml();
+  const head = html.slice(html.indexOf('print-only'), html.indexOf('</div>', html.indexOf('print-only')) + 400);
+  assert.match(head, /Katalon Auto Titan/, 'the team is not on the page');
+  assert.match(head, /Sprint 40/, 'the sprint is not on the page');
+  assert.match(head, /synced/, 'nothing says how fresh the Jira data is');
+  assert.match(head, /report taken/, 'nothing dates the report itself');
+});
+
+check('the title block is print-only, and the button is screen-only', async () => {
+  const { html } = await renderHtml();
+  assert.match(css, /^\.print-only \{ display: none; \}/m, 'the title block would show on screen');
+  assert.match(printRules, /\.print-only \{ display: block !important/, 'and never show in print');
+  assert.ok(html.includes('class="section print-hide"'), 'the export button prints as a dead control');
+  assert.match(printRules, /\.print-hide \{ display: none !important/);
+});
+
+/* ── what print has to undo ───────────────────────────────────────────── */
+
+check('PRINT HIDES THE FURNITURE nobody can click on paper', async () => {
+  for (const sel of ['.sidebar', '.topbar', '.drawer', '.toast', '.btn']) {
+    assert.ok(printRules.includes(sel), `${sel} would print`);
+  }
+});
+
+check('A SCROLL CONTAINER MUST NOT CLIP THE WIDEST TABLE', async () => {
+  // `.table-wrap` scrolls sideways on screen. On paper there is nowhere to
+  // scroll to, so whatever is past the page edge is simply gone.
+  assert.match(printRules, /\.table-wrap[^{]*\{[^}]*overflow: visible !important/);
+});
+
+check('a long table repeats its header on every page', async () => {
+  assert.match(printRules, /thead \{ display: table-header-group/);
+});
+
+check('THE DARK THEME PRINTS AS INK ON PAPER', async () => {
+  // Without this the report is a black page — expensive, and unreadable once
+  // the printer gives up on the backgrounds.
+  const dark = printRules.slice(printRules.indexOf(':root[data-theme="dark"]'));
+  assert.ok(printRules.includes(':root[data-theme="dark"]'), 'the dark theme is never restored');
+  assert.match(dark.slice(0, 400), /--app-bg: #FFFFFF/i, 'the page background is still dark');
+  assert.match(dark.slice(0, 400), /--app-fg: #10112A/i, 'the text is still light-on-dark');
+});
+
+check('and the backgrounds that carry meaning survive', async () => {
+  // A red workload cell, a category dot, the bars: most browsers drop
+  // backgrounds when printing unless told otherwise, and the report loses the
+  // signal while keeping the numbers.
+  assert.match(printRules, /print-color-adjust: exact/);
+});
+
+check('THE WIDE TABLE IS LAID OUT TO THE PAGE, not merely un-scrolled', async () => {
+  // Letting the wrapper overflow stops the container clipping and does nothing
+  // about the table being wider than A4: the item table first printed with
+  // Component truncated mid-word and Epic missing altogether, on a page that
+  // still looked complete.
+  assert.match(printRules, /\.items-table \{ table-layout: fixed/, 'the columns are not sized for paper');
+  const widths = [...printRules.matchAll(/\.items-table \.col-[a-z]+ \{ width: (\d+)%/g)].map(m => Number(m[1]));
+  assert.strictEqual(widths.length, 9, `expected a width for all 9 columns, found ${widths.length}`);
+  assert.strictEqual(widths.reduce((a, b) => a + b, 0), 100,
+    `the column widths add up to ${widths.reduce((a, b) => a + b, 0)}%, so the table cannot fit the page`);
+});
+
+check('and the table it sizes is the one the views render', async () => {
+  // The print rules key off `.items-table` and the column classes. If the
+  // shared table stopped emitting them the rules would silently do nothing.
+  const { html } = await renderHtml();
+  assert.ok(html.includes('class="items-table"'), 'the shared item table lost its class');
+  for (const c of ['col-key', 'col-summary', 'col-category', 'col-assignee',
+    'col-status', 'col-points', 'col-component', 'col-epic', 'col-tests']) {
+    assert.ok(html.includes(c), `no ${c} column class — the print width for it is dead`);
+  }
+});
+
+check('AN ISSUE KEY IS NEVER BROKEN ACROSS LINES', async () => {
+  // It is the one string on the page someone retypes into Jira, and the same
+  // wrapping that makes long component names fit would split it in half.
+  assert.match(printRules, /\.issue-key[^{]*\{[^}]*white-space: nowrap/);
+});
+
+check('a card is not split across a page break', async () => {
+  assert.match(printRules, /break-inside: avoid/);
+  assert.match(printRules, /break-after: avoid/, 'a heading must not be orphaned from its table');
 });
 
 /* ── run ──────────────────────────────────────────────────────────────── */

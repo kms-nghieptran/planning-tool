@@ -177,7 +177,12 @@ check('BOTH COVERAGE SCREENS LINK THEIR COMPONENTS, AND THE API SENDS THE PROJEC
   for (const route of ["/api/reports/coverage", "/api/reports/automation"]) {
     const at = server.indexOf(`p === '${route}'`);
     assert.ok(at > 0, `${route} is missing`);
-    assert.match(server.slice(at, at + 700), /project: cfg\.jira\.projectKey/, `${route} does not send the project key`);
+    // Bounded by where the NEXT route begins, not by a character count: a fixed
+    // window turns "someone added a line to this handler" into a failing test
+    // about the project key, which is a lie about what broke.
+    const next = server.indexOf("if (p === '", at + 10);
+    assert.match(server.slice(at, next > at ? next : at + 700), /project: cfg\.jira\.projectKey/,
+      `${route} does not send the project key`);
   }
   assert.match(read(VIEWS, 'report-coverage.js'), /UI\.componentSearchUrl\(/);
   assert.match(read(VIEWS, 'report-automation.js'), /UI\.componentSearchUrl\(/);
@@ -544,6 +549,7 @@ check('NO VIEW PRINTS AN ISSUE KEY WITHOUT GOING THROUGH THE HELPER', () => {
   const NOT_AN_ISSUE = {
     'backlog.js': ['c'],   // c.key — a COMPONENT name in the filter dropdown
     'fields.js': ['f'],    // f.key — a custom field's search slug
+    'settings.js': ['choice'], // choice.key — a <option> value in the rule editor
   };
 
   const offenders = [];

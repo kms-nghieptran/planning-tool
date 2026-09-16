@@ -25,6 +25,7 @@ const { Jira } = require('./lib/jira');
 const reconcile = require('./lib/reconcile');
 const metrics = require('./lib/metrics');
 const coverage = require('./lib/coverage');
+const covHistory = require('./lib/coverage-history');
 const reset = require('./lib/reset');
 const provenance = require('./lib/provenance');
 const query = require('./lib/query');
@@ -314,6 +315,13 @@ async function handleApi(req, res, url) {
       jiraBase: (cfg.jira.baseUrl || '').replace(/\/+$/, ''),
       categories: classify.CATEGORIES,
       defaultRules: classify.DEFAULT_RULES,
+      // The vocabulary the rule editor may offer, sent from the matcher's own
+      // tables rather than re-listed in the browser: a dropdown holding a field
+      // the matcher does not know is a rule you can save that never matches,
+      // and nothing on screen looks broken when that happens.
+      fields: classify.FIELDS.map(f => ({ key: f.key, label: f.label, note: f.note, list: !!f.list })),
+      ops: classify.OPS,
+      ruleHits: classify.ruleHits(Object.values(snap.issues || {}), plan.categoryRules),
       capacityDefaults: capacity.DEFAULTS,
       today: new Date().toISOString().slice(0, 10),
     });
@@ -426,14 +434,72 @@ async function handleApi(req, res, url) {
     // one adds the component filter, the Obsoleted bucket and the tool split.
     const snap = store.getSnapshot();
     const m = (cfg.metrics || {});
+    const view = coverage.view(snap, {
+      component: q.get('component') || null,
+      scope: m.coverageScope || 'Epic',
+    });
     return json(res, 200, {
-      ...coverage.view(snap, {
-        component: q.get('component') || null,
-        scope: m.coverageScope || 'Epic',
-      }),
+      ...view,
+      // Fired against the assembled view, not against the issues again, so the
+      // findings can never disagree with the tables they sit above. `view` is
+      // already narrowed to the selected component, so this is too.
+      attention: coverage.assess(view, { thresholds: m.coverageThresholds || null }),
       // So a component can link to the SAME set in Jira that the row counts:
       // same project, same issue type. The key lives in config, not the model.
       project: cfg.jira.projectKey || null,
+    });
+  }
+
+  /* How coverage MOVED. Its own route rather than more payload on
+     /api/reports/coverage: that one is read on every keystroke of the component
+     picker, and the movement query walks a table with a row per component per
+     day. Separate means the picker stays instant and this can be windowed. */
+  if (p === '/api/reports/coverage/movement' && req.method === 'GET') {
+    const m = (cfg.metrics || {});
+    const scope = m.coverageScope || 'Epic';
+    const days = Math.min(730, Math.max(7, Number(q.get('days')) || 180));
+    const since = new Date(Date.now() - days * 86400000);
+    const component = q.get('component') || null;
+    return json(res, 200, {
+      ...covHistory.movement(component, { scope, since }),
+      days,
+      // What the history is MADE of, so the screen can say whether a curve is
+      // observed or inferred instead of presenting both as the same fact.
+      sources: dbLib.all(
+        'SELECT source, COUNT(DISTINCT at) AS days FROM coverage_reading WHERE scope = ? GROUP BY source', scope,
+      ),
+      first: dbLib.get('SELECT MIN(at) AS at FROM coverage_reading WHERE scope = ?', scope),
+    });
+  }
+
+  /* Backfill the past from Jira's own transition history. Explicitly invoked:
+     it is a heavy read and an inference, and neither belongs on a schedule the
+     user did not ask for. */
+  if (p === '/api/reports/coverage/backfill' && req.method === 'POST') {
+    const body = await readJsonBody(req);
+    const m = (cfg.metrics || {});
+    const scope = m.coverageScope || 'Epic';
+    const jira = new Jira(cfg.jira);
+    await jira.discoverFields().catch(() => {});
+    const project = cfg.jira.projectKey;
+    if (!project) return json(res, 400, { error: 'Set the Jira project key first — the backfill needs to know what to read.' });
+
+    const epics = await jira.searchWithHistory(`project = ${project} AND issuetype = "${scope}" ORDER BY created ASC`);
+    const weeks = Math.min(104, Math.max(2, Number(body.weeks) || 26));
+    const dates = covHistory.weeklyDates(new Date(Date.now() - weeks * 7 * 86400000), new Date());
+    const readings = covHistory.reconstruct(epics, dates, { scope });
+
+    let written = 0, kept = 0;
+    for (const r of readings) {
+      const out = covHistory.record(r.rows, { at: r.at, scope, source: 'changelog' });
+      written += out.written; kept += out.kept;
+    }
+    const truncated = epics.filter(e => e.truncated).length;
+    const withHistory = epics.filter(e => e.transitions.length).length;
+    store.audit('coverage.history.backfill', { epics: epics.length, dates: dates.length, written, kept, truncated });
+    return json(res, 200, {
+      ok: true, epics: epics.length, withHistory, truncated,
+      dates: dates.length, written, keptObservations: kept,
     });
   }
 
@@ -456,6 +522,47 @@ async function handleApi(req, res, url) {
     store.savePlan(next);
     store.audit('plan.replace', { keys: Object.keys(body) });
     return json(res, 200, { ok: true });
+  }
+
+  /* Work-categorisation rules get their own route rather than riding on
+     PUT /api/plan, which merges whatever it is handed. A malformed rule does
+     not throw anywhere — it simply never matches, the work falls through to
+     Other, and the work-mix split on Backlog, Forecast, Sprint and Search all
+     move together with nothing on screen looking wrong. Validating at the door
+     is the only place that failure is visible. */
+  if (p === '/api/category-rules' && req.method === 'PUT') {
+    const body = await readJsonBody(req);
+    const plan = store.getPlan();
+    const issues = () => Object.values(store.getSnapshot().issues || {});
+    if (body.rules === null) {                       // back to the shipped defaults
+      plan.categoryRules = null;
+      store.savePlan(plan);
+      store.audit('categoryRules.reset', { count: classify.DEFAULT_RULES.length });
+      return json(res, 200, { ok: true, reset: true, rules: classify.DEFAULT_RULES, hits: classify.ruleHits(issues(), null) });
+    }
+    const { rules, errors } = classify.validateRules(body.rules);
+    if (errors.length) return json(res, 400, { error: errors.map(e => e.message).join(' · '), errors });
+    // An empty list is valid JSON and catastrophic semantics: every issue in
+    // the tool would classify as Other.
+    if (!rules.length) return json(res, 400, { error: 'Keep at least one rule — an empty list files every issue under Other', errors: [] });
+    plan.categoryRules = rules;
+    store.savePlan(plan);
+    store.audit('categoryRules.save', { count: rules.length });
+    return json(res, 200, { ok: true, rules, hits: classify.ruleHits(issues(), rules) });
+  }
+
+  /* What these rules WOULD do, without saving them. First match wins, so a new
+     rule in position 1 can quietly swallow the work three other rules used to
+     claim; this is how you see that before it is the live split. */
+  if (p === '/api/category-rules/preview' && req.method === 'POST') {
+    const body = await readJsonBody(req);
+    const { rules, errors } = classify.validateRules(body.rules);
+    const issues = Object.values(store.getSnapshot().issues || {});
+    return json(res, 200, {
+      errors,
+      hits: errors.length ? null : classify.ruleHits(issues, rules),
+      mix: errors.length ? null : classify.mix(issues, rules),
+    });
   }
 
   if (p === '/api/availability' && req.method === 'PUT') {

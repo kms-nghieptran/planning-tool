@@ -137,17 +137,20 @@ const SettingsView = (() => {
       <section class="section">
         <div class="card">
           <h3>Work categorisation</h3>
-          <div class="sub">First rule that matches wins. This is what drives the work-mix split everywhere.</div>
-          <div class="table-wrap" style="margin-top:10px">
-            <table>
-              <thead><tr><th>#</th><th>If</th><th>Operator</th><th>Value</th><th>Category</th></tr></thead>
-              <tbody>${(s.plan.categoryRules || s.defaultRules).map((r, i) => `
-                <tr><td class="muted">${i + 1}</td><td class="mono">${UI.esc(r.field)}</td><td class="muted">${UI.esc(r.op)}</td><td class="mono">${UI.esc(r.value)}</td>
-                <td><span class="tag"><i class="dot" style="background:${UI.CATEGORY_COLORS[r.category]}"></i>${UI.esc((s.categories[r.category] || {}).label || r.category)}</span></td></tr>`).join('')}
-              </tbody>
+          <div class="sub">First rule that matches wins, so the order <em>is</em> the meaning. This drives the work-mix split everywhere.</div>
+          <div class="table-wrap rules-wrap" style="margin-top:10px">
+            <table class="rules-table">
+              <thead><tr><th>#</th><th>If</th><th>Operator</th><th>Value</th><th>Category</th><th class="num" title="Issues this rule wins outright — a rule shadowed by one above it shows 0">Wins</th><th></th></tr></thead>
+              <tbody id="ruleRows"></tbody>
             </table>
           </div>
-          <p class="muted" style="font-size:11.5px;margin-top:10px">Edit these in <code>data/store/plan.json</code> under <code>categoryRules</code>, or leave it <code>null</code> to keep these defaults.</p>
+          <div class="btn-row">
+            <button class="btn sm" data-act="rules-save">Save rules</button>
+            <button class="btn ghost sm" data-act="rules-add">Add rule</button>
+            <button class="btn ghost sm" data-act="rules-preview">Preview effect</button>
+            <button class="btn ghost sm" data-act="rules-reset">Reset to defaults</button>
+          </div>
+          <div id="ruleStatus" class="muted" style="font-size:11.5px;margin-top:10px"></div>
         </div>
       </section>
 
@@ -287,6 +290,77 @@ const SettingsView = (() => {
   function wire(state, mount, s) {
     UI.$('#stTeam', mount).addEventListener('change', (e) => { state.teamId = e.target.value; App.refresh(); });
 
+    /* ── the work-categorisation rule editor ─────────────────────────────
+       The draft lives in this closure, not in the DOM, and the table is drawn
+       FROM the draft. Reordering is the whole point of this editor — first
+       match wins, so a rule's position is its meaning — and scraping five
+       controls back out of a table on every move is exactly how row 3 ends up
+       wearing row 2's value. */
+    const rules = (s.plan.categoryRules || s.defaultRules || []).map(r => ({ ...r }));
+    const cats = Object.entries(s.categories || {}).map(([key, c]) => ({ key, label: c.label || key }));
+    let counts = s.ruleHits || { byRule: {}, unmatched: 0, total: 0 };
+    let custom = !!s.plan.categoryRules;
+    let stale = false;   // edited since the counts on screen were computed
+
+    const STALE = '<strong>Unsaved changes.</strong> The win counts are cleared because they belong to the rules in force, not to this draft — <em>Preview effect</em> recounts without saving.';
+    const status = (html) => { UI.$('#ruleStatus', mount).innerHTML = html; };
+
+    /* A stored rule may name a field, operator or category this build no longer
+       offers. Quietly selecting the first option would rewrite his rule the next
+       time he saves anything, so the unknown value stays in the list, selected
+       and labelled, and fails validation loudly at save. */
+    const opt = (list, cur) => {
+      const items = list || [];
+      const known = items.some(x => x.key === cur);
+      return items.map(choice => `<option value="${UI.esc(choice.key)}"${choice.key === cur ? ' selected' : ''}>${UI.esc(choice.label)}</option>`).join('')
+        + (known ? '' : `<option value="${UI.esc(cur || '')}" selected>${UI.esc(cur || '(none)')}${items.length ? ' — not recognised' : ''}</option>`);
+    };
+
+    const ruleRow = (r, i, n) => `
+      <tr data-i="${i}">
+        <td class="muted">${i + 1}</td>
+        <td><select data-k="field" title="${UI.esc(((s.fields || []).find(f => f.key === r.field) || {}).note || '')}">${opt(s.fields, r.field)}</select></td>
+        <td><select data-k="op">${opt(s.ops, r.op)}</select></td>
+        <td><input type="text" data-k="value" value="${UI.esc(r.value == null ? '' : r.value)}" placeholder="e.g. Maintenance"></td>
+        <td><select data-k="category">${opt(cats, r.category)}</select></td>
+        <td class="num rule-wins">${stale ? '<span class="muted">—</span>'
+          : `<span class="${(counts.byRule || {})[r.id] ? '' : 'muted'}">${UI.int((counts.byRule || {})[r.id] || 0)}</span>`}</td>
+        <td class="rule-ops">
+          <button class="btn ghost xs" data-act="rule-up" data-i="${i}" title="Move up"${i === 0 ? ' disabled' : ''}>↑</button>
+          <button class="btn ghost xs" data-act="rule-down" data-i="${i}" title="Move down"${i === n - 1 ? ' disabled' : ''}>↓</button>
+          <button class="btn ghost xs" data-act="rule-del" data-i="${i}" title="Delete this rule">✕</button>
+        </td>
+      </tr>`;
+
+    const drawRules = () => {
+      UI.$('#ruleRows', mount).innerHTML = rules.length
+        ? rules.map((r, i) => ruleRow(r, i, rules.length)).join('')
+        : '<tr><td colspan="7" class="empty">No rules — every issue would classify as Other. Add one.</td></tr>';
+      status(stale ? STALE
+        : `Using ${custom ? '<strong>your rules</strong>' : 'the shipped defaults'} · ${UI.int(counts.total || 0)} issues classified, `
+          + `<strong>${UI.int(counts.unmatched || 0)}</strong> match no rule and file under Other. A rule showing 0 is shadowed by one above it.`);
+    };
+
+    // No redraw while typing — it would steal focus mid-edit. Only the counts
+    // and the status line go wrong, and both now say so.
+    const markStale = () => {
+      stale = true;
+      UI.$$('#ruleRows .rule-wins', mount).forEach(td => { td.innerHTML = '<span class="muted">—</span>'; });
+      status(STALE);
+    };
+
+    mount.addEventListener('change', (e) => {
+      const ctl = e.target.closest('[data-k]');
+      const rows = UI.$('#ruleRows', mount);
+      if (!ctl || !rows || !rows.contains(ctl)) return;
+      const i = Number(ctl.closest('tr').dataset.i);
+      if (!rules[i]) return;
+      rules[i][ctl.dataset.k] = ctl.value;
+      markStale();
+    });
+
+    drawRules();
+
     const saveTeam = async (teamId, patch) => {
       await UI.jsonPut('/api/team', { teamId, ...patch });
       UI.toast('Team updated — run a sync to pull its sprints');
@@ -367,6 +441,43 @@ const SettingsView = (() => {
           }));
           await UI.jsonPut('/api/plan', { teams });
           UI.toast('Capacity model saved'); App.refresh();
+        } else if (act === 'rules-add') {
+          rules.push({ id: `r${Date.now().toString(36)}`, field: 'labels', op: 'includes', value: '', category: 'maintenance' });
+          stale = true; drawRules();
+        } else if (act === 'rule-up' || act === 'rule-down') {
+          const i = Number(btn.dataset.i), j = act === 'rule-up' ? i - 1 : i + 1;
+          if (j < 0 || j >= rules.length) return;
+          [rules[i], rules[j]] = [rules[j], rules[i]];
+          stale = true; drawRules();
+        } else if (act === 'rule-del') {
+          const i = Number(btn.dataset.i), r = rules[i];
+          if (!r) return;
+          if (!confirm(`Delete rule ${i + 1} — ${r.field} ${r.op} "${r.value}" → ${r.category}?\n\nWork it used to claim falls through to the rules below it, or to Other. Nothing is written until you press Save rules.`)) return;
+          rules.splice(i, 1);
+          stale = true; drawRules();
+        } else if (act === 'rules-preview') {
+          const r = await UI.jsonPost('/api/category-rules/preview', { rules });
+          if ((r.errors || []).length) {
+            status(`<span style="color:var(--risk)">${r.errors.map(x => UI.esc(x.message)).join('<br>')}</span>`);
+            return UI.toast(`${r.errors.length} problem${r.errors.length > 1 ? 's' : ''} — nothing saved`, true);
+          }
+          counts = r.hits; stale = false; drawRules();
+          const split = Object.entries(r.mix.byCategory).filter(([, m]) => m.count)
+            .map(([k, m]) => `${UI.esc((s.categories[k] || {}).label || k)} <strong>${m.share}%</strong>`).join(' · ');
+          status(`Over all ${UI.int(r.hits.total)} issues this draft gives ${split} — ${UI.int(r.hits.unmatched)} match no rule. <strong>Not saved yet.</strong>`);
+        } else if (act === 'rules-save') {
+          try {
+            await UI.jsonPut('/api/category-rules', { rules });
+          } catch (err) {
+            status(`<span style="color:var(--risk)">${UI.esc(err.message).split(' · ').join('<br>')}</span>`);
+            throw err;
+          }
+          UI.toast(`${rules.length} rule${rules.length === 1 ? '' : 's'} saved — the work mix is recalculated everywhere`);
+          App.refresh();
+        } else if (act === 'rules-reset') {
+          if (!confirm('Replace your categorisation rules with the shipped defaults?\n\nYour current rules are discarded and cannot be recovered from here.')) return;
+          await UI.jsonPut('/api/category-rules', { rules: null });
+          UI.toast('Back to the shipped defaults'); App.refresh();
         } else if (act === 'save-holidays') {
           await UI.jsonPut('/api/plan', { holidays: v('holidays').split(',').map(x => x.trim()).filter(Boolean) });
           UI.toast('Holidays saved'); App.refresh();

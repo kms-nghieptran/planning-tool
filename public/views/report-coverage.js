@@ -1,9 +1,10 @@
 /* Coverage — automation status for one component at a time.
 
-   Three questions, in the order a lead asks them:
+   Four questions, in the order a lead asks them:
      1. What state is this suite in?              → the status breakdown
      2. Which suites are behind?                  → coverage by component (All only)
      3. How much of each has moved to TrueTest?   → TrueTest vs KSE
+     4. So what should I be doing about it?       → major risks & attention
 
    The ratio is the one already agreed for iPipeline and is NOT redefined here:
      coverage % = (Automated + Maintenance) ÷ (Automated + Maintenance + Ready + Blocked)
@@ -27,11 +28,20 @@ const CoverageReport = (() => {
   // from scratch each time.
   let component = null;
   let family = null;
+  // The movement window, in days. Module state like the two above: this screen
+  // is a lens on one dataset, not a place you deep-link to.
+  let days = 180;
 
   const tone = (p) => (p >= 80 ? 'good' : p < 50 ? 'over' : 'under');
 
   async function render(state, mount) {
-    const d = await UI.api(`/api/reports/coverage${component ? `?component=${encodeURIComponent(component)}` : ''}`);
+    const qs = component ? `?component=${encodeURIComponent(component)}` : '';
+    // In parallel: the movement query walks a different table and there is no
+    // reason for the reader to wait for one before the other starts.
+    const [d, moved] = await Promise.all([
+      UI.api(`/api/reports/coverage${qs}`),
+      UI.api(`/api/reports/coverage/movement${qs}${qs ? '&' : '?'}days=${days}`).catch(() => null),
+    ]);
 
     if (!d.total && !d.components.length) {
       mount.innerHTML = `<div class="card"><div class="empty">
@@ -64,11 +74,35 @@ const CoverageReport = (() => {
       </section>
 
       ${statusSection(d)}
+      ${movementSection(d, moved)}
       ${d.component ? '' : componentSection(d, rows)}
       ${toolSection(d, toolRows)}
+      ${attentionSection(d)}
     `;
 
-    mount.addEventListener('click', (e) => {
+    mount.addEventListener('click', async (e) => {
+      const w = e.target.closest('[data-days]');
+      if (w) { e.preventDefault(); days = Number(w.dataset.days) || 180; App.refresh(); return; }
+
+      const bf = e.target.closest('[data-act="backfill"]');
+      if (bf) {
+        e.preventDefault();
+        // Minutes, not seconds: it reads every epic's changelog out of Jira.
+        // Saying so beats a button that looks broken while it works.
+        bf.disabled = true;
+        UI.toast('Reading Jira transition history — this takes a minute…');
+        try {
+          const r = await UI.jsonPost('/api/reports/coverage/backfill', { weeks: 26 });
+          UI.toast(`${r.withHistory} of ${r.epics} ${UI.esc('')}had transitions · ${r.dates} dates reconstructed`
+            + (r.truncated ? ` · ${r.truncated} had more history than Jira returned` : ''));
+          App.refresh();
+        } catch (err) {
+          UI.toast(err.message, true);
+          bf.disabled = false;
+        }
+        return;
+      }
+
       const f = e.target.closest('[data-family]');
       if (f) { e.preventDefault(); family = f.dataset.family || null; App.refresh(); return; }
       // Expanding a component's tool breakdown is a DOM toggle, not a refresh:
@@ -229,6 +263,177 @@ const CoverageReport = (() => {
   }
 
   const bucketCount = (d, k) => (d.buckets.find(b => b.key === k) || {}).count || 0;
+
+  /* ── 1b. coverage movement ────────────────────────────────────────── */
+
+  /**
+   * HOW COVERAGE HAS MOVED — the one question this screen could not answer.
+   *
+   * Everything else here is a photograph. "Are we getting better?" needs two
+   * photographs, and until now the store kept only the latest: a sync overwrote
+   * each epic's Automation Status and the previous value was gone. There was no
+   * reconstructing it either — only a third of the automated epics carry a
+   * resolution date, so two thirds of any curve would have been invented.
+   *
+   * So the history is now recorded on every sync, and Jira's own transition
+   * history can be replayed to fill in the past. Both are shown, and which is
+   * which is visible: an observed reading is a solid dot, a reconstructed one
+   * is hollow. That distinction is the whole reason this section can be quoted
+   * in a status report without a caveat attached by hand.
+   *
+   * MOVEMENT IS IN PERCENTAGE POINTS. 50% to 55% is "+5 points", never "+10%".
+   */
+  function movementSection(d, m) {
+    const windows = [30, 90, 180, 365];
+    const head = `
+      <div class="section-head" style="margin-bottom:4px">
+        <h3>Coverage movement</h3>
+        <div class="spacer"></div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          ${windows.map(w => `<button class="chip${days === w ? ' active' : ''}" data-days="${w}">${w >= 365 ? '1 year' : `${w}d`}</button>`).join('')}
+        </div>
+      </div>`;
+
+    if (!m || !m.hasTrend) return `
+      <section class="section">
+        <div class="card wide">
+          ${head}
+          <div class="sub">${d.component ? `${UI.esc(d.component)} · ` : ''}Coverage over time, once there are two readings to compare</div>
+          <div style="margin-top:12px;padding:12px 14px;border-radius:var(--radius-sm);background:var(--app-subtle)">
+            <div class="eyebrow"><i></i>${(m && m.points || []).length ? 'One reading so far' : 'No history yet'}</div>
+            <p style="margin:8px 0 0;font-size:12.5px;line-height:1.5">
+              Nothing in this tool remembered what coverage <em>was</em> — a sync overwrites each
+              ${UI.esc(d.scope.toLowerCase())}'s Automation Status and the old value is gone, and it could not be
+              worked out backwards either: only a third of the automated ${UI.esc(d.scope.toLowerCase())}s carry a
+              resolution date to place them by.
+            </p>
+            <p style="margin:8px 0 0;font-size:12.5px;line-height:1.5">
+              From now on <strong>every sync records one</strong>${(m && m.points || []).length
+                ? ` — the first is ${UI.esc(m.points[0].at)}. A second one and this becomes a chart.`
+                : '. Run a sync and this starts filling in.'}
+              To have it now instead, <strong>Backfill from Jira</strong> replays each
+              ${UI.esc(d.scope.toLowerCase())}'s Automation Status transitions and reconstructs the past six months.
+            </p>
+            <div class="btn-row">
+              <button class="btn sm" data-act="backfill">Backfill from Jira history</button>
+            </div>
+            <p class="muted" style="font-size:11.5px;margin:10px 0 0">
+              A reconstruction places each ${UI.esc(d.scope.toLowerCase())} by Jira's own transition dates, but reads
+              today's components and labels — so a suite something moved between is right in total and can be wrong
+              per component. It never overwrites a reading this tool took itself.
+            </p>
+          </div>
+        </div>
+      </section>`;
+
+    const up = m.deltaPct > 0, flat = m.deltaPct === 0;
+    const arrow = flat ? '→' : up ? '↑' : '↓';
+    const moved = m.buckets.filter(b => b.delta).sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
+    const rows = family ? (m.movers || []).filter(r => r.family === family) : (m.movers || []);
+
+    return `
+      <section class="section">
+        <div class="card wide">
+          ${head}
+          <div class="sub">
+            ${d.component ? `${UI.esc(d.component)} · ` : 'Across every component · '}
+            ${UI.esc(m.span.from)} → ${UI.esc(m.span.to)} · ${m.span.readings} readings
+          </div>
+
+          <div class="move-head">
+            <div class="move-delta ${flat ? '' : up ? 'up' : 'down'}">
+              <span class="move-arrow">${arrow}</span>
+              <span class="move-value">${flat ? 'no change' : `${up ? '+' : ''}${m.deltaPct}`}</span>
+              ${flat ? '' : '<small>points</small>'}
+            </div>
+            <div class="move-from">
+              ${UI.pct(m.from.coveragePct)} <span class="muted">on ${UI.esc(m.from.at)}</span>
+              &nbsp;→&nbsp; <strong>${UI.pct(m.to.coveragePct)}</strong> <span class="muted">today</span>
+            </div>
+          </div>
+
+          ${Charts.trend(m.points)}
+
+          <div class="move-buckets">
+            ${moved.length
+              ? moved.map(b => `
+                <span class="tag ${b.delta > 0 ? (b.covered ? 'ok' : 'warn') : ''}" title="${UI.esc(b.label)}: ${b.from} → ${b.to}">
+                  <i class="dot" style="background:${BUCKET_COLOR[b.key]}"></i>${UI.esc(b.label)}
+                  <strong>${b.delta > 0 ? '+' : ''}${UI.int(b.delta)}</strong>
+                </span>`).join('')
+              : '<span class="muted" style="font-size:12px">No bucket changed over this window.</span>'}
+          </div>
+          <p class="muted" style="font-size:11.5px;margin-top:10px">
+            Counts, not percentages. Coverage can fall while Automated rises — new work arriving unautomated grows the
+            denominator faster than the numerator, which is a different problem from work going backwards.
+          </p>
+
+          ${d.component || !rows.length ? '' : `
+            <h3 style="margin-top:22px">Which components moved</h3>
+            <div class="sub">Biggest change first, up and down. Click one to narrow the screen to it.</div>
+            <div class="table-wrap" style="margin-top:10px">
+              <table>
+                <thead><tr>
+                  <th>Component</th><th>Family</th>
+                  <th class="num">Then</th><th class="num">Now</th><th class="num">Change</th>
+                  <th class="num" title="Automatable ${UI.esc(d.scope.toLowerCase())}s — the denominator">Scope</th>
+                  <th>What moved</th>
+                </tr></thead>
+                <tbody>${rows.map(r => `
+                  <tr>
+                    <td>${componentCell(d, r.component)}</td>
+                    <td class="muted">${UI.esc(r.family.split(' —')[0])}</td>
+                    <td class="num muted">${UI.pct(r.from)}</td>
+                    <td class="num pct ${tone(r.to)}">${UI.pct(r.to)}</td>
+                    <td class="num ${r.delta > 0 ? 'pct good' : r.delta < 0 ? 'pct over' : 'muted'}">
+                      ${r.delta > 0 ? '+' : ''}${r.delta === 0 ? '—' : r.delta}
+                    </td>
+                    <td class="num muted" title="Automatable went ${r.automatableFrom} → ${r.automatableTo}">
+                      ${r.automatableDelta > 0 ? '+' : ''}${r.automatableDelta || '—'}
+                    </td>
+                    <td>${drivers(r)}</td>
+                  </tr>`).join('')}
+                </tbody>
+              </table>
+            </div>
+            <p class="muted" style="font-size:11.5px;margin-top:10px">
+              "Scope" is how many automatable ${UI.esc(d.scope.toLowerCase())}s the suite gained or lost. A component that
+              fell while its scope grew did not go backwards — it got bigger faster than it got automated.
+            </p>`}
+
+          ${sourceNote(m)}
+        </div>
+      </section>`;
+  }
+
+  /** The bucket changes behind one component's move, largest first. */
+  function drivers(r) {
+    const parts = Object.entries(r.buckets || {})
+      .filter(([, v]) => v)
+      .sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]))
+      .slice(0, 3)
+      .map(([k, v]) => `<span class="tag"><i class="dot" style="background:${BUCKET_COLOR[k]}"></i>${UI.esc(bucketMeta(k).label)} <strong>${v > 0 ? '+' : ''}${v}</strong></span>`);
+    return parts.length ? `<div style="display:flex;gap:4px;flex-wrap:wrap">${parts.join('')}</div>` : '<span class="muted">—</span>';
+  }
+
+  /**
+   * Where these readings came from.
+   *
+   * A curve that mixes observation and inference has to say so on the same
+   * screen as the curve, not in a tooltip nobody opens — otherwise the first
+   * time it is pasted into a status report it becomes a measurement.
+   */
+  function sourceNote(m) {
+    const by = Object.fromEntries((m.sources || []).map(s => [s.source, s.days]));
+    const observed = by.sync || 0, inferred = by.changelog || 0;
+    if (!inferred) return `<p class="muted" style="font-size:11.5px;margin-top:14px">
+      ${UI.int(observed)} readings, each taken by a sync. Solid dots are days this tool counted for itself.</p>`;
+    return `<p class="muted" style="font-size:11.5px;margin-top:14px">
+      ${UI.int(observed)} day${observed === 1 ? '' : 's'} observed by a sync (solid dots) ·
+      ${UI.int(inferred)} reconstructed from Jira's transition history (hollow).
+      A reconstruction uses today's components and labels, so a suite something moved between can be wrong per
+      component while the portfolio total stays right. Observations are never overwritten by one.</p>`;
+  }
 
   /* ── 2. coverage by component, when nothing is selected ───────────── */
 
@@ -417,6 +622,91 @@ const CoverageReport = (() => {
           add up to the component's total. A coverage cell reads "—" when nothing in that
           half is automatable yet. Use ▸ to open a component's full status breakdown without leaving the list.
         </p>`}
+      </section>`;
+  }
+
+  /* ── 4. major risks & attention ───────────────────────────────────── */
+
+  /**
+   * The findings, last on the page — the conclusion after all the evidence.
+   *
+   * The rest of this screen is deliberately flat — seven buckets, 125
+   * components, two tools, all of it equally loud. That is the right way to
+   * show the data and the wrong way to answer "what do I do on Monday". This
+   * section is the only opinionated thing here, which is why every finding
+   * carries its own number and the sentence that justifies it: an alert you
+   * cannot check is an alert you learn to scroll past.
+   *
+   * It reads every table above it — the status buckets, the component grid,
+   * the tool split — so it goes after all three. A conclusion placed before
+   * its evidence is one you either take on trust or scroll back down to
+   * check; placed after, each finding lands on numbers already read.
+   *
+   * It moves with the component picker for free — the payload it reads is
+   * already scoped — so the same panel is the portfolio view when nothing is
+   * selected and the suite's own view when something is.
+   */
+  const SEV = {
+    risk: { tag: 'risk', label: 'Risk' },
+    watch: { tag: 'warn', label: 'Watch' },
+    note: { tag: '', label: 'Note' },
+  };
+
+  // A percentage is rounded to one place by the model and must be printed that
+  // way: UI.int would turn 63.6% into 64%, which is a different claim from the
+  // one the tables below make.
+  const pctUnit = (f) => String(f.unit || '').startsWith('%');
+
+  function findingRow(d, f) {
+    const sev = SEV[f.severity] || SEV.note;
+    const comps = f.components || [];
+    return `
+      <li class="finding sev-${UI.esc(f.severity)}">
+        <div class="finding-head">
+          <span class="tag ${sev.tag}">${sev.label}</span>
+          <strong>${UI.esc(f.title)}</strong>
+          <div class="spacer"></div>
+          <span class="finding-value">${pctUnit(f) ? UI.pct(f.value) : UI.int(f.value)}${f.unit && !pctUnit(f) ? `<small>${UI.esc(f.unit)}</small>` : ''}${pctUnit(f) && f.unit !== '%' ? `<small>${UI.esc(f.unit.replace(/^%\s*/, ''))}</small>` : ''}</span>
+        </div>
+        <p class="finding-detail">${UI.esc(f.detail)}</p>
+        ${comps.length ? `
+          <div class="finding-comps">
+            ${comps.map(c => `<button class="chip" data-component="${UI.esc(c.name)}"
+                title="Narrow this screen to ${UI.esc(c.name)}">${UI.esc(c.name)}
+                <span class="muted">${pctUnit(c) ? UI.pct(c.value) : `${UI.int(c.value)}${UI.esc(c.unit || '')}`}</span></button>`).join('')}
+            ${f.more ? `<span class="muted" style="align-self:center;font-size:12px">and ${UI.int(f.more)} more</span>` : ''}
+          </div>` : ''}
+        ${f.action ? `<p class="finding-action">${UI.esc(f.action)}</p>` : ''}
+      </li>`;
+  }
+
+  function attentionSection(d) {
+    const a = d.attention || { findings: [], counts: { risk: 0, watch: 0, note: 0 }, clear: true };
+    const c = a.counts;
+    const chips = [
+      c.risk ? `<span class="tag risk">${c.risk} risk${c.risk === 1 ? '' : 's'}</span>` : '',
+      c.watch ? `<span class="tag warn">${c.watch} to watch</span>` : '',
+      c.note ? `<span class="tag">${c.note} note${c.note === 1 ? '' : 's'}</span>` : '',
+    ].filter(Boolean).join(' ');
+
+    return `
+      <section class="section">
+        <div class="card wide attention-card">
+          <div class="section-head" style="margin-bottom:4px">
+            <h3>Major risks &amp; attention</h3>
+            <div class="spacer"></div>
+            ${chips}
+          </div>
+          <div class="sub">
+            ${d.component
+              ? `${UI.esc(d.component)} only — clear the component above to see this across the portfolio`
+              : `Across all ${d.byComponent.length} components — pick one above, or a component below, to see its own`}
+          </div>
+          ${a.clear
+            ? `<div class="empty" style="margin-top:12px">Nothing to flag${d.component ? ` in ${UI.esc(d.component)}` : ''}.
+                 Coverage is ${UI.pct(d.coveragePct)}, nothing is blocked, and every ${UI.esc(d.scope.toLowerCase())} has a status.</div>`
+            : `<ul class="findings">${a.findings.map(f => findingRow(d, f)).join('')}</ul>`}
+        </div>
       </section>`;
   }
 

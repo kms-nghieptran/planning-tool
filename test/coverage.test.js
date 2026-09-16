@@ -375,7 +375,13 @@ async function renderHtml(opts = {}) {
   // helper the view had started using, which says nothing about the view.
   vm.runInContext(`${fs.readFileSync(path.join(__dirname, '..', 'public', 'ui.js'), 'utf8')}\n;globalThis.UI = UI;`, ctx);
   ctx.UI.setJiraBase('https://ipipelinejira.atlassian.net');
-  ctx.UI.api = async () => payload;
+  // The movement section fetches separately. Answering it with the coverage
+  // payload was how this suite discovered that a flag called `ready` collides
+  // with the Ready-for-Automation bucket count every coverage object spreads at
+  // its top level — so it gets its own shape here, empty and explicit.
+  ctx.UI.api = async (p) => (p.includes('/movement')
+    ? { hasTrend: false, points: [], from: null, to: null, deltaPct: null, buckets: [], movers: [], sources: [], days: 180 }
+    : payload);
 
   vm.runInContext(`${VIEW}\n;globalThis.__v = CoverageReport;`, ctx);
   // `wireCombo` closes over ui.js's own `$`, which calls `root.querySelector` —
@@ -495,6 +501,407 @@ check('the API route exists and passes the component through', () => {
   const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   assert.match(server, /p === '\/api\/reports\/coverage'/);
   assert.match(server, /component: q\.get\('component'\) \|\| null/);
+});
+
+
+/* ══ major risks & attention ═══════════════════════════════════════════
+ *
+ * The rest of this screen is deliberately flat. This section is the only part
+ * of it with an opinion, which makes it the only part that can be confidently
+ * wrong — a panel that says "nothing to flag" over a suite with forty blocked
+ * epics is worse than no panel, because it is read as a clean bill of health.
+ *
+ * So the checks below are about the two ways it can lie: saying something the
+ * numbers underneath do not support, and staying silent when they do.
+ */
+
+const vm = require('node:vm');
+
+/** A view with a fault dialled in, so a rule can be aimed at one thing. */
+const viewWith = (list) => cov.view(snapshot(list), {});
+
+check('THE FINDINGS ARE READ OFF THE VIEW, NOT COUNTED AGAIN FROM THE ISSUES', () => {
+  // The property the whole section rests on. A risk panel that recounts the
+  // epics is a second opinion, and the day it disagrees with the table below
+  // it, nobody can tell which of the two is wrong — so both stop being
+  // believed. Proved by editing the view and watching the finding follow: a
+  // recount would ignore this and report 1.
+  const v = cov.view(fixture(), {});
+  assert.strictEqual(v.untriaged, 1, 'precondition: the fixture has one untriaged epic');
+
+  v.untriaged = 97;
+  v.total = 200;
+  const f = cov.assess(v).findings.find(x => x.id === 'untriaged');
+  assert.strictEqual(f.value, 97,
+    'the finding must report the view it was handed — anything else is a second source of truth');
+  assert.match(f.detail, /200/, 'and take its denominator from there too');
+});
+
+check('SEVERITY RISES WITH THE SHARE, not merely with the count', () => {
+  // 20 untriaged epics out of 1000 is housekeeping; 20 out of 30 is that
+  // nobody has looked at this suite. A rule that fires on the raw count
+  // cannot tell those apart, and would cry wolf on every large component.
+  const small = cov.assess({ ...cov.view(fixture(), {}), untriaged: 20, total: 1000 });
+  const large = cov.assess({ ...cov.view(fixture(), {}), untriaged: 20, total: 30 });
+  assert.strictEqual(small.findings.find(f => f.id === 'untriaged').severity, 'note');
+  assert.strictEqual(large.findings.find(f => f.id === 'untriaged').severity, 'risk');
+});
+
+check('and risks are listed before things to watch, which come before notes', () => {
+  // Built so the rules FIRE in the wrong order: the obsolete-label note is
+  // raised second and the zero-coverage risk last, so a list that merely keeps
+  // the order the rules ran in comes out note-before-risk. Checking the house
+  // fixture instead proves nothing — its rules happen to fire in rank order.
+  n = 0;
+  const a = cov.assess(viewWith([
+    epic('Automated', ['PS_Ok', 'TrueTest'], ['obsolete']),   // → note, raised early
+    epic('Automated', ['PS_Ok', 'TrueTest']),
+    epic('Automated', ['PS_Ok', 'TrueTest']),
+    epic('Ready for Automation', ['PS_Dead', 'TrueTest']),    // → risk, raised last
+    epic('Ready for Automation', ['PS_Dead', 'TrueTest']),
+    epic('Ready for Automation', ['PS_Dead', 'TrueTest']),
+  ]));
+  const rank = { risk: 0, watch: 1, note: 2 };
+  assert.ok(a.findings.some(f => f.id === 'obsolete-in-ratio') && a.findings.some(f => f.id === 'components-zero'),
+    `precondition: the early low finding and the late risk both fire: ${a.findings.map(f => f.severity + ':' + f.id).join(', ')}`);
+  assert.ok(a.findings.some(f => f.severity !== 'risk'), 'and the scale is not flat');
+  const order = a.findings.map(f => rank[f.severity]);
+  assert.deepStrictEqual(order, order.slice().sort((x, y) => x - y),
+    `a list you have to read all of is a list you stop reading: ${a.findings.map(f => f.severity).join(', ')}`);
+  assert.strictEqual(a.counts.risk + a.counts.watch + a.counts.note, a.findings.length,
+    'and the header counts have to add up to the list underneath');
+});
+
+check('A COMPONENT WITH WORK AND NOTHING COVERED IS NAMED, not merely counted', () => {
+  n = 0;
+  const v = viewWith([
+    epic('Automated', ['PS_Good']), epic('Automated', ['PS_Good']), epic('Ready for Automation', ['PS_Good']),
+    epic('Ready for Automation', ['PS_Dead']), epic('Ready for Automation', ['PS_Dead']), epic('Blocked', ['PS_Dead']),
+  ]);
+  const f = cov.assess(v).findings.find(x => x.id === 'components-zero');
+  assert.ok(f, 'a suite that does not exist yet is different from one that is merely behind');
+  assert.deepStrictEqual(f.components.map(c => c.name), ['PS_Dead'],
+    'naming the component is the whole value — a count sends him back to the grid to find it');
+  assert.ok(!f.components.some(c => c.name === 'PS_Good'), 'and a covered suite must not appear in it');
+});
+
+check('but a one-epic component cannot top that list on a single miss', () => {
+  // Ranking by percentage alone puts a component with one Ready epic at 0%
+  // above a suite with forty at 45%, which is precisely backwards.
+  n = 0;
+  const v = viewWith([
+    epic('Ready for Automation', ['PS_Tiny']),
+    epic('Automated', ['PS_Real']), epic('Ready for Automation', ['PS_Real']),
+    epic('Ready for Automation', ['PS_Real']), epic('Ready for Automation', ['PS_Real']),
+  ]);
+  const a = cov.assess(v);
+  const zero = a.findings.find(x => x.id === 'components-zero');
+  assert.ok(!zero || !zero.components.some(c => c.name === 'PS_Tiny'),
+    'one epic is not evidence of a suite being unautomated');
+  const behind = a.findings.find(x => x.id === 'components-behind');
+  assert.ok(behind && behind.components.some(c => c.name === 'PS_Real'),
+    'while a real suite under the threshold still has to be named');
+});
+
+check('a single blocked epic still names its component, however few', () => {
+  // The floor above is about a component being too small to JUDGE. It is not
+  // about the size of the pile: one blocked epic is still the answer to
+  // "which suite", and applying the same floor here hides it completely.
+  n = 0;
+  const v = viewWith([
+    epic('Automated', ['PS_A']), epic('Automated', ['PS_A']), epic('Blocked', ['PS_A']),
+  ]);
+  const f = cov.assess(v).findings.find(x => x.id === 'blocked');
+  assert.ok(f, 'blocked work sits in the denominator and holds coverage down — it is never nothing');
+  assert.deepStrictEqual(f.components.map(c => c.name), ['PS_A']);
+});
+
+check('A HEADLINE NUMBER NEVER DOUBLE-COUNTS AN EPIC THAT LIVES IN TWO SUITES', () => {
+  // The grid below deliberately counts a shared epic in both its components,
+  // which is right for "how big is this suite" and catastrophic for "how many
+  // blocked epics are there" — adding those rows up invents work. The finding
+  // has to take its number from the bucket, which counts each epic once, and
+  // only its component chips from the grid.
+  n = 0;
+  const v = viewWith([
+    epic('Blocked', ['PS_A', 'PS_B']),               // ONE blocked epic, in two suites
+    epic('Automated', ['PS_A']), epic('Automated', ['PS_B']),
+    epic(null, ['PS_A', 'PS_B']),                    // …and one untriaged, likewise
+  ]);
+  const rowSum = (k) => v.byComponent.reduce((t, r) => t + r[k], 0);
+  assert.strictEqual(rowSum('blocked'), 2, 'precondition: the grid legitimately counts it twice');
+
+  const a = cov.assess(v);
+  assert.strictEqual(a.findings.find(f => f.id === 'blocked').value, 1,
+    'one epic is blocked, however many suites it belongs to');
+  assert.strictEqual(a.findings.find(f => f.id === 'untriaged').value, 1,
+    'and one is untriaged');
+  assert.deepStrictEqual(
+    a.findings.find(f => f.id === 'blocked').components.map(c => c.name).sort(), ['PS_A', 'PS_B'],
+    'while both suites are still named, because both of them have it');
+});
+
+check('A STATUS VALUE THE TOOL DOES NOT KNOW OUTRANKS EVERY FINDING ABOUT THE WORK', () => {
+  // It is not a fact about the suite, it is a fact about whether any number on
+  // the page can be trusted: an unrecognised value falls into No Status and
+  // drops straight out of the ratio, so real automated work can be invisible.
+  n = 0;
+  const v = viewWith([
+    epic('Automated', ['PS_A']), epic('Ready for Automation', ['PS_A']),
+    epic('Fully Automated', ['PS_A']), epic('Fully Automated', ['PS_A']),
+  ]);
+  const a = cov.assess(v);
+  const f = a.findings.find(x => x.id === 'unmapped-status');
+  assert.ok(f, 'a renamed Jira option must not vanish quietly');
+  assert.strictEqual(f.value, 2);
+  assert.match(f.detail, /Fully Automated/, 'and the value itself has to be in the message to be actionable');
+  assert.strictEqual(a.findings[0].id, 'unmapped-status',
+    'data integrity comes before anything the data says');
+});
+
+check('an epic labelled obsolete but still carrying a status is flagged', () => {
+  // bucketOf deliberately lets the status win. That is the right call and it is
+  // also a contradiction: either the label is stale, or retired work is
+  // propping up the coverage percentage.
+  n = 0;
+  const v = viewWith([
+    epic('Automated', ['PS_A']),
+    epic('Automated', ['PS_A'], ['obsolete']),        // the contradiction
+    epic(null, ['PS_A'], ['obsolete']),               // a properly retired epic
+    epic(null, ['PS_A'], ['obsolete']),               // …and another
+    epic('Ready for Automation', ['PS_A']),
+  ]);
+  assert.strictEqual(v.obsoleted, 2, 'precondition: two epics are retired the ordinary way');
+  assert.strictEqual(v.obsoleteWithStatus, 1,
+    'only the one INSIDE the ratio counts — the retired two are already outside it and are not a contradiction');
+  const f = cov.assess(v).findings.find(x => x.id === 'obsolete-in-ratio');
+  assert.ok(f, 'work that is retired and counted at the same time is worth one line');
+  assert.strictEqual(f.value, 1);
+});
+
+check('COVERAGE OF 0% OVER NOTHING AUTOMATABLE IS CALLED OUT, not reported as a failure', () => {
+  // Every epic N/A or untriaged: the ratio divides by zero and reads 0%, which
+  // looks identical to a suite that has automated nothing. Telling him to go
+  // and fix a suite that has nothing to fix is how a panel loses its reader.
+  n = 0;
+  const v = viewWith([epic('N/A for Automation', ['PS_X']), epic(null, ['PS_X'], ['obsolete'])]);
+  const a = cov.assess(v);
+  assert.ok(a.findings.some(f => f.id === 'nothing-automatable'));
+  assert.ok(!a.findings.some(f => f.id === 'coverage-low'),
+    '0% of nothing is not the same claim as 0% of forty');
+});
+
+check('AND WHEN THERE IS GENUINELY NOTHING WRONG IT SAYS SO', () => {
+  // "Clear" and "this section failed to run" look identical when both are
+  // empty, and the second one is the dangerous reading.
+  n = 0;
+  const v = viewWith([
+    epic('Automated', ['PS_A', 'TrueTest']), epic('Automated', ['PS_A', 'TrueTest']),
+    epic('Automated', ['PS_A', 'TrueTest']), epic('Automated', ['PS_A', 'TrueTest']),
+    epic('Ready for Automation', ['PS_A', 'TrueTest']),
+  ]);
+  const a = cov.assess(v);
+  assert.deepStrictEqual(a.findings, [], `expected a clean sheet, got ${a.findings.map(f => f.id).join(', ')}`);
+  assert.strictEqual(a.clear, true, 'the empty case has to be positively marked, not inferred from a length');
+});
+
+/* ── the same rules, one component at a time ──────────────────────────── */
+
+check('SELECTING A COMPONENT MAKES EVERY FINDING ABOUT THAT COMPONENT', () => {
+  // This is the half he asked for that is easy to get wrong: the section must
+  // not keep reporting the portfolio's problems while the tables underneath
+  // have narrowed to one suite.
+  n = 0;
+  const list = [
+    // a healthy suite…
+    epic('Automated', ['PS_Good', 'TrueTest']), epic('Automated', ['PS_Good', 'TrueTest']),
+    epic('Automated', ['PS_Good', 'TrueTest']), epic('Automated', ['PS_Good', 'TrueTest']),
+    epic('Ready for Automation', ['PS_Good', 'TrueTest']),
+    // …beside a bad one
+    epic('Blocked', ['PS_Bad']), epic('Blocked', ['PS_Bad']),
+    epic('Ready for Automation', ['PS_Bad']), epic(null, ['PS_Bad']),
+  ];
+  const good = cov.assess(cov.view(snapshot(list), { component: 'PS_Good' }));
+  const bad = cov.assess(cov.view(snapshot(list), { component: 'PS_Bad' }));
+
+  assert.strictEqual(good.scope, 'PS_Good');
+  assert.ok(!good.findings.some(f => f.id === 'blocked'),
+    "PS_Good has nothing blocked — the neighbour's blocked work must not appear under its name");
+  assert.ok(!good.findings.some(f => f.id === 'coverage-low'));
+
+  const blocked = bad.findings.find(f => f.id === 'blocked');
+  assert.strictEqual(blocked.value, 2, 'and the bad suite reports its own two, not the portfolio total');
+  assert.ok(bad.findings.some(f => f.id === 'coverage-low'));
+});
+
+check('and the findings that RANK components stand down when one is selected', () => {
+  // There is nothing to rank inside a single component, and a league table of
+  // one is a finding that tells him what he already chose.
+  n = 0;
+  const list = [
+    epic('Ready for Automation', ['PS_Dead']), epic('Ready for Automation', ['PS_Dead']),
+    epic('Ready for Automation', ['PS_Dead']), epic('Automated', ['PS_Other']),
+  ];
+  const all = cov.assess(cov.view(snapshot(list), {}));
+  const one = cov.assess(cov.view(snapshot(list), { component: 'PS_Dead' }));
+
+  assert.ok(all.findings.some(f => f.id === 'components-zero'), 'precondition: it fires across the portfolio');
+  assert.ok(!one.findings.some(f => f.id === 'components-zero' || f.id === 'components-behind'),
+    'a component cannot be ranked against itself');
+  assert.ok(one.findings.some(f => f.id === 'coverage-low'),
+    'while the finding about the suite ITSELF still has to fire');
+});
+
+check('a named component never carries another component\'s numbers', () => {
+  // The offender chips are the part a reader acts on, so a mismatch here sends
+  // him to the wrong suite with a number that does not exist in it.
+  n = 0;
+  const list = [
+    epic('Blocked', ['PS_One']), epic('Blocked', ['PS_Two']), epic('Blocked', ['PS_Two']),
+    epic('Automated', ['PS_One']),
+  ];
+  const v = cov.view(snapshot(list), {});
+  const f = cov.assess(v).findings.find(x => x.id === 'blocked');
+  for (const c of f.components) {
+    const row = v.byComponent.find(r => r.component === c.name);
+    assert.strictEqual(c.value, row.blocked,
+      `${c.name} is shown as ${c.value} but the grid below says ${row.blocked}`);
+  }
+  assert.strictEqual(f.components[0].name, 'PS_Two', 'and the worst one is first');
+});
+
+check('and a component\'s percentage is not rounded into a different number', async () => {
+  // 48.2% shown as 48% is a different claim from the one the grid below makes,
+  // and the two sitting on the same screen is how a reader stops trusting both.
+  n = 0;
+  const list = [
+    epic('Automated', ['PS_Odd']), epic('Ready for Automation', ['PS_Odd']), epic('Ready for Automation', ['PS_Odd']),
+    epic('Automated', ['PS_Fine']), epic('Automated', ['PS_Fine']), epic('Automated', ['PS_Fine']),
+  ];
+  const v = cov.view(snapshot(list), {});
+  const row = v.byComponent.find(r => r.component === 'PS_Odd');
+  assert.strictEqual(row.coveragePct, 33.3, 'precondition: a percentage with a decimal in it');
+
+  const html = await renderCoverage({ ...v, attention: cov.assess(v), project: 'AUTOKAT' });
+  // Scoped to the card. `data-component` is also on every row of the grid and
+  // the tool table, so a page-wide search finds whichever comes first and reads
+  // a number out of a different section entirely.
+  const card = html.slice(html.indexOf('attention-card'));
+  const chip = (card.match(/class="chip" data-component="PS_Odd"[^>]*>[\s\S]*?<span class="muted">([^<]*)</) || [])[1];
+  assert.strictEqual((chip || '').trim(), '33.3%',
+    `the chip says "${(chip || '').trim()}" where the grid says 33.3%`);
+});
+
+/* ── the section as the screen renders it ─────────────────────────────── */
+
+/** Render the real view with the real ui.js and hand back the HTML. */
+async function renderCoverage(payload) {
+  let html = '';
+  const el = () => ({
+    addEventListener() {}, value: '', hidden: false, dataset: {}, style: {}, disabled: false,
+    setAttribute() {}, getAttribute: () => null, select() {}, scrollIntoView() {}, focus() {},
+    classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+    textContent: '', offsetWidth: 100,
+    set innerHTML(_) {}, get innerHTML() { return ''; },
+    querySelector: () => el(), querySelectorAll: () => [], closest: () => null,
+  });
+  const ctx = {
+    console, Promise, setTimeout, clearTimeout, encodeURIComponent, CSS: { escape: String },
+    App: { refresh() {} },
+    Charts: new Proxy({}, { get: () => () => '' }),
+    document: { createElement: () => el(), querySelector: () => el(), querySelectorAll: () => [] },
+  };
+  vm.createContext(ctx);
+  vm.runInContext(`${fs.readFileSync(path.join(__dirname, '..', 'public', 'ui.js'), 'utf8')}\n;globalThis.UI = UI;`, ctx);
+  ctx.UI.api = async () => payload;
+  vm.runInContext(`${VIEW}\n;globalThis.__v = CoverageReport;`, ctx);
+  const mount = {
+    style: {}, addEventListener() {},
+    querySelector: () => el(), querySelectorAll: () => [],
+    set innerHTML(v) { html = v; }, get innerHTML() { return html; },
+  };
+  await ctx.__v.render({}, mount);
+  return html;
+}
+
+/** The payload the route builds, assembled the same way here. */
+const payloadFor = (opts) => {
+  const v = cov.view(fixture(), opts);
+  return { ...v, attention: cov.assess(v), project: 'AUTOKAT' };
+};
+
+check('THE SECTION IS LAST ON THE PAGE, AFTER EVERY TABLE IT READS', async () => {
+  // His call on where it reads best, and the reasoning holds: the findings are
+  // conclusions drawn from all three tables above them, and a conclusion placed
+  // before its evidence is one you either take on trust or scroll back down to
+  // check. Last means each finding lands on numbers already read.
+  //
+  // Pinned rather than left to chance, because the screen is one template
+  // literal where moving a line reorders the whole page and nothing else
+  // notices.
+  const html = await renderCoverage(payloadFor({}));
+  const at = html.indexOf('Major risks &amp; attention');
+  assert.ok(at > 0, 'the section has to render at all');
+  for (const before of ['Overall automation status', 'Coverage by component', 'TrueTest vs KSE']) {
+    assert.ok(at > html.indexOf(before), `the findings must come after "${before}"`);
+  }
+});
+
+check('and it is still last when a component is selected', async () => {
+  // The component grid is not rendered when one component is in view, so the
+  // section must not be anchored to a table that is no longer on the page.
+  const html = await renderCoverage(payloadFor({ component: NLG }));
+  const at = html.indexOf('Major risks &amp; attention');
+  assert.ok(at > 0);
+  assert.ok(!html.includes('Coverage by component'), 'precondition: the grid is hidden here');
+  assert.ok(at > html.indexOf('Overall automation status') && at > html.indexOf('TrueTest vs KSE'),
+    'it stays at the foot of the page rather than following whichever table happens to be there');
+});
+
+check('every finding the model produced reaches the screen, with its number', async () => {
+  // A panel that renders four of six findings is the worst possible version of
+  // this feature: it looks complete.
+  const p = payloadFor({});
+  const html = await renderCoverage(p);
+  assert.ok(p.attention.findings.length >= 3, 'precondition: the fixture has findings to show');
+  for (const f of p.attention.findings) {
+    assert.ok(html.includes(f.title.replace(/&/g, '&amp;')), `"${f.title}" is missing from the page`);
+  }
+  const rows = html.split('<li class="finding sev-').slice(1);
+  assert.strictEqual(rows.length, p.attention.findings.length,
+    `${rows.length} rows rendered for ${p.attention.findings.length} findings`);
+
+  // And each row carries ITS OWN number. A row that renders the title without
+  // the figure is the shape of alert people learn to ignore: a claim with
+  // nothing to check it against.
+  rows.forEach((row, i) => {
+    const f = p.attention.findings[i];
+    const cell = (row.match(/class="finding-value">([\s\S]*?)<\/span>/) || [])[1] || '';
+    const shownValue = cell.replace(/<[^>]+>/g, '').replace(/,/g, '').match(/-?[0-9.]+/);
+    assert.strictEqual(shownValue && shownValue[0], String(f.value),
+      `row ${i + 1} ("${f.title}") shows ${shownValue || '(nothing)'} where the model said ${f.value}`);
+  });
+});
+
+check('A NAMED COMPONENT IS CLICKABLE AND NARROWS THE SCREEN TO IT', async () => {
+  // The loop that makes the section worth having: see a risk, click the suite,
+  // and the same panel re-evaluates for that suite alone.
+  const html = await renderCoverage(payloadFor({}));
+  const chips = [...html.matchAll(/class="chip" data-component="([^"]+)"/g)].map(m => m[1]);
+  assert.ok(chips.length, 'the offender chips have to be buttons, not text');
+  assert.match(VIEW, /const c = e\.target\.closest\('\[data-component\]'\)/,
+    'and the handler that turns that click into a filter has to still be there');
+});
+
+check('and the section says which scope it is reporting on', async () => {
+  // The same panel means two different things depending on the picker above
+  // it, so it has to state which one it is — otherwise a portfolio risk reads
+  // as a component risk.
+  const all = await renderCoverage(payloadFor({}));
+  const one = await renderCoverage(payloadFor({ component: NLG }));
+  assert.match(all, /Across all \d+ components/);
+  assert.ok(!all.includes(`${NLG} only`));
+  assert.match(one, new RegExp(`${NLG} only`), 'a scoped panel has to say so in words, not only by its contents');
 });
 
 (async () => {

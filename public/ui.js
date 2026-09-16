@@ -437,6 +437,22 @@ const UI = (() => {
   }
 
   /**
+   * Test cases under maintenance, counted from the item's "relates to" links.
+   *
+   * Blank rather than zero on anything that is not a bucket story: a Story with
+   * no relates-to links is not maintaining nothing, the question simply does
+   * not apply to it, and a column of zeroes invites someone to add them up.
+   *
+   * A bucket story with no links DOES read zero, because there the zero is the
+   * answer — and usually the one worth acting on.
+   */
+  function testCasesCell(i) {
+    if (!i.bucket) return '<span class="muted">—</span>';
+    const n = Number(i.maintains) || 0;
+    return n ? String(n) : '<span class="tag warn" title="A bucket story with no &quot;relates to&quot; links — nothing says which suites this is maintaining">0</span>';
+  }
+
+  /**
    * @param {Array}  items  the sprint's issues
    * @param {object} state  the app state, for category labels
    * @param {object} o      `title` and `sub` override the heading
@@ -449,15 +465,29 @@ const UI = (() => {
     // cannot quietly come to mean "not on the roster", which is a different
     // number and was once reported as this one.
     const noAssignee = list.filter(i => !i.assignee).length;
+    // The sprint's maintenance load in one number, where the question is
+    // actually asked: "how many test cases are we keeping alive this sprint".
+    const buckets = list.filter(i => i.bucket);
+    const tests = buckets.reduce((t, i) => t + (Number(i.maintains) || 0), 0);
     return `
       <section class="section">
         <div class="section-head">
           <h2>${esc(o.title || 'All sprint items')}</h2>
-          <span class="muted">${list.length} items${noAssignee ? ` · ${noAssignee} with no assignee` : ''}${o.sub ? ` · ${esc(o.sub)}` : ''}</span>
+          <span class="muted">${list.length} items${noAssignee ? ` · ${noAssignee} with no assignee` : ''}${buckets.length ? ` · ${tests} test case${tests === 1 ? '' : 's'} maintained across ${buckets.length} bucket stor${buckets.length === 1 ? 'y' : 'ies'}` : ''}${o.sub ? ` · ${esc(o.sub)}` : ''}</span>
         </div>
         <div class="table-wrap">
-          <table>
-            <thead><tr><th>Key</th><th>Summary</th><th>Category</th><th>Assignee</th><th>Status</th><th class="num">Points</th><th>Component</th><th>Epic</th></tr></thead>
+          <!-- The column classes exist for print: on paper the table has to be
+               laid out to a fixed width, and the only way to say "the summary
+               gets a third and the key never breaks" is to be able to name the
+               columns. They cost nothing on screen. -->
+          <table class="items-table">
+            <thead><tr>
+              <th class="col-key">Key</th><th class="col-summary">Summary</th>
+              <th class="col-category">Category</th><th class="col-assignee">Assignee</th>
+              <th class="col-status">Status</th><th class="num col-points">Points</th>
+              <th class="col-component">Component</th><th class="col-epic">Epic</th>
+              <th class="num col-tests" title="Test cases this bucket story is maintaining — one per &quot;relates to&quot; linked work item">Test cases</th>
+            </tr></thead>
             <tbody>${list.map(i => `
               <tr>
                 <td>${issueKey(i.key)}</td>
@@ -468,6 +498,7 @@ const UI = (() => {
                 <td class="num">${i.points == null ? '<span class="tag risk">—</span>' : num(i.points)}</td>
                 <td class="muted">${esc((i.components || [])[0] || '—')}</td>
                 <td>${epicCell(i)}</td>
+                <td class="num">${testCasesCell(i)}</td>
               </tr>`).join('')}
             </tbody>
           </table>

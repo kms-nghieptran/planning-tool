@@ -3,7 +3,7 @@
 const SprintView = (() => {
   async function render(state, mount) {
     const d = await UI.api(`/api/sprint?team=${encodeURIComponent(state.teamId)}&sprint=${encodeURIComponent(state.sprintId)}`);
-    const p = d.progress, w = d.window, h = d.health;
+    const p = d.progress, w = d.window, h = d.health, t = d.totals || {};
 
     const byStatus = groupBy(d.items, i => i.status || '—');
     const byMember = d.rows.filter(r => r.status !== 'Released' && (r.planned || r.actual));
@@ -24,7 +24,35 @@ const SprintView = (() => {
     const un = d.unassigned || { count: 0, points: 0, done: 0 };
     const left = (p, done) => Math.round((p - done) * 10) / 10;
 
+    /**
+     * Capacity against what this sprint actually took on.
+     *
+     * Measured against `progress.committed`, NOT the grid's `totals.planned`:
+     * the commitment on this screen includes work that landed on nobody on the
+     * roster, and a Capacity card sitting next to a Committed card has to be
+     * arithmetic the reader can do in their head. Taking the grid's own
+     * over/under figure would have printed "7 pts of headroom" beside two
+     * numbers that differ by more than seven.
+     */
+    const headroom = (t, p) => {
+      if (!t.predicted) return 'no capacity entered';
+      const gap = Math.round((t.predicted - p.committed) * 10) / 10;
+      return gap < 0
+        ? `<span style="color:var(--risk)">${UI.num(Math.abs(gap))} pts over capacity</span>`
+        : `${UI.num(gap)} pts of headroom`;
+    };
+
     mount.innerHTML = `
+      ${printHeader(d, state)}
+
+      <section class="section print-hide">
+        <div class="section-head">
+          <div class="spacer"></div>
+          <button class="btn ghost sm" data-act="export-pdf"
+            title="Opens your browser's print dialogue — choose &quot;Save as PDF&quot;">Export PDF</button>
+        </div>
+      </section>
+
       <section class="section">
         <div class="card featured" style="display:flex;gap:26px;align-items:center;flex-wrap:wrap">
           <div>
@@ -42,7 +70,8 @@ const SprintView = (() => {
 
       <section class="section">
         <div class="kpis">
-          ${UI.kpi({ label: 'Committed', value: UI.int(p.committed), unit: 'pts', foot: `${d.items.length} items` })}
+          ${UI.kpi({ label: 'Capacity', value: UI.int(t.predicted), unit: 'pts', foot: `${UI.num(t.capacityHours)} h across ${t.headcount} ${t.headcount === 1 ? 'person' : 'people'}`, tone: 'brand' })}
+          ${UI.kpi({ label: 'Committed', value: UI.int(p.committed), unit: 'pts', foot: `${d.items.length} items · ${headroom(t, p)}`, tone: t.predicted && p.committed > t.predicted ? 'risk' : '' })}
           ${UI.kpi({ label: 'Done', value: UI.int(p.done), unit: 'pts', foot: `${p.donePct}% of commitment`, tone: p.donePct >= w.timeElapsedPct ? 'ok' : '' })}
           ${UI.kpi({ label: 'Sprint elapsed', value: `${w.timeElapsedPct}`, unit: '%', foot: `Day ${w.elapsed} of ${w.workingDays} working days` })}
           ${UI.kpi({ label: 'Projected landing', value: p.projected == null ? '—' : UI.int(p.projected), unit: 'pts', foot: p.projectedVsCommitted == null ? 'Not enough of the sprint elapsed' : (p.projectedVsCommitted >= 0 ? `${UI.num(p.projectedVsCommitted)} pts above commitment` : `${UI.num(Math.abs(p.projectedVsCommitted))} pts short`), tone: p.projectedVsCommitted == null ? '' : p.projectedVsCommitted < -2 ? 'risk' : 'ok' })}
@@ -117,6 +146,38 @@ const SprintView = (() => {
 
       ${UI.itemsTable(d.items, state)}
     `;
+
+    /* One delegated listener on the render container — the property
+       ui-wiring.test.js pins. `window.print()` is the whole export: the
+       browser's own renderer produces exactly what is on screen, and its
+       dialogue offers "Save as PDF" on every platform this runs on. */
+    mount.addEventListener('click', (e) => {
+      const btn = e.target.closest && e.target.closest('[data-act="export-pdf"]');
+      if (!btn) return;
+      e.preventDefault();
+      exportPdf(d, state);
+    });
+  }
+
+  /**
+   * The browser names the file after the document title, so the title is set
+   * for the duration of the print and put back afterwards — otherwise every
+   * sprint report saves as "Planning Tool.pdf" and a folder of them is
+   * unreadable.
+   */
+  function exportPdf(d, state) {
+    const sp = d.sprint || {};
+    const team = (state.teams || []).find(t => t.id === state.teamId) || {};
+    const was = document.title;
+    const slug = (v) => String(v || '').trim().replace(/[\\/:*?"<>|]+/g, '-');
+    document.title = `${slug(team.jiraName || team.name || state.teamId)} — ${slug(sp.name || state.sprintId)} — sprint report`;
+    // Restoring on the `afterprint` event rather than straight after the call:
+    // in some browsers `print()` returns before the dialogue is done with the
+    // title, and the file ends up named after the app instead of the sprint.
+    const restore = () => { document.title = was; window.removeEventListener('afterprint', restore); };
+    window.addEventListener('afterprint', restore);
+    window.print();
+    setTimeout(restore, 60000);   // a dialogue left open all day still ends tidy
   }
 
 
@@ -135,6 +196,31 @@ const SprintView = (() => {
             </div>
             <div style="font-size:13px;margin-top:3px">${UI.esc(i.summary)}</div>
           </div>`).join('')}
+      </div>`;
+  }
+
+  /**
+   * The title block the PDF needs and the screen does not.
+   *
+   * On screen every one of these facts is in the furniture — the team in the
+   * sidebar, the sprint in the topbar, the freshness in the sync line — and
+   * print hides all of it. A PDF that does not say which team, which sprint,
+   * over what dates and when it was taken is a page of numbers nobody can
+   * file, and worse, one that quietly ages into being wrong.
+   */
+  function printHeader(d, state) {
+    const sp = d.sprint || {};
+    const team = (state.teams || []).find(t => t.id === state.teamId) || {};
+    const span = sp.start && sp.end ? `${UI.date(sp.start)} – ${UI.date(sp.end)}` : '';
+    return `
+      <div class="print-only" style="margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid var(--app-line)">
+        <div class="eyebrow"><i></i>KMS · Automation · Active sprint</div>
+        <h2 style="margin-top:6px">${UI.esc(team.jiraName || team.name || state.teamId)} — ${UI.esc(sp.name || state.sprintId)}</h2>
+        <div class="muted" style="font-size:11.5px;margin-top:4px">
+          ${span ? `${span} · ` : ''}day ${d.window.elapsed} of ${d.window.workingDays} working days ·
+          Jira data synced ${UI.esc(UI.dateTime(state.syncedAt))} ·
+          report taken ${UI.esc(UI.dateTime(new Date().toISOString()))}
+        </div>
       </div>`;
   }
 

@@ -342,6 +342,60 @@ check('the roll-up counts an item against every epic it names', () => {
 
 /* ── 6. the column ────────────────────────────────────────────────────── */
 
+/* ── test cases under maintenance ─────────────────────────────────────────
+   His rule, in his words: "1 bucket story maybe do the maintain 1 or more test
+   cases … I count based on the Linked work items for that bucket story". One
+   "relates to" link, one test case. */
+
+check('A BUCKET STORY MAINTAINS ONE TEST CASE PER RELATES-TO LINK', () => {
+  const b = { issueType: 'Bucket Story', relatesTo: [{ key: 'AUTOKAT-1' }, { key: 'AUTOKAT-2' }] };
+  assert.strictEqual(epics.maintainedCount(b), 2, 'two linked work items is two test cases');
+});
+
+check('COUNTED FROM THE LINKS, NOT FROM THE EPIC COLUMN', () => {
+  // `epicsFor` is trying to name the EPIC behind the work, so it drops links
+  // that are not epics once it has found one. That is right for a column headed
+  // Epic and wrong for a count of what is being maintained.
+  //
+  // The types are stated on the links themselves, so the two numbers differ
+  // whatever lookup is passed — routing the count through `epicsFor` cannot
+  // then coincide with the right answer under some other lookup, which is
+  // exactly how an earlier version of this check passed while proving nothing.
+  const b = {
+    issueType: 'Bucket Story', category: 'maintenance',
+    relatesTo: [
+      { key: 'AUTOKAT-1', type: 'Test' },
+      { key: 'AUTOKAT-2', type: 'Test' },
+      { key: 'AUTOKAT-99', type: 'Epic' },
+    ],
+  };
+  for (const lookup of [() => null, (k) => ({ key: k, issueType: 'Test' })]) {
+    assert.strictEqual(epics.epicsFor(b, lookup).length, 1, 'fixture check: one epic among the links');
+  }
+  assert.strictEqual(epics.maintainedCount(b), 3, 'but three linked work items are three test cases');
+});
+
+check('the same link recorded twice is one test case', () => {
+  // Jira holds a link from both sides, and a re-sync can bring back both.
+  const b = { issueType: 'Bucket Story', relatesTo: [{ key: 'AUTOKAT-1' }, { key: 'autokat-1' }, 'AUTOKAT-1'] };
+  assert.strictEqual(epics.maintainedCount(b), 1);
+});
+
+check('a bucket story with no links maintains nothing, and that is a real zero', () => {
+  assert.strictEqual(epics.maintainedCount({ issueType: 'Bucket Story', relatesTo: [] }), 0);
+  assert.strictEqual(epics.maintainedCount({ issueType: 'Bucket Story' }), 0);
+});
+
+check('ONLY A BUCKET STORY IS ASKED THE QUESTION', () => {
+  // A Story can "relate to" a duplicate or a support ticket. Counting those as
+  // test cases under maintenance would be a number that looks like data.
+  assert.ok(epics.isBucketStory({ issueType: 'Bucket Story' }));
+  assert.ok(epics.isBucketStory({ issueType: 'bucket story' }), 'Jira casing varies');
+  assert.ok(!epics.isBucketStory({ issueType: 'Story' }));
+  assert.ok(!epics.isBucketStory({ issueType: 'Epic' }));
+  assert.ok(!epics.isBucketStory({}));
+});
+
 check('THE EPIC COLUMN SITS DIRECTLY AFTER COMPONENT, IN BOTH HEADER AND BODY', () => {
   // Asserted against the source because a column added to the header and not
   // the body — or added in a different position in each — shifts every cell in
