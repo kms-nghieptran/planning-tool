@@ -144,6 +144,8 @@ const SprintView = (() => {
 
       ${componentProgress(d, w)}
 
+      ${testCaseSection(d)}
+
       ${UI.itemsTable(d.items, state)}
     `;
 
@@ -237,6 +239,22 @@ const SprintView = (() => {
    * rule the per-person table uses, so "we are on day eight of ten and this
    * area is at 30%" is visible rather than arithmetic.
    */
+  /**
+   * A component's priority, read-only here.
+   *
+   * Editable in exactly one place — the Coverage grid — because a value with two
+   * editors is a value with two answers the first time both screens are open.
+   * Shown here because this is the table he plans the sprint from, and "the
+   * suite that is behind is also the P1" is the whole point of having set it.
+   */
+  function prio(d, r) {
+    if (r.priority == null) return '<span class="muted">—</span>';
+    const l = (d.priorityLevels || []).find(x => x.value === r.priority) || { label: `P${r.priority}`, name: '', key: `p${r.priority}` };
+    // Coloured from the level's own key, the same one the editable control on
+    // Coverage uses, so P2 cannot be amber on one screen and grey on the other.
+    return `<span class="tag prio-tag prio-${UI.esc(l.key || `p${r.priority}`)}" title="${UI.esc(l.name)}">${UI.esc(l.label)}</span>`;
+  }
+
   function componentProgress(d, w) {
     const c = d.byComponent || { rows: [], shared: 0 };
     if (!c.rows.length) return '';
@@ -253,13 +271,16 @@ const SprintView = (() => {
         <div class="table-wrap">
           <table>
             <thead><tr>
-              <th>Component</th><th class="num">Items</th><th class="num">Committed</th>
+              <th>Component</th>
+              <th title="Set on the Coverage screen — this is your judgement of the suite, not a Jira field">Priority</th>
+              <th class="num">Items</th><th class="num">Committed</th>
               <th class="num">Done</th><th style="min-width:110px">Progress</th>
               <th class="num">Left</th><th>Attention</th>
             </tr></thead>
             <tbody>${c.rows.map(r => `
               <tr>
                 <td>${UI.esc(r.component)}</td>
+                <td data-sort-value="${r.priority == null ? 99 : r.priority}">${prio(d, r)}</td>
                 <td class="num">${r.count}</td>
                 <td class="num">${UI.num(r.points)}</td>
                 <td class="num">${UI.num(r.done)}</td>
@@ -274,6 +295,91 @@ const SprintView = (() => {
             </tbody>
           </table>
         </div>
+      </section>`;
+  }
+
+  /**
+   * TEST CASES BY COMPONENT — what this sprint automated, and what it kept alive.
+   *
+   * The two numbers are counted from opposite ends of the data because that is
+   * where AUTOKAT records them, and the caption says so: a test case being
+   * automated is the PARENT EPIC of a Story, read from the epic's own Automation
+   * Status; a test case being maintained is one "relates to" link on a Bucket
+   * Story. Neither is the sprint item, which is why this table cannot be derived
+   * from the item counts in the table above it.
+   *
+   * THE TOTALS ROW IS NOT THE COLUMN ADDED UP. An item in two components is in
+   * two rows, so the rows above can name the same test case twice; the total is
+   * the distinct count across the sprint. Stated in the caption, because a
+   * column that visibly does not sum reads as a bug until you know why.
+   */
+  function testCaseSection(d) {
+    const t = d.testCases;
+    if (!t || !t.rows.length) return '';
+    const T = t.totals;
+    const pendingLinks = T.buckets > 0 && T.maintained === 0;
+
+    return `
+      <section class="section">
+        <div class="section-head">
+          <h2>Test cases by component</h2>
+          <span class="muted">
+            <strong>${UI.int(T.automated)}</strong> automated ·
+            <strong>${UI.int(T.maintained)}</strong> maintained ·
+            ${UI.int(T.inFlight)} still in flight
+          </span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr>
+              <th>Component</th>
+              <th class="num" title="Distinct parent epics of this component's Stories whose Automation Status is Automated">Automated</th>
+              <th class="num" title="Parent epics of this component's Stories not yet Automated">In flight</th>
+              <th class="num" title="Distinct test cases linked from this component's Bucket Stories">Maintained</th>
+              <th class="num">Stories</th><th class="num">Bucket stories</th>
+              <th class="num">Items</th><th class="num">Done</th>
+            </tr></thead>
+            <tbody>${t.rows.map(r => `
+              <tr>
+                <td>${UI.esc(r.component)}</td>
+                <td class="num ${r.automated ? 'pct good' : 'muted'}">${r.automated || '—'}</td>
+                <td class="num ${r.inFlight ? '' : 'muted'}">${r.inFlight || '—'}</td>
+                <td class="num ${r.maintained ? '' : 'muted'}">${r.maintained || '—'}</td>
+                <td class="num muted">${r.stories || '—'}</td>
+                <td class="num muted">${r.buckets || '—'}</td>
+                <td class="num">${r.items}</td>
+                <td class="num">${r.done}</td>
+              </tr>`).join('')}
+            </tbody>
+            <tfoot><tr>
+              <td><strong>Sprint total</strong> <span class="muted" style="font-weight:400">distinct</span></td>
+              <td class="num"><strong>${UI.int(T.automated)}</strong></td>
+              <td class="num"><strong>${UI.int(T.inFlight)}</strong></td>
+              <td class="num"><strong>${UI.int(T.maintained)}</strong></td>
+              <td class="num">${UI.int(T.stories)}</td>
+              <td class="num">${UI.int(T.buckets)}</td>
+              <td class="num">${UI.int(T.items)}</td>
+              <td class="num">${UI.int(T.done)}</td>
+            </tr></tfoot>
+          </table>
+        </div>
+        <ul class="reasons" style="margin-top:12px">
+          <li><strong>Automated</strong> counts the <em>parent epic</em> of each Story, using the epic's own
+            Automation Status — a Story is the work, the epic is the test case. Two Stories under one epic are one
+            test case.</li>
+          <li><strong>Maintained</strong> counts the "relates to" links on Bucket Stories, one link per suite kept
+            working. Bucket Stories are excluded from Automated: every one of them hangs off the same maintenance
+            container epic, which would report one epic as several automated test cases.</li>
+          ${t.shared ? `<li>${t.shared} item${t.shared === 1 ? '' : 's'} sit${t.shared === 1 ? 's' : ''} in more than one
+            component and count in each, so the rows add up to more than the sprint total — the total row is the
+            distinct count.</li>` : ''}
+          ${t.unlinked ? `<li class="warn">${t.unlinked} Stor${t.unlinked === 1 ? 'y has' : 'ies have'} no parent epic,
+            so ${t.unlinked === 1 ? 'it is' : 'they are'} in neither column. That is a missing link in Jira, not a
+            gap in the count.</li>` : ''}
+          ${pendingLinks ? `<li class="warn">${UI.int(T.buckets)} Bucket Stories carry no "relates to" links in the
+            local store, so Maintained reads zero everywhere. The links arrive with a <strong>full sync</strong> —
+            an incremental one does not backfill them.</li>` : ''}
+        </ul>
       </section>`;
   }
 

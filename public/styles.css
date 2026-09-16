@@ -186,6 +186,33 @@ a { color: var(--brand-blue); }
 .field > span { font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--app-fg-3); }
 .menu-btn { display: none; }
 
+/* The collapse toggle. Hidden below 1000px, where the sidebar is already an
+   off-canvas drawer with its own ☰ and a second control would be two answers to
+   one question. */
+.rail-btn { display: none; line-height: 1; transition: transform .18s ease; }
+.shell.nav-collapsed .rail-btn { transform: rotate(180deg); }
+
+@media (min-width: 1001px) {
+  .rail-btn { display: inline-block; order: -1; }
+
+  /* COLLAPSED IS ZERO WIDTH, not a narrow icon rail. Every nav item here is a
+     text label with a count beside it — there are no icons to fall back on, so
+     a rail would be a column of truncated words taking 56px to say nothing.
+     The whole point of the ask was the width, and this gives all of it back. */
+  .shell.nav-collapsed { grid-template-columns: 0 minmax(0, 1fr); }
+  .shell.nav-collapsed > .sidebar {
+    width: 0; padding-left: 0; padding-right: 0;
+    border-right-width: 0; overflow: hidden;
+    /* visibility, not just width: a zero-width sidebar still holds focusable
+       links, and tabbing into something you cannot see is the classic version
+       of this bug. */
+    visibility: hidden;
+  }
+  /* Animating grid-template-columns works in Chrome and is ignored elsewhere,
+     which degrades to an instant toggle rather than to a broken one. */
+  .shell { transition: grid-template-columns .18s ease; }
+}
+
 select, input[type="text"], input[type="number"], input[type="password"], input[type="file"], textarea {
   font: inherit; font-size: 13px; color: var(--app-fg);
   max-width: 100%; min-width: 0;
@@ -223,7 +250,19 @@ textarea { width: 100%; resize: vertical; font-size: 13px; }
 
 /* ───────── layout ───────── */
 
-main { padding: 24px; max-width: 1440px; width: 100%; }
+/* FULL WIDTH, NOT A 1440px COLUMN.
+   The cap was here for line length, but almost nothing on these screens is
+   prose — they are thirteen-column grids, and on a wide monitor the cap left a
+   third of the window empty on the right while the Coverage table scrolled
+   sideways inside it. Measure is now controlled where it actually matters, on
+   the paragraphs below (`.card p`, `.sub`, `.reasons`), so the tables get the
+   whole window and the sentences stay readable. */
+main { padding: 24px; width: 100%; max-width: none; min-width: 0; }
+
+/* The one thing full width is bad for. A caption running 200 characters across
+   a 2560px monitor is unreadable however wide the table above it is, so the
+   text — and only the text — keeps a measure. */
+.card p, .card .sub, .section-head .muted, .reasons li, .picker-note { max-width: 105ch; }
 .loading { color: var(--app-fg-3); padding: 48px 0; text-align: center; }
 
 /* Loud on purpose: a stale server produces results that look right and are not. */
@@ -487,6 +526,61 @@ a.issue-key:focus-visible { outline: 2px solid var(--brand-blue); outline-offset
 .reasons li.risk::before { background: var(--risk); }
 .reasons li.warn::before { background: var(--warn); }
 .reasons li.ok::before   { background: var(--ok); }
+
+/* The chosen components, beside the picker that adds them. A token field: the
+   chips are the selection, the control above is only the way in. */
+.picked { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.picked-chip { display: inline-flex; align-items: center; gap: 6px; padding-right: 4px; }
+.picked-x {
+  border: none; background: transparent; cursor: pointer; padding: 0 3px;
+  font-size: 14px; line-height: 1; color: var(--app-fg-3);
+}
+.picked-x:hover { color: var(--risk); }
+
+/* The priority dropdown in the coverage grid. Narrow, quiet, and only as loud
+   as a set level deserves — an unset row must not read as a decision. */
+.prio-cell { white-space: nowrap; }
+select.prio {
+  padding: 2px 6px; font-size: 12px; width: auto; min-width: 84px;
+  border-color: var(--app-line-soft); background: transparent;
+}
+select.prio:hover { border-color: var(--app-line); }
+select.prio:disabled { opacity: .6; }
+
+/* THE SCALE, IN ONE PLACE.
+   Four levels, one descending ramp — pink, amber, blue, grey — so the column
+   reads as a scale at a glance rather than as four unrelated labels. Every
+   value is a token, so dark mode follows without a second set of colours here.
+
+   `.prio-none` is deliberately NOT on the ramp: an unset row is the absence of
+   a decision, and giving it the bottom colour would claim a judgement nobody
+   made. It takes the muted foreground, like every other em-dash on the page.
+
+   The border tints with the text so a set level is legible at a glance on a row
+   of 125, and the weight steps up only for the two that mean act now. */
+.prio-p1 { color: var(--risk);       border-color: color-mix(in srgb, var(--risk) 45%, transparent); font-weight: var(--font-weight-semibold, 600); }
+.prio-p2 { color: var(--warn);       border-color: color-mix(in srgb, var(--warn) 45%, transparent); font-weight: var(--font-weight-medium, 500); }
+.prio-p3 { color: var(--brand-blue); border-color: color-mix(in srgb, var(--brand-blue) 40%, transparent); }
+.prio-p4 { color: var(--app-fg-3);   border-color: var(--app-line-soft); }
+.prio-none { color: var(--app-fg-3); }
+
+/* The option list is drawn by the OS and does not take the control's colour,
+   so each option carries its own — Chrome and Firefox honour it on Windows and
+   Linux, macOS ignores it, and the closed control is coloured either way. */
+select.prio option { color: var(--app-fg); }
+select.prio option[value="1"] { color: var(--risk); }
+select.prio option[value="2"] { color: var(--warn); }
+select.prio option[value="3"] { color: var(--brand-blue); }
+select.prio option[value="4"] { color: var(--app-fg-3); }
+
+/* The same scale as a read-only tag, for the tables that show it but do not
+   own it. Border and text only: a filled pill on every row of a component
+   table is louder than the numbers beside it. */
+.tag.prio-tag { font-variant-numeric: tabular-nums; background: transparent; }
+.tag.prio-tag.prio-p1 { color: var(--risk);       border-color: color-mix(in srgb, var(--risk) 55%, transparent); }
+.tag.prio-tag.prio-p2 { color: var(--warn);       border-color: color-mix(in srgb, var(--warn) 55%, transparent); }
+.tag.prio-tag.prio-p3 { color: var(--brand-blue); border-color: color-mix(in srgb, var(--brand-blue) 50%, transparent); }
+.tag.prio-tag.prio-p4 { color: var(--app-fg-3);   border-color: var(--app-line); }
 
 /* Coverage movement — the delta headline above the trend chart.
    The number is the point of the section, so it carries the stat weight and the

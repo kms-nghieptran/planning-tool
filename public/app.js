@@ -52,6 +52,11 @@ const App = (() => {
     document.documentElement.dataset.theme = stored
       || (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
 
+    // Applied here, before the first await, for the same reason the theme is:
+    // wireShell() runs after /api/state comes back, so setting it there would
+    // paint the sidebar open and shut it a beat later.
+    if (localStorage.getItem('pt-nav') === 'collapsed') UI.$('.shell').classList.add('nav-collapsed');
+
     const s = await UI.api('/api/state');
     adopt(s);
     state.teamId = localStorage.getItem('pt-team') || (s.plan.teams[0] || {}).id;
@@ -286,6 +291,43 @@ const App = (() => {
     // Team and sprint are wired by fillSelects(), which rebuilds both pickers.
 
     UI.$('#menuBtn').addEventListener('click', () => UI.$('#sidebar').classList.toggle('open'));
+
+    /* COLLAPSING THE SIDEBAR.
+     *
+     * Remembered, because it is a working preference rather than a per-visit
+     * choice: someone who works on a laptop with the nav shut wants it shut
+     * tomorrow too, and re-collapsing it on every load is the kind of small
+     * friction that makes a tool feel like it is not listening.
+     *
+     * The class itself is applied in boot(), before the first await, so the
+     * layout never paints open and then shuts. This only binds the controls and
+     * brings the button's labels into line with whatever boot() decided.
+     */
+    const shell = UI.$('.shell');
+    const railBtn = UI.$('#railBtn');
+
+    const setRail = (collapsed, remember = true) => {
+      shell.classList.toggle('nav-collapsed', collapsed);
+      railBtn.setAttribute('aria-expanded', String(!collapsed));
+      railBtn.setAttribute('aria-label', collapsed ? 'Show navigation' : 'Hide navigation');
+      railBtn.title = `${collapsed ? 'Show' : 'Hide'} navigation  ⌘B`;
+      if (remember) localStorage.setItem('pt-nav', collapsed ? 'collapsed' : 'open');
+    };
+
+    setRail(shell.classList.contains('nav-collapsed'), false);
+    railBtn.addEventListener('click', () => setRail(!shell.classList.contains('nav-collapsed')));
+
+    // ⌘B / Ctrl+B, the shortcut every editor uses for this. Ignored while a
+    // field has focus: this app is full of text inputs and a shortcut that
+    // fires mid-search is worse than no shortcut.
+    document.addEventListener('keydown', (e) => {
+      if (e.key !== 'b' && e.key !== 'B') return;
+      if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
+      const t = e.target;
+      if (t && /^(input|textarea|select)$/i.test(t.tagName || '')) return;
+      e.preventDefault();
+      setRail(!shell.classList.contains('nav-collapsed'));
+    });
 
     UI.$('#themeBtn').addEventListener('click', () => {
       const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';

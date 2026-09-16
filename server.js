@@ -26,6 +26,7 @@ const reconcile = require('./lib/reconcile');
 const metrics = require('./lib/metrics');
 const coverage = require('./lib/coverage');
 const covHistory = require('./lib/coverage-history');
+const priority = require('./lib/priority');
 const reset = require('./lib/reset');
 const provenance = require('./lib/provenance');
 const query = require('./lib/query');
@@ -435,11 +436,21 @@ async function handleApi(req, res, url) {
     const snap = store.getSnapshot();
     const m = (cfg.metrics || {});
     const view = coverage.view(snap, {
-      component: q.get('component') || null,
+      // getAll, so `?component=A&component=B` is a selection rather than a
+      // last-one-wins. A comma-joined parameter would have been shorter and
+      // wrong: component names are free text and may contain one.
+      components: q.getAll('component').filter(Boolean),
       scope: m.coverageScope || 'Epic',
     });
+    const plan = store.getPlan();
     return json(res, 200, {
       ...view,
+      // His judgement, attached to the rows the screen already renders. Read
+      // from the plan, so a sync never touches it.
+      byComponent: priority.decorate(view.byComponent, plan),
+      components: priority.decorate(view.components.map(c => ({ ...c, component: c.name })), plan)
+        .map(({ component, ...c }) => c),
+      priorityLevels: priority.LEVELS,
       // Fired against the assembled view, not against the issues again, so the
       // findings can never disagree with the tables they sit above. `view` is
       // already narrowed to the selected component, so this is too.
@@ -448,6 +459,31 @@ async function handleApi(req, res, url) {
       // same project, same issue type. The key lives in config, not the model.
       project: cfg.jira.projectKey || null,
     });
+  }
+
+  /* One component's priority. Its own route rather than PUT /api/plan, which
+     merges whatever it is handed: a level this tool cannot read is not an error
+     anywhere — the component simply has no priority, and the only place that
+     shows is a column that looks perfectly fine. */
+  if (p === '/api/component-priority' && req.method === 'PUT') {
+    const body = await readJsonBody(req);
+    const plan = store.getPlan();
+    const current = plan.componentPriority || {};
+
+    // Two shapes: one row edited, or a whole map replaced (used by a reset).
+    const next = body.component !== undefined
+      ? priority.set(current, body.component, body.level ?? null)
+      : (body.map || {});
+
+    const { map, errors } = priority.validate(next);
+    if (errors.length) return json(res, 400, { error: errors.map(e => e.message).join(' · '), errors });
+
+    plan.componentPriority = map;
+    store.savePlan(plan);
+    store.audit('componentPriority.set', {
+      component: body.component ?? null, level: body.level ?? null, total: Object.keys(map).length,
+    });
+    return json(res, 200, { ok: true, componentPriority: map, set: Object.keys(map).length });
   }
 
   /* How coverage MOVED. Its own route rather than more payload on
@@ -459,9 +495,16 @@ async function handleApi(req, res, url) {
     const scope = m.coverageScope || 'Epic';
     const days = Math.min(730, Math.max(7, Number(q.get('days')) || 180));
     const since = new Date(Date.now() - days * 86400000);
-    const component = q.get('component') || null;
+    // Movement is recorded per component, so a combination has no series of its
+    // own — and summing two would double-count every epic they share. With more
+    // than one selected the caller gets the movers for those components and no
+    // headline trend, which is the honest shape rather than a plausible sum.
+    const picked = q.getAll('component').filter(Boolean);
+    const component = picked.length === 1 ? picked[0] : null;
     return json(res, 200, {
       ...covHistory.movement(component, { scope, since }),
+      selected: picked,
+      multi: picked.length > 1,
       days,
       // What the history is MADE of, so the screen can say whether a curve is
       // observed or inferred instead of presenting both as the same fact.

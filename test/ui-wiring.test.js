@@ -128,6 +128,65 @@ check('APP.REFRESH HANDS EACH RENDER A NEW CONTAINER, never #main itself', () =>
     'rendering into the long-lived host is exactly the bug');
 });
 
+/* ── the sidebar collapse ───────────────────────────────────────────── */
+
+check('THE SIDEBAR COLLAPSES TO ZERO, and the way back is always on screen', () => {
+  // Collapsed means zero width, not a narrow icon rail: every nav item here is
+  // a text label with a count, there are no icons to fall back on, and a rail
+  // would spend 56px saying nothing. Which makes the toggle in the topbar the
+  // ONLY way back — so it has to be there, and it has to be first.
+  const html = fs.readFileSync(path.join(VIEWS, '..', 'index.html'), 'utf8');
+  const css = fs.readFileSync(path.join(VIEWS, '..', 'styles.css'), 'utf8');
+
+  assert.match(html, /id="railBtn"/, 'the toggle has to exist');
+  assert.ok(html.indexOf('id="railBtn"') < html.indexOf('id="crumbs"'),
+    'and come before the breadcrumbs, so it is never the thing that scrolled off');
+  assert.match(css, /\.shell\.nav-collapsed \{ grid-template-columns: 0 minmax\(0, 1fr\); \}/,
+    'collapsed is a zero-width first column');
+  assert.match(css, /\.shell\.nav-collapsed > \.sidebar \{[^}]*visibility: hidden/,
+    'a zero-width sidebar still holds focusable links — tabbing into what you cannot see is the bug this prevents');
+});
+
+check('and the state survives a reload, applied before the first paint', () => {
+  // A working preference, not a per-visit choice. And it has to be on the shell
+  // before the first await in boot(), or the layout paints open and shuts a
+  // beat later — which reads as a rendering fault rather than as a setting.
+  const app = fs.readFileSync(path.join(VIEWS, '..', 'app.js'), 'utf8');
+  // Pinned to the guard, not just to the call: `if (false) localStorage.set…`
+  // leaves the string in the file and a search-for-the-name check green while
+  // nothing is ever written.
+  assert.match(app, /if \(remember\) localStorage\.setItem\('pt-nav'/,
+    'the choice is remembered, and the write is reachable');
+
+  const boot = app.slice(app.indexOf('async function boot()'), app.indexOf('async function boot()') + 900);
+  assert.match(boot, /pt-nav.*nav-collapsed/s, 'and restored inside boot()');
+  assert.ok(boot.indexOf('pt-nav') < boot.indexOf('await UI.api'),
+    'before the first await, or the sidebar flashes open on every load');
+});
+
+check('the shortcut does not fire while you are typing', () => {
+  // This app is full of text inputs and a component search you type into on
+  // every visit. A shortcut that collapses the nav mid-search is worse than no
+  // shortcut at all.
+  const app = fs.readFileSync(path.join(VIEWS, '..', 'app.js'), 'utf8');
+  const handler = app.slice(app.indexOf("if (e.key !== 'b'"), app.indexOf("if (e.key !== 'b'") + 500);
+  assert.match(handler, /metaKey \|\| e\.ctrlKey/, 'it needs a modifier');
+  assert.match(handler, /input\|textarea\|select/i, 'and must stand down inside a field');
+});
+
+check('and the narrow layout keeps its own drawer, untouched', () => {
+  // Below 1000px the sidebar is already an off-canvas drawer with a ☰ of its
+  // own. Two controls for one thing on the same screen is two answers, so the
+  // collapse rules are scoped above that breakpoint and the rail button is
+  // hidden below it.
+  const css = fs.readFileSync(path.join(VIEWS, '..', 'styles.css'), 'utf8');
+  assert.match(css, /\.rail-btn \{ display: none;/, 'hidden by default');
+  const wide = css.slice(css.indexOf('@media (min-width: 1001px)'));
+  assert.match(wide.slice(0, 600), /\.rail-btn \{ display: inline-block/, 'and shown only above the breakpoint');
+  assert.ok(css.indexOf('.shell.nav-collapsed { grid-template-columns: 0') > css.indexOf('@media (min-width: 1001px)'),
+    'the collapse itself is scoped there too, so it cannot fight the mobile drawer');
+});
+
 /* ── and the behaviour it was found through ─────────────────────────── */
 
 check('ONE CLICK ON "SAVE CURRENT PLAN" SAVES ONE SCENARIO', async () => {

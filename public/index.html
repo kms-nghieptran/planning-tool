@@ -35,6 +35,10 @@
 
   <div class="main-col">
     <header class="topbar">
+      <!-- First in the row on purpose: when the sidebar is collapsed this is the
+           only way back to it, so it must never be the thing that scrolled off. -->
+      <button class="btn ghost sm icon rail-btn" id="railBtn"
+              aria-label="Hide navigation" aria-expanded="true" title="Hide navigation  ⌘B">‹</button>
       <div class="crumbs" id="crumbs"></div>
       <div class="spacer"></div>
       <div class="sprint-picker" id="sprintPicker"></div>

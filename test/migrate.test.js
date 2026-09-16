@@ -170,6 +170,10 @@ const PLAN = () => ({
   risks: [{ id: 'r1', title: 'Env unstable', severity: 'High' }],
   categoryRules: null,
   mixTargets: { ruby: { new: [45, 100], maintenance: [0, 35] } },
+  // His own judgement of which suites matter. Plan data by definition — there
+  // is nothing in Jira to rederive it from, so losing it in a migration loses
+  // it for good.
+  componentPriority: { 'R&D_Sig_Regression': 1, 'KAT_Common_Maintenance': 3 },
   notes: { 'ruby|S39': 'Focus on Sig regression' },
   excluded: { ruby: ['acc-zzz', 'acc-aaa', 'An Nguyen'] },
   // Roster decisions: one person put on a sprint, one taken off. These are the
@@ -315,6 +319,7 @@ check('ROSTER DECISIONS SURVIVE — who you put on a sprint and who you took off
   // Not rederivable from anything. A sync knows who was ASSIGNED work; only
   // this table knows that you decided someone belongs on the sprint anyway.
   same(plan.sprintRoster, project.plan().sprintRoster, 'sprintRoster');
+  same(plan.componentPriority, project.plan().componentPriority, 'componentPriority');
 });
 
 check('a saved scenario survives with its numbers intact', () => {

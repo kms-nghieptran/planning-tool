@@ -26,7 +26,12 @@ const CoverageReport = (() => {
   // Selection lives in the module, not in the URL: this screen is a lens on one
   // dataset rather than a place you deep-link to, and App.refresh() re-renders
   // from scratch each time.
-  let component = null;
+  /* THE SELECTION IS A LIST. One component answers "what state is this suite
+     in"; several answer "what do these three add up to", which is the question
+     when a client spans them and is not answerable by three screens side by
+     side. Order is the order they were picked, so the chips do not reshuffle
+     under the cursor. */
+  let selected = [];
   let family = null;
   // The movement window, in days. Module state like the two above: this screen
   // is a lens on one dataset, not a place you deep-link to.
@@ -35,7 +40,9 @@ const CoverageReport = (() => {
   const tone = (p) => (p >= 80 ? 'good' : p < 50 ? 'over' : 'under');
 
   async function render(state, mount) {
-    const qs = component ? `?component=${encodeURIComponent(component)}` : '';
+    const qs = selected.length
+      ? `?${selected.map(c => `component=${encodeURIComponent(c)}`).join('&')}`
+      : '';
     // In parallel: the movement query walks a different table and there is no
     // reason for the reader to wait for one before the other starts.
     const [d, moved] = await Promise.all([
@@ -65,7 +72,7 @@ const CoverageReport = (() => {
 
       <section class="section">
         <div class="kpis">
-          ${UI.kpi({ label: 'Coverage', value: UI.pct(d.coveragePct), foot: d.component ? UI.esc(d.component) : 'Across every component', tone: 'brand', featured: true })}
+          ${UI.kpi({ label: 'Coverage', value: UI.pct(d.coveragePct), foot: UI.esc(scopeFoot(d)), tone: 'brand', featured: true })}
           ${UI.kpi({ label: 'Automated', value: UI.int(bucket('automated').count), foot: `${UI.pct(bucket('automated').share)} of all ${UI.esc(d.scope.toLowerCase())}s`, tone: 'ok' })}
           ${UI.kpi({ label: 'Maintenance', value: UI.int(bucket('maintenance').count), foot: 'Automated, being kept working' })}
           ${UI.kpi({ label: 'Still to automate', value: UI.int(bucket('ready').count + bucket('blocked').count), foot: `${bucket('ready').count} ready · ${bucket('blocked').count} blocked`, tone: bucket('blocked').count ? 'risk' : '' })}
@@ -75,7 +82,7 @@ const CoverageReport = (() => {
 
       ${statusSection(d)}
       ${movementSection(d, moved)}
-      ${d.component ? '' : componentSection(d, rows)}
+      ${d.selected.length === 1 ? '' : componentSection(d, rows)}
       ${toolSection(d, toolRows)}
       ${attentionSection(d)}
     `;
@@ -116,23 +123,78 @@ const CoverageReport = (() => {
       }
       // The picker's own options are handled on mousedown; this covers Clear
       // and the component links in the tables.
+      const drop = e.target.closest('[data-unpick]');
+      if (drop) {
+        e.preventDefault();
+        selected = selected.filter(x => x !== drop.dataset.unpick);
+        family = null;
+        App.refresh();
+        return;
+      }
       const c = e.target.closest('[data-component]');
       if (c && !c.classList.contains('combo-opt')) {
         e.preventDefault();
-        component = c.dataset.component || null;
+        // A component named anywhere on the screen is a jump TO that component,
+        // not an addition to the selection: clicking a row in a grid of 125
+        // means "show me this one". Shift adds it instead, for building a set
+        // out of what the grid is already showing you.
+        const name = c.dataset.component || null;
+        if (!name) selected = [];
+        else if (e.shiftKey) selected = selected.includes(name) ? selected : [...selected, name];
+        else selected = [name];
         family = null;
         App.refresh();
       }
     });
 
+    /* Priority saves on change, one row at a time.
+       No Save button on purpose: a grid of 125 dropdowns with one save at the
+       bottom is a grid you lose work in. The trade is that a failed write has
+       to put the control back where it was rather than leaving the screen
+       showing a level the server never accepted. */
+    const dRef = d;
+    mount.addEventListener('change', async (e) => {
+      const sel = e.target.closest && e.target.closest('[data-priority]');
+      if (!sel) return;
+      const name = sel.dataset.priority;
+      const was = sel.dataset.was == null ? '' : sel.dataset.was;
+      const level = sel.value === '' ? null : Number(sel.value);
+      sel.disabled = true;
+      try {
+        await UI.jsonPut('/api/component-priority', { component: name, level });
+        sel.dataset.was = sel.value;
+        const cell = sel.closest('td');
+        if (cell) cell.dataset.sortValue = level == null ? '99' : String(level);
+        // The colour is on the control, so it has to move with the value —
+        // otherwise the row stays the colour of the level it used to be until
+        // the next full render, which is the kind of stale that gets believed.
+        sel.className = `prio ${prioClass(dRef, level)}`;
+        UI.toast(level == null ? `${name} — priority cleared` : `${name} — P${level}`);
+      } catch (err) {
+        sel.value = was;              // the server is the truth, not the dropdown
+        UI.toast(err.message, true);
+      } finally {
+        sel.disabled = false;
+      }
+    });
+
+    // The picker adds to the selection and never holds a value of its own: with
+    // the chips above it showing what is chosen, a control that also displayed
+    // one of them would be a second, disagreeing answer to "what is selected".
     UI.wireCombo(mount, 'covSearch', (value) => {
-      component = value || null;
+      if (!value) selected = [];
+      else if (!selected.includes(value)) selected = [...selected, value];
       family = null;
       App.refresh();
     });
   }
 
   const share = (d) => (d.total ? Math.round((d.toolTotals.truetest.total / d.total) * 1000) / 10 : 0);
+
+  /** What the headline KPI is counting, in the space a foot line has. */
+  const scopeFoot = (d) => (!d.selected.length ? 'Across every component'
+    : d.selected.length <= 2 ? d.selected.join(' + ')
+      : `${d.selected.length} components combined`);
 
   /**
    * A component name, as the thing you click.
@@ -161,6 +223,44 @@ const CoverageReport = (() => {
       </div>`;
   }
 
+  /**
+   * THE ONE EDITABLE CELL ON THIS SCREEN.
+   *
+   * Everything else here is read off Jira; this is his own judgement, and it is
+   * the only thing on the page a sync will never overwrite. Which is exactly why
+   * it sits in the grid rather than on a settings page: the moment to decide
+   * that a suite matters is while looking at the row saying it is at 31%.
+   *
+   * `data-sort-value` carries the level, because the column sorts by rank and a
+   * cell holding a <select> has no text a sorter could read — `textContent` on
+   * one returns every option concatenated. Unset rows get a value that sorts
+   * last whichever way the column points, since "nobody decided" is not the
+   * bottom of the scale.
+   */
+  function priorityCell(d, r) {
+    const levels = d.priorityLevels || [];
+    const cur = r.priority == null ? '' : String(r.priority);
+    return `
+      <td class="prio-cell" data-sort-value="${r.priority == null ? 99 : r.priority}">
+        <select class="prio ${prioClass(d, r.priority)}" data-priority="${UI.esc(r.component)}" data-was="${cur}"
+          title="${UI.esc(r.priority ? `${levelOf(d, r.priority).label} — ${levelOf(d, r.priority).name}` : 'No priority set')}">
+          <option value=""${cur === '' ? ' selected' : ''}>—</option>
+          ${levels.map(l => `<option value="${l.value}"${cur === String(l.value) ? ' selected' : ''}>${UI.esc(l.label)} ${UI.esc(l.name)}</option>`).join('')}
+        </select>
+      </td>`;
+  }
+
+  const levelOf = (d, v) => (d.priorityLevels || []).find(l => l.value === Number(v)) || { label: '', name: '', key: '' };
+
+  /**
+   * The colour class for a level, built from the model's own key.
+   *
+   * Not a map in this file: the levels, their labels and their colours travel
+   * together in the payload, so a fifth level or a recoloured P2 arrives here
+   * without anyone remembering to update a second list in the browser.
+   */
+  const prioClass = (d, v) => (v == null ? 'prio-none' : `prio-${UI.esc(levelOf(d, v).key || `p${v}`)}`);
+
   /** The bucket the model uses for epics with no product component. */
   const NO_COMPONENT = '— no component —';
 
@@ -175,32 +275,53 @@ const CoverageReport = (() => {
    * filtering, mousedown selection, keyboard nav — lives there.
    */
   function picker(d) {
+    const picked = d.selected || [];
+    // A component already chosen is dropped from the list. Offering it again
+    // would be a menu item that does nothing, on the one control whose job is
+    // to make the selection grow.
+    const taken = new Set(picked);
     return `
       <section class="section">
         <div class="card picker-card">
           ${UI.combo({
             id: 'covSearch', label: 'Component',
-            value: d.component || '',
-            placeholder: `All components (${d.components.length}) — type to search`,
+            // Never holds a value: the chips beside it are what is selected, and
+            // a control also showing one of them is a second, disagreeing answer
+            // to "what am I looking at".
+            value: '',
+            placeholder: picked.length
+              ? `Add another (${d.components.length - picked.length} left)`
+              : `All components (${d.components.length}) — type to search`,
             options: [
-              { value: '', label: 'All components', meta: String(d.components.length), active: !d.component },
-              ...d.components.map(c => ({
+              { value: '', label: 'All components', meta: String(d.components.length), active: !picked.length },
+              ...d.components.filter(c => !taken.has(c.name)).map(c => ({
                 value: c.name, label: c.name, meta: String(c.count),
-                tag: c.family.split(' —')[0], active: d.component === c.name,
+                tag: c.family.split(' —')[0], active: false,
               })),
             ],
           })}
+          ${picked.length ? `
+            <div class="picked">
+              ${picked.map(name => `
+                <span class="chip picked-chip">
+                  ${UI.esc(name)}
+                  <button class="picked-x" data-unpick="${UI.esc(name)}"
+                    title="Remove ${UI.esc(name)} from the selection"
+                    aria-label="Remove ${UI.esc(name)}">×</button>
+                </span>`).join('')}
+              ${picked.length > 1 ? `<span class="muted" style="align-self:center;font-size:11.5px">combined</span>` : ''}
+            </div>` : ''}
           <div class="picker-note">
             <div class="muted" style="font-size:12px">${UI.esc(d.basis)}</div>
             ${d.componentUnknown ? `<div class="tag warn" style="margin-top:6px">
-              No component named "${UI.esc(d.componentRequested)}" — showing all instead
+              No component named ${(d.componentMissing || []).map(x => `"${UI.esc(x)}"`).join(', ')} — ignored
             </div>` : ''}
           </div>
-          ${d.component ? `
+          ${picked.length === 1 ? `
             <a class="btn ghost sm" target="_blank" rel="noopener"
-               href="${UI.esc(UI.componentSearchUrl({ component: d.component, project: d.project, scope: d.scope }) || '#')}"
-               title="Open the ${UI.esc(d.scope.toLowerCase())}s in ${UI.esc(d.component)} in Jira">Open in Jira</a>
-            <button class="btn ghost sm" data-component="">Clear</button>` : ''}
+               href="${UI.esc(UI.componentSearchUrl({ component: picked[0], project: d.project, scope: d.scope }) || '#')}"
+               title="Open the ${UI.esc(d.scope.toLowerCase())}s in ${UI.esc(picked[0])} in Jira">Open in Jira</a>` : ''}
+          ${picked.length ? '<button class="btn ghost sm" data-component="">Clear</button>' : ''}
         </div>
       </section>`;
   }
@@ -213,7 +334,7 @@ const CoverageReport = (() => {
       <section class="section grid-2">
         <div class="card">
           <h3>Overall automation status</h3>
-          <div class="sub">${d.component ? `${UI.esc(d.component)} · ` : ''}${UI.int(d.total)} ${UI.esc(d.scope.toLowerCase())}s by their Automation Status</div>
+          <div class="sub">${d.selected.length ? `${UI.esc(d.selected.join(' + '))} · ` : ''}${UI.int(d.total)} ${UI.esc(d.scope.toLowerCase())}s by their Automation Status</div>
           <div class="mixbar">
             ${shown.map(b => `<i style="width:${b.share}%;background:${BUCKET_COLOR[b.key]}" title="${UI.esc(b.label)}: ${b.count}"></i>`).join('')}
           </div>
@@ -294,11 +415,32 @@ const CoverageReport = (() => {
         </div>
       </div>`;
 
+    /* SEVERAL COMPONENTS HAVE NO COMBINED SERIES, and inventing one by adding
+       two rows together would double-count every epic they share. So the trend
+       stands down and the movers table — which ranks the selected components
+       against each other — is the whole section. */
+    if (m && m.multi) return `
+      <section class="section">
+        <div class="card wide">
+          ${head}
+          <div class="sub">${UI.esc((d.selected || []).join(' + '))} · ranked against each other</div>
+          <div style="margin-top:10px;padding:10px 12px;border-radius:var(--radius-sm);background:var(--app-subtle)">
+            <p class="muted" style="margin:0;font-size:12px;line-height:1.5">
+              A reading is recorded per component, so a combination has no trend line of its own — and adding two
+              components' readings together would count every ${UI.esc(d.scope.toLowerCase())} they share twice.
+              Pick a single component for the chart.
+            </p>
+          </div>
+          ${moversTable(d, (m.movers || []).filter(r => (d.selected || []).includes(r.component)))}
+          ${sourceNote(m)}
+        </div>
+      </section>`;
+
     if (!m || !m.hasTrend) return `
       <section class="section">
         <div class="card wide">
           ${head}
-          <div class="sub">${d.component ? `${UI.esc(d.component)} · ` : ''}Coverage over time, once there are two readings to compare</div>
+          <div class="sub">${d.selected.length ? `${UI.esc(d.selected.join(' + '))} · ` : ''}Coverage over time, once there are two readings to compare</div>
           <div style="margin-top:12px;padding:12px 14px;border-radius:var(--radius-sm);background:var(--app-subtle)">
             <div class="eyebrow"><i></i>${(m && m.points || []).length ? 'One reading so far' : 'No history yet'}</div>
             <p style="margin:8px 0 0;font-size:12.5px;line-height:1.5">
@@ -336,7 +478,7 @@ const CoverageReport = (() => {
         <div class="card wide">
           ${head}
           <div class="sub">
-            ${d.component ? `${UI.esc(d.component)} · ` : 'Across every component · '}
+            ${d.selected.length ? `${UI.esc(d.selected.join(' + '))} · ` : 'Across every component · '}
             ${UI.esc(m.span.from)} → ${UI.esc(m.span.to)} · ${m.span.readings} readings
           </div>
 
@@ -368,7 +510,25 @@ const CoverageReport = (() => {
             denominator faster than the numerator, which is a different problem from work going backwards.
           </p>
 
-          ${d.component || !rows.length ? '' : `
+          ${d.selected.length === 1 ? '' : moversTable(d, rows)}
+
+          ${sourceNote(m)}
+        </div>
+      </section>`;
+  }
+
+
+  /**
+   * Which components moved, ranked.
+   *
+   * Extracted because two branches of the movement section render it: the
+   * single-component view shows the whole portfolio's movers, and a multi-select
+   * shows only the components in the selection, ranked against each other. One
+   * copy, so the columns cannot diverge between them.
+   */
+  function moversTable(d, rows) {
+    if (!rows.length) return '';
+    return `
             <h3 style="margin-top:22px">Which components moved</h3>
             <div class="sub">Biggest change first, up and down. Click one to narrow the screen to it.</div>
             <div class="table-wrap" style="margin-top:10px">
@@ -399,11 +559,7 @@ const CoverageReport = (() => {
             <p class="muted" style="font-size:11.5px;margin-top:10px">
               "Scope" is how many automatable ${UI.esc(d.scope.toLowerCase())}s the suite gained or lost. A component that
               fell while its scope grew did not go backwards — it got bigger faster than it got automated.
-            </p>`}
-
-          ${sourceNote(m)}
-        </div>
-      </section>`;
+            </p>`;
   }
 
   /** The bucket changes behind one component's move, largest first. */
@@ -452,7 +608,9 @@ const CoverageReport = (() => {
         <div class="table-wrap">
           <table>
             <thead><tr>
-              <th>Component</th><th>Family</th>
+              <th>Component</th>
+              <th title="Your judgement of how much this suite matters — set it here, it is never touched by a sync">Priority</th>
+              <th>Family</th>
               <th class="num">${UI.esc(d.scope)}s</th>
               <th class="num">Automated</th><th class="num">Maint.</th>
               <th class="num">Ready</th><th class="num">Blocked</th>
@@ -462,6 +620,7 @@ const CoverageReport = (() => {
             <tbody>${rows.map(r => `
               <tr>
                 <td>${componentCell(d, r.component)}</td>
+                ${priorityCell(d, r)}
                 <td class="muted">${UI.esc(r.family.split(' —')[0])}</td>
                 <td class="num">${r.total}</td>
                 <td class="num">${r.automated}</td>
@@ -481,6 +640,8 @@ const CoverageReport = (() => {
           An ${UI.esc(d.scope.toLowerCase())} with two product components counts in both, so this column adds up to more
           than ${UI.int(d.total)}. Picking one component per ${UI.esc(d.scope.toLowerCase())} would under-report every suite that shares work.
           Click a component to narrow the whole screen to it.
+          <strong>Priority</strong> is yours to set — it saves as you change it, is never touched by a sync, and the
+          column sorts by it.
         </p>
       </section>`;
   }
@@ -550,7 +711,7 @@ const CoverageReport = (() => {
       <section class="section">
         <div class="section-head">
           <h2>TrueTest vs KSE</h2>
-          <span class="muted">${d.component ? UI.esc(d.component) : `${rows.length} components`}</span>
+          <span class="muted">${d.selected.length === 1 ? UI.esc(d.selected[0]) : `${rows.length} components`}</span>
         </div>
 
         <div class="card" style="margin-bottom:16px">
@@ -571,12 +732,12 @@ const CoverageReport = (() => {
         </div>
 
         ${toolBreakdown(d, whole,
-          d.component ? `Automation status by tool — ${d.component}` : 'Automation status by tool',
-          d.component
+          d.selected.length === 1 ? `Automation status by tool — ${d.selected[0]}` : 'Automation status by tool',
+          d.selected.length === 1
             ? 'The same seven buckets, split by where the work runs'
             : 'Across every component. Pick one above, or open a row below, to see it per component.')}
 
-        ${d.component ? '' : `
+        ${d.selected.length === 1 ? '' : `
         <div class="table-wrap">
           <table>
             <thead><tr>
@@ -698,12 +859,12 @@ const CoverageReport = (() => {
             ${chips}
           </div>
           <div class="sub">
-            ${d.component
-              ? `${UI.esc(d.component)} only — clear the component above to see this across the portfolio`
+            ${d.selected.length
+              ? `${UI.esc(d.selected.join(' + '))} only — clear the selection above to see this across the portfolio`
               : `Across all ${d.byComponent.length} components — pick one above, or a component below, to see its own`}
           </div>
           ${a.clear
-            ? `<div class="empty" style="margin-top:12px">Nothing to flag${d.component ? ` in ${UI.esc(d.component)}` : ''}.
+            ? `<div class="empty" style="margin-top:12px">Nothing to flag${d.selected.length ? ` in ${UI.esc(d.selected.join(' + '))}` : ''}.
                  Coverage is ${UI.pct(d.coveragePct)}, nothing is blocked, and every ${UI.esc(d.scope.toLowerCase())} has a status.</div>`
             : `<ul class="findings">${a.findings.map(f => findingRow(d, f)).join('')}</ul>`}
         </div>

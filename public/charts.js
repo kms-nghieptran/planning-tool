@@ -8,8 +8,16 @@ const Charts = (() => {
   const AXIS = 'var(--app-fg-3)';
   const GRID = 'var(--app-line-soft)';
 
-  // width:100% + height:auto, NOT a fixed height attribute: a fixed height makes the
-  // viewBox letterbox and centre itself inside a wider card, which reads as a layout bug.
+  /* width:100% + height:auto, NOT a fixed height attribute: a fixed height makes
+     the viewBox letterbox and centre itself inside a wider card, which reads as
+     a layout bug.
+  
+     THE CAP STAYS, and it is the one thing on these screens that does not go
+     full width. An SVG keeps its aspect ratio, so a 760×190 chart stretched
+     across a 2400px window would be 600px tall; forcing the ratio instead
+     (`preserveAspectRatio="none"`) scales the text with it and the axis labels
+     come out horizontally smeared. A table wants the whole window. A chart
+     wants a readable size, and 1.35× its design width is it. */
   const frame = (w, h, body) => `<svg viewBox="0 0 ${w} ${h}" role="img" preserveAspectRatio="xMinYMid meet" style="display:block;width:100%;height:auto;max-width:${w * 1.35}px;overflow:visible">${body}</svg>`;
   const nice = (max) => { if (max <= 0) return 10; const p = 10 ** Math.floor(Math.log10(max)); return Math.ceil(max / p * 2) / 2 * p; };
 

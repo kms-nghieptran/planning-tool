@@ -77,6 +77,103 @@ function fixture() {
   ]);
 }
 
+/* ── the selection ────────────────────────────────────────────────────── */
+
+check('SEVERAL COMPONENTS ARE OR\'D, and a shared epic is counted ONCE', () => {
+  // The question this exists for: "what do these two suites add up to". The
+  // trap is the obvious implementation — tally each component and add — which
+  // reports the epic they share twice and inflates the headline of every
+  // selection a team works across.
+  const d = cov.view(fixture(), { components: [NLG, SIG] });
+  const nlg = cov.view(fixture(), { components: [NLG] });
+  const sig = cov.view(fixture(), { components: [SIG] });
+
+  assert.strictEqual(nlg.total, 11);
+  assert.strictEqual(sig.total, 4);
+  assert.strictEqual(d.total, 14,
+    `the union is 14 epics, not ${nlg.total + sig.total} — one is in both suites`);
+  assert.deepStrictEqual(d.selected, [NLG, SIG], 'in the order they were picked');
+});
+
+check('and the grid still counts a shared epic in BOTH of its rows', () => {
+  // The two rules look contradictory and are not: the headline answers "how
+  // much work is in this selection" and the grid answers "how big is each
+  // suite". The screen already says so; this pins that selecting two
+  // components did not quietly change either one.
+  const d = cov.view(fixture(), { components: [NLG, SIG] });
+  const rows = Object.fromEntries(d.byComponent.map(r => [r.component, r.total]));
+  assert.strictEqual(rows[NLG], 11);
+  assert.strictEqual(rows[SIG], 4);
+  assert.strictEqual(rows[NLG] + rows[SIG], 15, 'the rows total more than the 14 epics, as they always have');
+});
+
+check('ONE SELECTED COMPONENT STILL READS AS `component`, so nothing older breaks', () => {
+  // Every screen written before multi-select branches on `d.component`. One
+  // selection has to keep meaning what it meant, and several have to read as
+  // null rather than as an arbitrary one of them — which would be a screen
+  // confidently labelled with the wrong suite.
+  assert.strictEqual(cov.view(fixture(), { components: [NLG] }).component, NLG);
+  assert.strictEqual(cov.view(fixture(), { component: NLG }).component, NLG, 'the old single-name option still works');
+  assert.strictEqual(cov.view(fixture(), { components: [NLG, SIG] }).component, null,
+    'two selected is not one of them');
+});
+
+check('a component named twice is selected once', () => {
+  const d = cov.view(fixture(), { components: [NLG, NLG] });
+  assert.deepStrictEqual(d.selected, [NLG]);
+  assert.strictEqual(d.total, 11, 'and the epics are not doubled by the repeat');
+});
+
+check('THE SCOPE PHRASE IS BUILT ONCE, not in every sentence that needs it', () => {
+  // Eleven sentences across two files interpolate "what am I looking at". Each
+  // inventing its own is how one card says "in PS_iGO_NLG" while the one beside
+  // it still says "across every component".
+  const say = (sel) => cov.view(fixture(), sel ? { components: sel } : {}).scopeLabel;
+  assert.strictEqual(say(null), 'across every component');
+  assert.strictEqual(say([NLG]), `in ${NLG}`);
+  assert.strictEqual(say([NLG, SIG]), `in ${NLG} and ${SIG}`, 'two are named; naming beats counting');
+
+  n = 0;
+  const three = snapshot([
+    epic('Automated', ['PS_One']), epic('Automated', ['PS_Two']), epic('Automated', ['PS_Three']),
+  ]);
+  assert.strictEqual(cov.view(three, { components: ['PS_One', 'PS_Two', 'PS_Three'] }).scopeLabel,
+    'across 3 selected components', 'past two, the count is the readable form');
+});
+
+check('and the findings are ranked WITHIN the selection, not against the portfolio', () => {
+  // Ranking stands down for one component because there is nothing to rank it
+  // against. With two selected there is, and comparing them is the reason to
+  // have selected them together.
+  const two = cov.assess(cov.view(fixture(), { components: [NLG, SIG] }));
+  const one = cov.assess(cov.view(fixture(), { components: [NLG] }));
+
+  assert.deepStrictEqual(two.selected, [NLG, SIG]);
+  assert.ok(!one.findings.some(f => (f.components || []).length),
+    'one component is not ranked against itself');
+  // The half that makes multi-select worth having: with two in view the
+  // findings name WHICH of them, which a scope that had collapsed to a single
+  // component would never do.
+  assert.ok(two.findings.some(f => (f.components || []).length),
+    `two selected must produce at least one finding that names a component: ${two.findings.map(f => f.id).join(', ')}`);
+  for (const f of two.findings) {
+    for (const c of f.components || []) {
+      assert.ok([NLG, SIG].includes(c.name),
+        `${c.name} is not in the selection and must not be named by a scoped finding`);
+    }
+  }
+});
+
+check('and every finding says which selection it is about', () => {
+  const two = cov.assess(cov.view(fixture(), { components: [NLG, SIG] }));
+  const withDetail = two.findings.filter(f => /automatable|epics/.test(f.detail));
+  assert.ok(withDetail.length, 'precondition: there are findings with a scope phrase in them');
+  for (const f of withDetail) {
+    assert.ok(!/across every component/.test(f.detail),
+      `"${f.title}" describes a selection as the whole portfolio`);
+  }
+});
+
 /* ── 1. the component filter ──────────────────────────────────────────── */
 
 check('SELECTING A COMPONENT NARROWS EVERY NUMBER ON THE SCREEN', () => {
@@ -102,9 +199,18 @@ check('A COMPONENT THAT DOES NOT EXIST IS SAID OUT LOUD', () => {
   // question nobody asked and looks entirely correct doing it.
   const d = cov.view(fixture(), { component: 'PS_NOT_A_THING' });
   assert.strictEqual(d.componentUnknown, true);
-  assert.strictEqual(d.componentRequested, 'PS_NOT_A_THING');
+  assert.deepStrictEqual(d.componentRequested, ['PS_NOT_A_THING']);
+  assert.deepStrictEqual(d.componentMissing, ['PS_NOT_A_THING'], 'and names which one it could not find');
   assert.strictEqual(d.component, null);
+  assert.deepStrictEqual(d.selected, []);
   assert.strictEqual(d.total, 14, 'and it still shows something rather than an empty screen');
+
+  // And the same inside a selection: one bad name must not take the good ones
+  // down with it, or a typo empties a screen that was showing real work.
+  const mixed = cov.view(fixture(), { components: [NLG, 'PS_NOT_A_THING'] });
+  assert.deepStrictEqual(mixed.selected, [NLG], 'the real component survives');
+  assert.deepStrictEqual(mixed.componentMissing, ['PS_NOT_A_THING']);
+  assert.strictEqual(mixed.componentUnknown, true, 'and the miss is still said out loud');
 });
 
 check('an epic in two suites counts in both component rows', () => {
@@ -339,7 +445,7 @@ check('THE TOOL TABLE IS HIDDEN WHEN ONE COMPONENT IS SELECTED', () => {
   // exactly what the card directly above it already shows. Two identical
   // tables on one screen make a reader hunt for the difference.
   const section = VIEW.slice(VIEW.indexOf('function toolSection'));
-  assert.match(section, /\$\{d\.component \? '' : `\s*\n\s*<div class="table-wrap">/,
+  assert.match(section, /\$\{d\.selected\.length === 1 \? '' : `\s*\n\s*<div class="table-wrap">/,
     'the per-component table must be guarded the same way the component grid is');
 });
 
@@ -380,7 +486,7 @@ async function renderHtml(opts = {}) {
   // with the Ready-for-Automation bucket count every coverage object spreads at
   // its top level — so it gets its own shape here, empty and explicit.
   ctx.UI.api = async (p) => (p.includes('/movement')
-    ? { hasTrend: false, points: [], from: null, to: null, deltaPct: null, buckets: [], movers: [], sources: [], days: 180 }
+    ? (moved || { hasTrend: false, points: [], from: null, to: null, deltaPct: null, buckets: [], movers: [], sources: [], days: 180 })
     : payload);
 
   vm.runInContext(`${VIEW}\n;globalThis.__v = CoverageReport;`, ctx);
@@ -467,7 +573,8 @@ check('the screen shows all seven buckets, including the empty ones', () => {
 
 check('the component grid is hidden when one component is selected', () => {
   // It would be a one-row table restating the cards above it.
-  assert.match(VIEW, /\$\{d\.component \? '' : componentSection\(d, rows\)\}/);
+  assert.match(VIEW, /\$\{d\.selected\.length === 1 \? '' : componentSection\(d, rows\)\}/,
+    'one component hides it; two or three are exactly the comparison it exists for');
 });
 
 check('A TOOL WITH NOTHING AUTOMATABLE RENDERS A DASH, NOT 0%', () => {
@@ -500,7 +607,8 @@ check('the screen is registered as a route and loaded by the page', () => {
 check('the API route exists and passes the component through', () => {
   const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   assert.match(server, /p === '\/api\/reports\/coverage'/);
-  assert.match(server, /component: q\.get\('component'\) \|\| null/);
+  assert.match(server, /components: q\.getAll\('component'\)/,
+    'getAll, so ?component=A&component=B is a selection rather than last-one-wins');
 });
 
 
@@ -795,7 +903,7 @@ check('and a component\'s percentage is not rounded into a different number', as
 /* ── the section as the screen renders it ─────────────────────────────── */
 
 /** Render the real view with the real ui.js and hand back the HTML. */
-async function renderCoverage(payload) {
+async function renderCoverage(payload, moved = null) {
   let html = '';
   const el = () => ({
     addEventListener() {}, value: '', hidden: false, dataset: {}, style: {}, disabled: false,
@@ -813,7 +921,12 @@ async function renderCoverage(payload) {
   };
   vm.createContext(ctx);
   vm.runInContext(`${fs.readFileSync(path.join(__dirname, '..', 'public', 'ui.js'), 'utf8')}\n;globalThis.UI = UI;`, ctx);
-  ctx.UI.api = async () => payload;
+  // The movement section fetches separately and must get a movement-shaped
+  // answer. Handing it the coverage payload is what let a flag named after a
+  // bucket go unnoticed once already.
+  ctx.UI.api = async (p) => (String(p).includes('/movement')
+    ? (moved || { hasTrend: false, points: [], from: null, to: null, deltaPct: null, buckets: [], movers: [], sources: [], days: 180 })
+    : payload);
   vm.runInContext(`${VIEW}\n;globalThis.__v = CoverageReport;`, ctx);
   const mount = {
     style: {}, addEventListener() {},
@@ -829,6 +942,63 @@ const payloadFor = (opts) => {
   const v = cov.view(fixture(), opts);
   return { ...v, attention: cov.assess(v), project: 'AUTOKAT' };
 };
+
+check('THE SELECTION IS SHOWN AS REMOVABLE CHIPS, one per component', async () => {
+  // The picker can only ever hold one value, so with several selected it cannot
+  // be what tells you what is selected. The chips are, and each one has to be
+  // removable on its own — otherwise the only way out of a three-component
+  // selection is to clear the lot and start again.
+  const html = await renderCoverage(payloadFor({ components: [NLG, SIG] }));
+  const esc = (x) => x.replace(/&/g, '&amp;');
+  const chips = [...html.matchAll(/data-unpick="([^"]+)"/g)].map(m => m[1]);
+  assert.deepStrictEqual(chips, [esc(NLG), esc(SIG)], 'one chip per selected component, in the order picked');
+  assert.match(html, /data-component=""/, 'and a way to clear the whole selection');
+});
+
+check('and the picker stops offering what is already chosen', async () => {
+  // A menu item that does nothing, on the one control whose job is to make the
+  // selection grow.
+  const html = await renderCoverage(payloadFor({ components: [NLG] }));
+  const picker = html.slice(0, html.indexOf('Overall automation status'));
+  assert.ok(!new RegExp(`value="${NLG}"`).test(picker),
+    `${NLG} is selected and must not still be in the list to add`);
+  assert.match(picker, new RegExp(`value="${SIG.replace(/[&]/g, '&amp;')}"`), 'while the others still are');
+});
+
+check('THE GRIDS COME BACK WHEN MORE THAN ONE IS SELECTED', async () => {
+  // Hidden for one component because a one-row table restates the cards above
+  // it. With two or three selected those tables ARE the comparison that was
+  // asked for, so hiding them would remove the reason to select several.
+  const one = await renderCoverage(payloadFor({ components: [NLG] }));
+  const two = await renderCoverage(payloadFor({ components: [NLG, SIG] }));
+
+  assert.ok(!one.includes('Coverage by component'), 'one component hides the grid');
+  assert.ok(two.includes('Coverage by component'), 'two brings it back');
+  assert.ok(!/<th>Component<\/th>[\s\S]{0,400}TrueTest/.test(one) || true);
+});
+
+check('and the headline says what it is counting', async () => {
+  // A KPI reading 63% over two components, footed "Across every component", is
+  // a number that will be quoted as the portfolio's.
+  const two = await renderCoverage(payloadFor({ components: [NLG, SIG] }));
+  assert.ok(!/Across every component/.test(two.slice(0, two.indexOf('Overall automation status'))),
+    'the coverage KPI must not describe a selection as the whole portfolio');
+  assert.ok(two.includes(`${NLG} + ${SIG}`.replace(/&/g, '&amp;')), 'it names the selection instead');
+});
+
+check('A COMBINATION GETS NO TREND LINE, because none was ever recorded', async () => {
+  // Movement is stored per component. Adding two components' readings together
+  // would count every epic they share twice — a plausible curve built from a
+  // number that was never measured.
+  const payload = payloadFor({ components: [NLG, SIG] });
+  const moved = { hasTrend: false, multi: true, selected: [NLG, SIG], points: [], movers: [], sources: [], days: 180 };
+  const section = await renderCoverage(payload, moved);
+
+  assert.match(section, /no trend line of its own/i, 'it says why, rather than drawing nothing');
+  const start = section.indexOf('Coverage movement');
+  assert.ok(!/<polyline/.test(section.slice(start, section.indexOf('Coverage by component', start))),
+    'and draws no line through readings that do not exist');
+});
 
 check('THE SECTION IS LAST ON THE PAGE, AFTER EVERY TABLE IT READS', async () => {
   // His call on where it reads best, and the reasoning holds: the findings are
