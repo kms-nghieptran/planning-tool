@@ -581,9 +581,14 @@ check('and the views that show keys actually call it', () => {
 check('the Epic column links its epics too', () => {
   // The epic key is the one most worth clicking — it is the only place in the
   // app that names an issue you are NOT already looking at.
-  const src = read(VIEWS, 'sprint.js');
-  const fn = src.slice(src.indexOf('function epicCell'), src.indexOf('const trim ='));
-  assert.match(fn, /UI\.issueKey\(e\.key\)/);
+  //
+  // The cell lives in ui.js now, shared by the Active sprint and Capacity
+  // planning screens, so it is read from there. Inside that module the helper
+  // is called unqualified.
+  const src = read(VIEWS, '..', 'ui.js');
+  const fn = src.slice(src.indexOf('function epicCell'), src.indexOf('function itemsTable'));
+  assert.ok(fn, 'epicCell has moved again — point this check at it');
+  assert.match(fn, /issueKey\(e\.key\)/);
 });
 
 check('a blocked-by list links each blocker', () => {

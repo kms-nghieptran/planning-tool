@@ -149,23 +149,50 @@ check('adding someone you had removed is a retraction, not a contradiction', () 
 
 /* ── an exclusion is a decision, and beats the derivation ──────────── */
 
-check('A PERSON YOU REMOVED FROM THE TEAM STAYS OFF, even with work in the sprint', () => {
-  // Found against his real data: Titan has 38 people excluded, and without
+check('A PERSON YOU REMOVED FROM THE TEAM STAYS OFF A SPRINT YOU ARE PLANNING', () => {
+  // Found against his real data: Titan has 39 people excluded, and without
   // this rule the derived roster put ten of them back on Sprint 44 — eleven
-  // people on a three-person team, and a capacity figure to match.
+  // people on a three-person team, and a capacity figure to match. Sprint 44
+  // is a FUTURE sprint, which is the whole point: this is a rule about what
+  // you are planning, and the fixture has to be a sprint you can still plan.
+  const withExcluded = WORKED.concat([issue('T-9', 'acc-gone', 'An Thien Nguyen')]);
+  const plan = PLAN({ excluded: { titan: ['acc-gone'] } });
+  const r = roster.forSprint(plan, TEAM(), sprint('S38', 'future'), withExcluded, 'future');
+  assert.ok(!r.members.some(m => m.name === 'An Thien Nguyen'),
+    'removing someone from a team is a decision; Jira showing their work does not undo it');
+  // The four on the team list, and only those: a sprint still being planned
+  // starts from the team, so the count on its own would not have caught an
+  // excluded person slipping back in.
+  assert.strictEqual(r.counts.total, 4);
+});
+
+check('and off an ACTIVE one too — it is still being planned', () => {
+  const withExcluded = WORKED.concat([issue('T-9', 'acc-gone', 'An Thien Nguyen')]);
+  const plan = PLAN({ excluded: { titan: ['acc-gone'] } });
+  const r = roster.forSprint(plan, TEAM(), sprint('S38', 'active'), withExcluded, 'active');
+  assert.ok(!r.members.some(m => m.name === 'An Thien Nguyen'));
+  assert.strictEqual(r.counts.total, 4);
+});
+
+check('BUT A CLOSED SPRINT KEEPS THE PEOPLE WHO ACTUALLY DID THE WORK', () => {
+  // The defect he reported: Katalon Titan Sprint 30 showed 53 items "with no
+  // assignee" when every one of them named a person. The exclusions were
+  // erasing them from a sprint that had already happened — and with them, 5,046
+  // delivered points across 38 closed sprints.
   const withExcluded = WORKED.concat([issue('T-9', 'acc-gone', 'An Thien Nguyen')]);
   const plan = PLAN({ excluded: { titan: ['acc-gone'] } });
   const r = roster.forSprint(plan, TEAM(), sprint('S38', 'closed'), withExcluded, 'closed');
-  assert.ok(!r.members.some(m => m.name === 'An Thien Nguyen'),
-    'removing someone from a team is a decision; Jira showing their work does not undo it');
-  assert.strictEqual(r.counts.total, 3);
+  assert.ok(r.members.some(m => m.name === 'An Thien Nguyen'),
+    'a closed sprint is a record of what happened, not a plan you can still change');
+  assert.strictEqual(r.counts.total, 4);
 });
 
 check('exclusions match by NAME as well as account id', () => {
   const withExcluded = WORKED.concat([issue('T-9', null, 'An Thien Nguyen')]);
   const plan = PLAN({ excluded: { titan: ['An Thien Nguyen'] } });
-  const r = roster.forSprint(plan, TEAM(), sprint('S38', 'closed'), withExcluded, 'closed');
-  assert.strictEqual(r.counts.total, 3, 'older exclusions were stored by name, and still have to work');
+  const r = roster.forSprint(plan, TEAM(), sprint('S38', 'future'), withExcluded, 'future');
+  assert.ok(!r.members.some(m => m.name === 'An Thien Nguyen'),
+    'older exclusions were stored by name, and still have to work');
 });
 
 check('but adding them to ONE sprint still works — a narrower, later decision', () => {

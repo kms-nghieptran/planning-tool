@@ -389,8 +389,19 @@ async function handleApi(req, res, url) {
     const plan = store.getPlan(), snap = store.getSnapshot();
     const team = findTeam(plan, q.get('team'));
     const window = Number(q.get('sprints')) || 12;
+    // Which sprints that window actually resolved to — the active one plus the
+    // most recent closed ones. Named here so the screen can say it out loud
+    // rather than leaving the reader to assume "the last N by date".
+    const picked = metrics.windowSprints(plan, team, window);
+    const named = picked.ids.map(id => {
+      const sp = plan.sprints.find(x => x.id === id) || {};
+      const t = (sp.byTeam || {})[team.id] || {};
+      return { id, name: t.name || sp.name || id, state: t.state || null, active: id === picked.active };
+    });
     return json(res, 200, {
       teamId: team.id, teamName: team.jiraName || team.name, window,
+      windowSprints: named,
+      activeSprint: named.find(x => x.active) || null,
       velocity: metrics.velocity(plan, snap, team, { sprints: window }),
       productivity: metrics.productivity(plan, snap, team, { sprints: window }),
       quality: metrics.quality(plan, snap, team, { sprints: window }),

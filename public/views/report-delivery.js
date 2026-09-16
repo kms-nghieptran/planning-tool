@@ -28,11 +28,12 @@ const DeliveryReport = (() => {
           <span class="muted">${UI.esc(d.teamName)} · ${UI.esc(v.basis)}</span>
           <div class="spacer"></div>
           <label class="field inline"><span>Window</span>
-            <select id="dmWindow">${[6, 8, 12, 20].map(n => `<option value="${n}"${n === window ? ' selected' : ''}>${n} sprints</option>`).join('')}</select>
+            <select id="dmWindow">${[4, 6, 8, 12, 20].map(n => `<option value="${n}"${n === window ? ' selected' : ''}>${n} sprints</option>`).join('')}</select>
           </label>
         </div>
+        ${windowNote(d)}
         <div class="kpis">
-          ${UI.kpi({ label: 'Average velocity', value: UI.int(v.average), unit: 'pts', foot: `Last 6 completed sprints`, tone: 'brand', featured: true })}
+          ${UI.kpi({ label: 'Average velocity', value: UI.int(v.average), unit: 'pts', foot: 'Completed sprints only — the one in progress is excluded', tone: 'brand', featured: true })}
           ${UI.kpi({ label: 'Safe commitment', value: UI.int(v.safeCommitment), unit: 'pts', foot: 'Average discounted by delivery spread', tone: 'ok' })}
           ${UI.kpi({ label: 'Attainment', value: UI.pct(q.attainment), foot: `Delivered ÷ committed · ${q.missedSprints} sprint${q.missedSprints === 1 ? '' : 's'} landed short`, tone: q.attainment >= 90 ? 'ok' : q.attainment >= 75 ? 'warn' : 'risk' })}
           ${UI.kpi({ label: 'Rework', value: UI.pct(q.reworkShare), foot: `${UI.num(q.reworkPoints)} pts on maintaining existing tests`, tone: q.reworkShare > 35 ? 'warn' : '' })}
@@ -117,6 +118,34 @@ const DeliveryReport = (() => {
     `;
 
     UI.$('#dmWindow', mount).addEventListener('change', e => { window = Number(e.target.value); App.refresh(); });
+  }
+
+  /**
+   * WHAT THE WINDOW ACTUALLY RESOLVED TO.
+   *
+   * "12 sprints" is ambiguous until you say which twelve. It counts back from
+   * the sprint you are in: the active one plus the most recent closed ones,
+   * never a planned one. Saying so is the difference between a reader trusting
+   * the chart and a reader guessing at it.
+   */
+  function windowNote(d) {
+    const list = d.windowSprints || [];
+    if (!list.length) {
+      return `<div class="muted" style="font-size:12px;margin-top:-4px">
+        No closed sprints for this team yet — nothing to measure.
+      </div>`;
+    }
+    const closed = list.filter(s => !s.active);
+    const active = d.activeSprint;
+    const names = list.map(s => `${UI.esc(s.name)}${s.active ? ' (in progress)' : ''}`).join(' · ');
+    return `
+      <div class="muted" style="font-size:12px;margin-top:-4px">
+        ${active
+          ? `Counting back from <strong>${UI.esc(active.name)}</strong> — the sprint in progress plus the ${closed.length} most recently closed.`
+          : `No active sprint right now, so this is the ${closed.length} most recently closed.`}
+        ${list.length < d.window ? `<span class="tag warn" style="margin-left:6px">only ${list.length} of ${d.window} available</span>` : ''}
+        <div style="margin-top:3px">${names}</div>
+      </div>`;
   }
 
   function statBlock(label, value, foot) {

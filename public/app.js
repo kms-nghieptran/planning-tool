@@ -208,7 +208,11 @@ const App = (() => {
     const closedCount = sorted.length - restingCount;
 
     sprintHost.innerHTML = UI.combo({
-      id: 'sprintSelect', label: 'Sprint', cls: 'inline',
+      // The box grows to its own value: sprint names run to 27 characters
+      // ("Katalon MoonStone Sprint 10") and a fixed box cut them off, so the
+      // topbar told you which team's sprint you were on only if the name was
+      // short enough.
+      id: 'sprintSelect', label: 'Sprint', cls: 'inline', autosize: true,
       value: current ? sprintLabel(current, (current.byTeam || {})[state.teamId]) : '',
       placeholder: `${sorted.length} sprints — type to search`,
       note: closedCount ? `${closedCount} closed sprint${closedCount > 1 ? 's' : ''} — type to find them` : '',
@@ -375,6 +379,10 @@ const App = (() => {
     const r = routeFor(state.route);
     try {
       await r.view().render(state, mount, r);
+      // Every grid on every screen becomes sortable here, once, rather than in
+      // fifteen views that would each do it slightly differently. It binds to
+      // the per-render container, so it goes when the render goes.
+      UI.sortable(mount);
     } catch (err) {
       host.innerHTML = `
         <div class="card">

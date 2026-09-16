@@ -117,7 +117,20 @@ a { color: var(--brand-blue); }
 .sprint-picker { min-width: 0; }
 .sprint-picker .combo { flex-direction: row; align-items: center; gap: 8px; }
 .sprint-picker .combo > span { white-space: nowrap; }
-.sprint-picker input { min-width: 210px; font-size: 13px; }
+/* Sized by its own `size` attribute, not by a fixed width, so the whole sprint
+   name is readable — the names run to 27 characters and a 210px box showed
+   about two thirds of one. The cap is what keeps that off the topbar's back at
+   narrow widths: `50vw` means the box can never take more than half the row,
+   whatever it is asked to hold. */
+/* The width itself is inline and sized from the value (see `.combo-fit`). Only
+   the floor lives here.
+
+   `input[type="text"]` further down this sheet sets `max-width: 100%` and
+   `min-width: 0` at the SAME specificity as a plain `.sprint-picker input`, and
+   it comes later, so it won — which is why the old `min-width: 210px` here
+   never actually applied and the box sat at the browser's default width,
+   clipping every sprint name. Matching the attribute too outranks it. */
+.sprint-picker input[type="text"] { min-width: 140px; font-size: 13px; }
 .sprint-picker .combo-list { right: 0; left: auto; }
 
 /* Nav: two levels, the second indented under its section. */
@@ -274,6 +287,27 @@ td.wrap { white-space: normal; min-width: 260px; }
 tr.total td { font-weight: var(--font-weight-semibold, 600); background: var(--app-subtle); border-top: 2px solid var(--app-line); }
 tr.released td { opacity: .55; }
 
+/* A sortable column heading. The caret is drawn rather than written into the
+   markup so the same rule serves the grids sorted in the browser and the search
+   grid sorted on the server — one visual language for one gesture.
+
+   The `::after` is always present and merely transparent when the column is not
+   the sorted one: reserving the space means clicking a heading does not shove
+   the rest of the row sideways. */
+th.sortable { cursor: pointer; user-select: none; }
+th.sortable::after {
+  content: "↕"; margin-left: 6px; font-size: 10px;
+  color: var(--app-fg-3); opacity: 0;
+}
+th.sortable:hover { color: var(--app-fg); }
+th.sortable:hover::after { opacity: .5; }
+th.sortable.sort-asc::after { content: "↑"; opacity: 1; color: var(--brand-blue); }
+th.sortable.sort-desc::after { content: "↓"; opacity: 1; color: var(--brand-blue); }
+th.sortable.sort-asc, th.sortable.sort-desc { color: var(--app-fg); }
+/* Not a person, so it does not read as one — a dashed rule separates the
+   unowned pile from the roster above it without shouting. */
+tr.unassigned-row td { border-top: 1px dashed var(--app-line); }
+
 .name-cell { display: flex; align-items: center; gap: 8px; }
 .avatar {
   width: 24px; height: 24px; border-radius: 50%; flex: none;
@@ -350,11 +384,26 @@ tr.released td { opacity: .55; }
    shrink below its content, and the table pushes the whole page sideways at
    narrow widths — 7px of horizontal scroll on the entire app. */
 .tool-col { flex: 1 1 230px; min-width: 0; overflow-x: auto; }
+/* A box that grows to its content. The width itself is inline, in `ch`, set
+   from the value's own length — see `fitChars` in ui.js. Only the clamps live
+   here, and `max-width` has to beat the inline width, so it carries !important:
+   without it a long value could push the topbar sideways on a phone. */
+input.combo-fit { max-width: min(380px, 50vw); }
+
 /* `.on` is the keyboard cursor, `.active` is what is actually selected —
-   different things, and a list that conflates them is a list you get lost in. */
-.combo-opt.on { background: var(--app-subtle); }
+   different things, and a list that conflates them is a list you get lost in.
+   The selection is the louder of the two: tinted, with a bar down its edge, so
+   it is findable at a glance in a list of forty sprints. The cursor is a plain
+   grey wash, and the two together are louder still rather than cancelling out. */
+.combo-opt.active {
+  background: color-mix(in srgb, var(--brand-blue) 9%, transparent);
+  box-shadow: inset 3px 0 0 var(--brand-blue);
+}
 .combo-opt.active > strong { color: var(--brand-blue); }
-.combo-opt:hover { background: var(--app-subtle); }
+.combo-opt.on, .combo-opt:hover { background: var(--app-subtle); }
+.combo-opt.on.active, .combo-opt.active:hover {
+  background: color-mix(in srgb, var(--brand-blue) 17%, transparent);
+}
 .combo-empty { padding: 10px 11px; font-size: 12px; }
 
 /* A component name links to Jira; the ⌖ beside it narrows this screen.

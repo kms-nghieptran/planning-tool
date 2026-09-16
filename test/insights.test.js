@@ -131,6 +131,281 @@ await check('unassigned sprint points are surfaced, not silently dropped', () =>
   assert.strictEqual(v.unassigned.count, 1);
 });
 
+/* ── work with nobody on it ───────────────────────────────────────────────
+   A-4 is open, A-7 is finished, and neither is owned. Separating them is the
+   point: a per-person table that shows the unowned pile has to say how much of
+   it has LANDED, or the row is a planned number with a blank next to it. */
+const UNOWNED = {
+  ...SNAP,
+  issues: {
+    ...SNAP.issues,
+    'A-7': issue({ key: 'A-7', assignee: null, points: 6, sprint: 'Katalon Titan Sprint 40', status: 'Done' }),
+  },
+};
+const r1 = (n) => Math.round(n * 10) / 10;
+
+await check('THE UNOWNED PILE REPORTS WHAT IT FINISHED, not only what it planned', () => {
+  const v = insights.capacityView(PLAN, UNOWNED, TEAM, SPRINT);
+  assert.strictEqual(v.unassigned.count, 2);
+  assert.strictEqual(v.unassigned.points, 10, 'A-4 (4) + A-7 (6)');
+  // Counting every unowned item would give 10 and counting none would give 0,
+  // so this number is only right if the done filter is really applied.
+  assert.strictEqual(v.unassigned.done, 6, 'only A-7 is finished');
+});
+
+await check('and the sprint KPI counts that finished unowned work as done', () => {
+  const withIt = insights.activeSprintView(PLAN, UNOWNED, TEAM, SPRINT, { today: MID_SPRINT });
+  const without = insights.activeSprintView(PLAN, SNAP, TEAM, SPRINT, { today: MID_SPRINT });
+  assert.strictEqual(r1(withIt.progress.committed - without.progress.committed), 6, 'it is in the commitment');
+  assert.strictEqual(r1(withIt.progress.done - without.progress.done), 6, 'and in what has landed');
+});
+
+/* ── work owned by someone who is not on the roster ───────────────────────
+   The defect he reported: Katalon Titan Sprint 30 said 53 items had no
+   assignee when every one of them named a person. The cause was an exclusion —
+   a decision about who is on the team NOW — being applied to a sprint that had
+   already closed, which erased the people who did the work and left their
+   tickets attributed to nobody. */
+
+const GONE = { ...SNAP, issues: { ...SNAP.issues,
+  'A-8': issue({ key: 'A-8', assignee: 'Luong Trinh', points: 7, sprint: 'Katalon Titan Sprint 40', status: 'Done' }),
+} };
+const EXCLUDED = { ...PLAN, excluded: { titan: ['Luong Trinh'] } };
+
+await check('NAMED WORK IS NEVER REPORTED AS UNASSIGNED', () => {
+  const v = insights.capacityView(EXCLUDED, GONE, TEAM, SPRINT);
+  assert.strictEqual(v.unassigned.count, 1, 'only A-4, which really has nobody on it');
+  assert.strictEqual(v.offRoster.count, 1, 'A-8 has an owner, so it is not unassigned');
+  assert.strictEqual(v.offRoster.points, 7);
+  assert.deepStrictEqual(v.offRoster.people.map(p => p.name), ['Luong Trinh'], 'and the owner is named');
+  assert.strictEqual(v.unowned.count, 2, 'both are still outside the roster, and both are still in the sprint');
+});
+
+await check('AN EXCLUSION KEEPS SHAPING A SPRINT YOU CAN STILL PLAN', () => {
+  // The rule it exists for: ten people who left must not reappear on a future
+  // sprint and triple its capacity.
+  const v = insights.capacityView(EXCLUDED, GONE, TEAM, SPRINT);
+  assert.ok(!v.roster.members.some(m => m.name === 'Luong Trinh'));
+});
+
+await check('BUT A CLOSED SPRINT KEEPS WHOEVER DID THE WORK', () => {
+  const closed = { ...SPRINT, byTeam: { titan: { jiraId: '900', name: 'Katalon Titan Sprint 40', state: 'closed' } } };
+  const v = insights.capacityView(EXCLUDED, GONE, TEAM, closed);
+  assert.ok(v.roster.members.some(m => m.name === 'Luong Trinh'),
+    'a closed sprint is a record, not a plan — the exclusion must not rewrite it');
+  assert.strictEqual(v.offRoster.count, 0, 'so their work is attributed to them, not to nobody');
+});
+
+await check("HISTORY IS MEASURED AGAINST THE TEAM THE SPRINT HAD, not today's", () => {
+  // It used to score every past sprint against the current member list, so
+  // everything delivered by people who have since moved on simply vanished.
+  // On his data that hid 5,046 of Titan's delivered points across 38 sprints.
+  const past = { ...SNAP, issues: { ...SNAP.issues,
+    'B-9': issue({ key: 'B-9', assignee: 'Someone Who Left', points: 21, sprint: 'Katalon Titan Sprint 39', status: 'Done' }),
+  } };
+  const h = insights.velocityHistory(PLAN, past, TEAM).find(x => x.sprintId === 'S39');
+  assert.strictEqual(h.actual, 61, 'the 40 pts the current team delivered plus the 21 theirs did');
+  assert.ok(h.headcount >= 4, 'and they are counted as a person who was there');
+});
+
+await check('a sprint\'s history and its own screen agree about what it delivered', () => {
+  const v = insights.activeSprintView(EXCLUDED, GONE, TEAM, SPRINT, { today: MID_SPRINT });
+  const h = insights.velocityHistory(EXCLUDED, GONE, TEAM).find(x => x.sprintId === SPRINT.id);
+  assert.strictEqual(h.planned, v.progress.committed, 'the same sprint read two different ways');
+  assert.strictEqual(h.actual, v.progress.done);
+});
+
+/* ── a short name and its full one are one person ─────────────────────────
+   He reported it on Katalon Titan Sprint 39: "Anh" sat on the roster with ten
+   available days and zero points, while sixteen points of "Anh Truong"'s work
+   sat in a bucket for people not on the sprint. One person, split into a row
+   with no work and work with no row, because the roster record came from the
+   leave grid he typed and the work came from Jira. */
+
+const SHORT_TEAM = {
+  ...TEAM,
+  members: [
+    ...TEAM.members.filter(m => m.name !== 'Anh Truong'),
+    { id: 'm-anh', name: 'Anh', role: 'Auto QA', status: 'Active', supportPct: 0 },
+    { id: 'm-an', name: 'An', role: 'Auto QA', status: 'Active', supportPct: 0 },
+  ],
+};
+
+await check('A SHORT NAME ON THE ROSTER IS MATCHED TO ITS FULL ONE IN JIRA', () => {
+  const r = insights.memberResolver(SHORT_TEAM);
+  assert.strictEqual(r({ assignee: 'Anh Truong' }), 'm-anh');
+});
+
+await check('so their work lands on their row instead of on nobody', () => {
+  const v = insights.capacityView({ ...PLAN, teams: [SHORT_TEAM] }, SNAP, SHORT_TEAM, SPRINT);
+  const anh = v.rows.find(x => x.memberId === 'm-anh');
+  assert.strictEqual(anh.planned, 5, "Anh Truong's A-3 and the unestimated A-5");
+  assert.strictEqual(v.offRoster.count, 0, 'nothing is left over for a person not on the sprint');
+});
+
+await check('"An" IS NOT "Anh Truong" — whole words only', () => {
+  // The guard that makes this safe to do at all: a prefix match would have
+  // handed An Thien Nguyen's row somebody else's work.
+  //
+  // "An" is the ONLY loose candidate here on purpose. With "Anh" also on the
+  // team a prefix match would hit both and be rejected as ambiguous, so the
+  // ambiguity guard would hide the prefix bug instead of the token rule
+  // catching it — this check would pass while being about nothing.
+  const only = { ...TEAM, members: [{ id: 'm-an', name: 'An', status: 'Active', supportPct: 0 }] };
+  const r = insights.memberResolver(only);
+  assert.strictEqual(r({ assignee: 'Anh Truong' }), null, '"An" is not a word in "Anh Truong"');
+  assert.strictEqual(r({ assignee: 'An Thien Nguyen' }), 'm-an', 'but it is a word in "An Thien Nguyen"');
+});
+
+await check('a single initial is not a name', () => {
+  const only = { ...TEAM, members: [{ id: 'm-a', name: 'A', status: 'Active', supportPct: 0 }] };
+  assert.strictEqual(insights.memberResolver(only)({ assignee: 'Anh Truong' }), null);
+});
+
+await check('AN AMBIGUOUS SHORT NAME MATCHES NOBODY', () => {
+  // Two people it could be is not a match, it is a coin toss — and a wrong
+  // name on a row is worse than a visible gap, because the gap is on screen.
+  const two = { ...SHORT_TEAM, members: [...SHORT_TEAM.members, { id: 'm-anh2', name: 'Anh', role: 'Auto QA', status: 'Active', supportPct: 0 }] };
+  assert.strictEqual(insights.memberResolver(two)({ assignee: 'Anh Truong' }), null);
+});
+
+await check('a member WITH a Jira account is never matched by name overlap', () => {
+  // They have an account id and it did not match, so this is a different
+  // person however similar the name looks.
+  const withAcct = { ...SHORT_TEAM, members: [{ id: 'm-x', name: 'Anh', jiraAccountId: 'acc-someone-else', status: 'Active', supportPct: 0 }] };
+  assert.strictEqual(insights.memberResolver(withAcct)({ assignee: 'Anh Truong', assigneeId: 'acc-anh' }), null);
+});
+
+await check('an exact name still wins over a loose one', () => {
+  const both = { ...SHORT_TEAM, members: [...SHORT_TEAM.members, { id: 'm-full', name: 'Anh Truong', status: 'Active', supportPct: 0 }] };
+  assert.strictEqual(insights.memberResolver(both)({ assignee: 'Anh Truong' }), 'm-full');
+});
+
+await check('AND THE MATCH IS SAID OUT LOUD, not applied silently', () => {
+  const v = insights.capacityView({ ...PLAN, teams: [SHORT_TEAM] }, SNAP, SHORT_TEAM, SPRINT);
+  const anh = v.roster.members.find(m => m.id === 'm-anh');
+  assert.deepStrictEqual(anh.matchedNames, ['Anh Truong'],
+    'an inferred link has to be checkable by the person who would know it is wrong');
+  const hien = v.roster.members.find(m => m.name === 'Hien Phan');
+  assert.strictEqual(hien.matchedNames, undefined, 'an exact match is not an inference and says nothing');
+});
+
+await check('WORK IN THE SPRINT BEATS WHAT WE ASSUMED ABOUT THE PERSON', () => {
+  // Someone known only from a leave grid is created as a "planned" row and
+  // marked historic, on the guess that a capacity row with no work behind it
+  // is a leftover. Once their work is matched to them the guess is wrong, and
+  // leaving it showed Anh — sixteen points into the active sprint — tagged
+  // "planned" and "past member" at the same time.
+  const leaveOnly = {
+    ...PLAN,
+    teams: [{ ...TEAM, members: TEAM.members.filter(m => m.name !== 'Anh Truong') }],
+    availability: { ...PLAN.availability, 'titan|S40|titan-anh': full },
+  };
+  const base = leaveOnly.teams[0];
+  const v = insights.capacityView(leaveOnly, SNAP, base, SPRINT);
+  const anh = v.roster.members.filter(m => /anh/i.test(m.name));
+  assert.strictEqual(anh.length, 1, 'one person, one row — not a capacity row beside a work row');
+  assert.strictEqual(anh[0].name, 'Anh Truong', 'the merged row keeps the full name Jira knows them by');
+  assert.strictEqual(anh[0].onSprint, 'assigned', 'they have work, so they are not merely planned for');
+  assert.strictEqual(anh[0].historic, false, 'and someone delivering this sprint is not a past member');
+  assert.ok((anh[0].aliasIds || []).includes('titan-anh'),
+    'the leave grid id comes along, or the availability entered under it is lost');
+  // The capacity row itself proves the merge: the days come from the grid filed
+  // under "titan-anh", the points from tickets assigned to "Anh Truong".
+  const row = v.rows.find(r => r.name === 'Anh Truong');
+  assert.ok(row.availableDays > 0, 'the leave grid reached the merged row');
+  assert.strictEqual(row.planned, 5, 'and so did the work');
+});
+
+await check('but someone with only a leave grid and no work stays "planned"', () => {
+  const leaveOnly = {
+    ...PLAN,
+    teams: [{ ...TEAM, members: TEAM.members.filter(m => m.name !== 'Anh Truong') }],
+    availability: { ...PLAN.availability, 'titan|S40|titan-nobody': full },
+  };
+  const base = leaveOnly.teams[0];
+  const v = insights.capacityView(leaveOnly, SNAP, base, SPRINT);
+  const row = v.roster.members.find(m => m.id === 'titan-nobody');
+  assert.strictEqual(row.onSprint, 'planned', 'no work means the original reading still stands');
+});
+
+/* ── progress by component ────────────────────────────────────────────── */
+
+const comp = (o) => ({ points: o.points, components: o.components || [], blockedBy: o.blockedBy || [],
+  status: o.done ? 'Done' : 'Open', statusCategory: o.done ? 'done' : 'new' });
+
+await check('COMPONENT PROGRESS COUNTS DELIVERED AGAINST COMMITTED', () => {
+  const r = insights.componentProgress([
+    comp({ points: 5, components: ['PS_iGO_NLG'], done: true }),
+    comp({ points: 3, components: ['PS_iGO_NLG'] }),
+    comp({ points: 2, components: ['KAT_Common'] }),
+  ]);
+  const nlg = r.rows.find(x => x.component === 'PS_iGO_NLG');
+  assert.strictEqual(nlg.count, 2);
+  assert.strictEqual(nlg.points, 8);
+  assert.strictEqual(nlg.done, 5);
+  assert.strictEqual(nlg.remaining, 3);
+  assert.strictEqual(nlg.donePct, 63);
+  assert.strictEqual(r.rows[0].component, 'PS_iGO_NLG', 'the biggest commitment leads');
+});
+
+await check('A TOOL MARKER IS NOT A COMPONENT', () => {
+  // Two thirds of his active sprint items carry "TrueTest" as a component. It
+  // is where the suite runs, not an area of the product, and grouping on it
+  // would have made the automation tool the biggest row on the screen.
+  const r = insights.componentProgress([
+    comp({ points: 5, components: ['TrueTest', 'PS_iGO_NLG'] }),
+    comp({ points: 4, components: ['Katalon', 'PS_iGO_NLG'] }),
+  ]);
+  assert.deepStrictEqual(r.rows.map(x => x.component), ['PS_iGO_NLG']);
+  assert.strictEqual(r.rows[0].points, 9);
+  assert.strictEqual(r.shared, 0, 'a tool marker alongside one component is not shared work');
+});
+
+await check('an item in two components counts in BOTH, and says so', () => {
+  // The same rule the coverage report uses. Picking one component per item
+  // would under-report every area that shares work; counting both means the
+  // column can exceed the commitment, which is why `shared` exists.
+  const r = insights.componentProgress([comp({ points: 6, components: ['A_One', 'B_Two'] })]);
+  assert.strictEqual(r.rows.length, 2);
+  assert.strictEqual(r.rows[0].points, 6);
+  assert.strictEqual(r.rows[1].points, 6);
+  assert.strictEqual(r.shared, 1, 'the screen needs to know before it prints a total over the commitment');
+});
+
+await check('an item with no component gets a row rather than vanishing', () => {
+  const r = insights.componentProgress([comp({ points: 3, components: [] })]);
+  assert.strictEqual(r.rows.length, 1);
+  assert.match(r.rows[0].component, /no component/i);
+});
+
+await check('and the rows flag what needs attention', () => {
+  const r = insights.componentProgress([
+    comp({ points: 5, components: ['A_One'], blockedBy: ['X-1'] }),
+    comp({ points: null, components: ['A_One'] }),
+    comp({ points: 4, components: ['A_One'], blockedBy: ['X-2'], done: true }),
+  ]);
+  const row = r.rows[0];
+  assert.strictEqual(row.blocked, 1, 'a finished item is not still blocked');
+  assert.strictEqual(row.unestimated, 1);
+});
+
+await check("THE SPRINT'S OWN SCREEN CARRIES THE BREAKDOWN", () => {
+  const v = insights.activeSprintView(PLAN, SNAP, TEAM, SPRINT, { today: MID_SPRINT });
+  assert.ok(v.byComponent && Array.isArray(v.byComponent.rows), 'the view can only show what the model returns');
+  const total = v.byComponent.rows.reduce((t, r) => t + r.points, 0);
+  assert.ok(total > 0, 'the fixture has componentless items too, so this is the estimated ones');
+});
+
+await check('EVERY SPRINT ITEM REACHES THE ITEM LIST, assignee or not', () => {
+  const v = insights.activeSprintView(PLAN, UNOWNED, TEAM, SPRINT, { today: MID_SPRINT });
+  const keys = v.items.map(i => i.key);
+  for (const k of ['A-1', 'A-2', 'A-3', 'A-4', 'A-5', 'A-6', 'A-7']) {
+    assert.ok(keys.includes(k), `${k} missing from the item list`);
+  }
+  assert.strictEqual(v.items.filter(i => !i.assignee).length, 2, 'both unowned items are in the list');
+});
+
 await check('a released member is excluded from headcount and capacity', () => {
   const v = insights.capacityView(PLAN, SNAP, TEAM, SPRINT);
   assert.strictEqual(v.totals.headcount, 3);

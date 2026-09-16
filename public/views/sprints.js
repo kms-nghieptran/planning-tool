@@ -55,7 +55,7 @@ const SprintsView = (() => {
                 <tr>
                   <td><strong>${UI.esc(s.calendarName || (s.number != null ? `Sprint ${s.number}` : s.name))}</strong></td>
                   <td class="muted">${UI.esc(s.name)}</td>
-                  <td class="muted">${UI.date(s.start)} – ${UI.date(s.end)}</td>
+                  <td class="muted" data-sort-value="${UI.esc(s.start || '')}">${UI.date(s.start)} – ${UI.date(s.end)}</td>
                   <td class="num">${s.count}</td>
                   <td class="num">${UI.num(s.points)}</td>
                   ${future ? '' : `

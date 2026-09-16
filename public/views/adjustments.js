@@ -90,7 +90,7 @@ const AdjustmentsView = (() => {
                       ${r.stillDiffers ? '' : '<span class="tag ok" title="The source now agrees with you — this override is doing nothing">caught up</span>'}
                     </td>
                     <td class="wrap muted" style="max-width:280px">${UI.esc(r.reason || '—')}</td>
-                    <td class="muted" title="${UI.esc(r.at || '')}">${UI.esc(UI.ago ? UI.ago(r.at) : UI.date(r.at))}</td>
+                    <td class="muted" data-sort-value="${UI.esc(r.at || '')}" title="${UI.esc(r.at || '')}">${UI.esc(UI.ago ? UI.ago(r.at) : UI.date(r.at))}</td>
                     <td style="text-align:right">
                       <button class="btn ghost sm" data-revert="${UI.esc(r.entity)}|${UI.esc(r.id)}|${UI.esc(r.field)}"
                         title="Put this field back to what Jira says and drop the override">Use Jira's</button>

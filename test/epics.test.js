@@ -346,8 +346,11 @@ check('THE EPIC COLUMN SITS DIRECTLY AFTER COMPONENT, IN BOTH HEADER AND BODY', 
   // Asserted against the source because a column added to the header and not
   // the body — or added in a different position in each — shifts every cell in
   // the table one to the left and still renders without an error.
-  const src = fs.readFileSync(path.join(__dirname, '..', 'public', 'views', 'sprint.js'), 'utf8');
-  const table = src.slice(src.indexOf('All sprint items'), src.indexOf('All sprint items') + 2200);
+  // The table lives in ui.js now, shared by the Active sprint and Capacity
+  // planning screens — which is also why this matters more than it did: a
+  // column added to the header and not the body now misaligns two screens.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'public', 'ui.js'), 'utf8');
+  const table = src.slice(src.indexOf('function itemsTable'));
 
   const head = table.match(/<thead>.*?<\/thead>/s)[0];
   const cols = [...head.matchAll(/<th[^>]*>([^<]*)<\/th>/g)].map(m => m[1].trim());
@@ -362,8 +365,8 @@ check('THE EPIC COLUMN SITS DIRECTLY AFTER COMPONENT, IN BOTH HEADER AND BODY', 
 });
 
 check('the cell shows a dash rather than nothing when there is no epic', () => {
-  const src = fs.readFileSync(path.join(__dirname, '..', 'public', 'views', 'sprint.js'), 'utf8');
-  const fn = src.slice(src.indexOf('function epicCell'), src.indexOf('const trim ='));
+  const src = fs.readFileSync(path.join(__dirname, '..', 'public', 'ui.js'), 'utf8');
+  const fn = src.slice(src.indexOf('function epicCell'), src.indexOf('function itemsTable'));
   assert.match(fn, /if \(!list\.length\) return/, 'an empty cell reads as a rendering bug to the person looking at it');
 });
 

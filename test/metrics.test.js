@@ -263,5 +263,158 @@ check('runway is points ÷ velocity, and null without velocity history', () => {
   assert.strictEqual(b.runway, 2);
 });
 
+/* ═══════════ the reporting window: active + N-1 most recently closed ═══════ */
+
+/**
+ * WHAT "4 SPRINTS" MEANS.
+ *
+ * Nghiep's definition: the sprint you are IN, plus the 3 most recently closed.
+ * It counts backwards from the active sprint and stops there.
+ *
+ * What it did before took the last N by date order out of every sprint the plan
+ * knew — so on his real data a 4-sprint window was Sprint 38 (closed), 39
+ * (active), 40 and 41 (PLANNED). Half the window was work that had not
+ * happened, and because a planned sprint carries a commitment and no delivery,
+ * it dragged every average towards zero while looking perfectly reasonable.
+ */
+
+/** Three closed, one active, two planned — the shape his teams are always in. */
+const WINDOWED = [
+  { number: 1, committed: 10, delivered: 10, state: 'closed' },
+  { number: 2, committed: 10, delivered: 20, state: 'closed' },
+  { number: 3, committed: 10, delivered: 30, state: 'closed' },
+  { number: 4, committed: 10, delivered: 40, state: 'closed' },
+  { number: 5, committed: 40, delivered: 10, state: 'active' },   // half done
+  { number: 6, committed: 10, delivered: 0, state: 'future' },
+  { number: 7, committed: 10, delivered: 0, state: 'future' },
+];
+
+const names = (plan, ids) => ids.map(id => (plan.sprints.find(s => s.id === id) || {}).number);
+
+check('A 4-SPRINT WINDOW IS THE ACTIVE SPRINT PLUS THE 3 MOST RECENTLY CLOSED', () => {
+  const { plan } = delivery(WINDOWED);
+  const w = m.windowSprints(plan, TEAM, 4);
+  assert.deepStrictEqual(names(plan, w.ids), [2, 3, 4, 5], `got sprints ${names(plan, w.ids)}`);
+  assert.strictEqual(w.active, 'S5');
+  assert.strictEqual(w.closed, 3, 'three closed plus the active one');
+});
+
+check('A PLANNED SPRINT IS NEVER IN THE WINDOW', () => {
+  // The defect this replaced. Sprints 6 and 7 have commitments and no delivery;
+  // including them reports on work nobody has done.
+  const { plan } = delivery(WINDOWED);
+  for (const n of [2, 4, 6, 12]) {
+    const ids = names(plan, m.windowSprints(plan, TEAM, n).ids);
+    assert.ok(!ids.includes(6) && !ids.includes(7), `window ${n} reached a future sprint: ${ids}`);
+  }
+});
+
+check('NOR A PLANNED SPRINT THAT SORTS BEFORE THE ACTIVE ONE', () => {
+  // Real boards carry these: a sprint created and dated, never started, sitting
+  // between closed ones. "Everything before the active sprint" would sweep it
+  // in, and it has a commitment and no delivery — the exact shape that drags an
+  // average down while looking like history.
+  const { plan } = delivery([
+    { number: 1, committed: 10, delivered: 10, state: 'closed' },
+    { number: 2, committed: 10, delivered: 0, state: 'future' },   // never ran
+    { number: 3, committed: 10, delivered: 30, state: 'closed' },
+    { number: 4, committed: 10, delivered: 5, state: 'active' },
+  ]);
+  const ids = names(plan, m.windowSprints(plan, TEAM, 3).ids);
+  assert.deepStrictEqual(ids, [1, 3, 4], `the stalled sprint 2 must be skipped, got ${ids}`);
+});
+
+check('the window grows backwards through closed sprints, never forwards', () => {
+  const { plan } = delivery(WINDOWED);
+  assert.deepStrictEqual(names(plan, m.windowSprints(plan, TEAM, 2).ids), [4, 5]);
+  assert.deepStrictEqual(names(plan, m.windowSprints(plan, TEAM, 3).ids), [3, 4, 5]);
+  assert.deepStrictEqual(names(plan, m.windowSprints(plan, TEAM, 5).ids), [1, 2, 3, 4, 5]);
+});
+
+check('asking for more sprints than exist returns what there is, not an error', () => {
+  const { plan } = delivery(WINDOWED);
+  const w = m.windowSprints(plan, TEAM, 50);
+  assert.deepStrictEqual(names(plan, w.ids), [1, 2, 3, 4, 5]);
+  assert.strictEqual(w.requested, 50, 'and it remembers what was asked, so the screen can say so');
+});
+
+check('WITH NO ACTIVE SPRINT THE WINDOW IS THE N MOST RECENTLY CLOSED', () => {
+  // Between sprints, or a team whose board has no active one. The count must
+  // not silently become N-1.
+  const { plan } = delivery(WINDOWED.filter(s => s.state === 'closed'));
+  const w = m.windowSprints(plan, TEAM, 3);
+  assert.strictEqual(w.active, null);
+  assert.deepStrictEqual(names(plan, w.ids), [2, 3, 4], 'three closed, not two');
+});
+
+check('THE ACTIVE SPRINT IS MARKED, SO A CHART CAN SAY IT IS HALF DONE', () => {
+  const { plan, snap } = delivery(WINDOWED);
+  const v = m.velocity(plan, snap, TEAM, { sprints: 4 });
+  const flags = v.history.map(h => Boolean(h.inProgress));
+  assert.deepStrictEqual(flags, [false, false, false, true]);
+});
+
+check('THE SPRINT IN PROGRESS IS EXCLUDED FROM THE PLANNING NUMBERS', () => {
+  // It is half delivered by definition. Folding it into the average makes
+  // velocity sink every Monday and recover every other Friday — a number that
+  // moves for a reason that has nothing to do with the team.
+  const { plan, snap } = delivery(WINDOWED);
+  const v = m.velocity(plan, snap, TEAM, { sprints: 4 });
+  assert.strictEqual(v.average, 30, 'mean of 20, 30, 40 — the active sprint\'s 10 is out');
+  const withActive = Math.round(((20 + 30 + 40 + 10) / 4) * 10) / 10;
+  assert.notStrictEqual(v.average, withActive, 'including it would report 25');
+  assert.ok(v.history.some(h => h.inProgress), 'but it is still IN the history, for the chart');
+});
+
+check('and out of attainment, which would otherwise read as a missed commitment', () => {
+  // Sprint 5 is 10 delivered against 40 committed because it is three days old.
+  const { plan, snap } = delivery(WINDOWED);
+  const q = m.quality(plan, snap, TEAM, { sprints: 4 });
+  assert.strictEqual(q.missedSprints, 0, 'a sprint still running has not missed anything');
+  assert.strictEqual(q.attainment, 100);
+});
+
+check('ALL THREE REPORTS MEASURE THE SAME SPRINTS', () => {
+  // Velocity, productivity and quality sit on one screen under one control. If
+  // they resolved the window differently, the page would quietly describe three
+  // different time ranges.
+  //
+  // Sprint 3 delivered NOTHING, which is what makes this check bite: the old
+  // productivity code filtered to `actual > 0` before slicing, so it silently
+  // reached one sprint further back than velocity did. With every sprint
+  // delivering, the two agreed by coincidence and the check proved nothing.
+  const { plan, snap } = delivery([
+    { number: 1, committed: 10, delivered: 10, state: 'closed' },
+    { number: 2, committed: 10, delivered: 20, state: 'closed' },
+    { number: 3, committed: 10, delivered: 0, state: 'closed' },   // a wipeout
+    { number: 4, committed: 10, delivered: 40, state: 'closed' },
+    { number: 5, committed: 40, delivered: 10, state: 'active' },
+  ]);
+  const ids = (h) => h.map(x => x.sprintId).sort();
+  const v = m.velocity(plan, snap, TEAM, { sprints: 3 });
+  const p = m.productivity(plan, snap, TEAM, { sprints: 3 });
+  assert.deepStrictEqual(ids(v.history), ['S3', 'S4', 'S5']);
+  assert.deepStrictEqual(ids(p.perSprint), ids(v.history),
+    'productivity must not reach past a zero-delivery sprint to find three with output');
+});
+
+check("QUALITY'S DEFECT AND REWORK COUNTS RESPECT THE WINDOW TOO", () => {
+  // They were counted over every sprint the team ever had, whatever the window
+  // said — so changing the control moved the velocity chart and left these two
+  // numbers sitting still.
+  const withBug = (n, state) => ({
+    number: n, committed: 10, delivered: 10, state,
+    extra: { issueType: 'Bug', summary: `bug ${n}` },
+  });
+  const { plan, snap } = delivery([
+    withBug(1, 'closed'), withBug(2, 'closed'), withBug(3, 'closed'),
+    { number: 4, committed: 10, delivered: 10, state: 'active' },
+  ]);
+  const wide = m.quality(plan, snap, TEAM, { sprints: 4 });
+  const narrow = m.quality(plan, snap, TEAM, { sprints: 2 });
+  assert.ok(narrow.defects.total < wide.defects.total,
+    `narrowing the window must drop defects: ${narrow.defects.total} vs ${wide.defects.total}`);
+});
+
 console.log(`\n${passed} passed, ${failed} failed\n`);
 process.exit(failed ? 1 : 0);

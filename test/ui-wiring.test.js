@@ -40,10 +40,22 @@ const VIEWS = path.join(__dirname, '..', 'public', 'views');
  */
 function container() {
   const listeners = [];
+  // Queryable, because the real `ui.js` looks things up inside whatever it is
+  // handed — `UI.$$('[data-support]', mount)` and friends. A container that
+  // only records listeners was enough for a stubbed UI and is not for the real
+  // one, which is the more faithful arrangement anyway.
+  const el = () => ({
+    addEventListener() {}, value: '', hidden: false, dataset: {}, style: {},
+    classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+    setAttribute() {}, getAttribute: () => null, select() {},
+    querySelector: () => el(), querySelectorAll: () => [],
+  });
   return {
     innerHTML: '',
     style: {},
     addEventListener: (type, fn) => { if (type === 'click') listeners.push(fn); },
+    querySelector: () => el(),
+    querySelectorAll: () => [],
     listeners,
     click(target) { for (const fn of listeners.slice()) fn({ target, preventDefault() {} }); },
   };
@@ -55,28 +67,41 @@ const target = (act, data = {}) => ({
   closest: (sel) => (/\[data-act\]/.test(sel) ? { dataset: { act, ...data } } : null),
 });
 
-/** Enough of the page's globals to let a view render and wire itself. */
+/**
+ * Enough of the page's globals to let a view render and wire itself.
+ *
+ * THE REAL `ui.js`, not a hand-written stand-in. A stub drifts from the thing
+ * it stands for and then fails for a reason that says nothing about the view:
+ * this suite went red with "UI.itemsTable is not a function" the moment two
+ * screens started sharing a table, which is a fact about the stub and not about
+ * whether one click does one thing. Only the four network helpers are replaced,
+ * because recording the calls is the whole point of the suite.
+ */
 function sandbox(calls) {
-  const el = () => ({ addEventListener() {}, disabled: false, readOnly: false, value: '', checked: false, hidden: false, dataset: {} });
+  const el = () => ({
+    addEventListener() {}, disabled: false, readOnly: false, value: '', checked: false,
+    hidden: false, dataset: {}, style: {}, textContent: '', className: '',
+    set innerHTML(_) {}, get innerHTML() { return ''; },
+    classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+    setAttribute() {}, getAttribute: () => null, select() {},
+    querySelector: () => el(), querySelectorAll: () => [],
+    content: { firstElementChild: null },
+  });
   const ctx = {
-    console, Promise, setTimeout, encodeURIComponent,
+    console, Promise, setTimeout, clearTimeout, encodeURIComponent, CSS: { escape: String },
     prompt: () => 'A plan', confirm: () => true,
-    UI: {
-      esc: s => String(s == null ? '' : s), int: String, num: String, pct: String,
-      date: String, ago: String, initials: () => '', personColor: () => '',
-      kpi: () => '', bar: () => '', mixBar: () => '', avatar: () => '',
-      workloadClass: () => '', pointsFieldNote: () => '', CATEGORY_COLORS: {},
-      $: () => el(), $$: () => [],
-      api: async () => ({}),
-      jsonPut: async (p) => { calls.push(['PUT', p]); },
-      jsonPost: async (p) => { calls.push(['POST', p]); },
-      jsonDelete: async (p) => { calls.push(['DELETE', p]); },
-      toast() {}, drawer() {}, closeDrawer() {},
-    },
+    document: { createElement: () => el(), querySelector: () => el(), querySelectorAll: () => [] },
     App: { refresh() {} },
     Charts: new Proxy({}, { get: () => () => '' }),
   };
   vm.createContext(ctx);
+  vm.runInContext(`${fs.readFileSync(path.join(VIEWS, '..', 'ui.js'), 'utf8')}\n;globalThis.UI = UI;`, ctx);
+  Object.assign(ctx.UI, {
+    api: async () => ({}),
+    jsonPut: async (p) => { calls.push(['PUT', p]); },
+    jsonPost: async (p) => { calls.push(['POST', p]); },
+    jsonDelete: async (p) => { calls.push(['DELETE', p]); },
+  });
   return ctx;
 }
 
@@ -154,7 +179,13 @@ function fixtureFor(p) {
       totals: { headcount: 1, availableDays: 10, capacityHours: 61, predicted: 21, planned: 0, actual: 0, workloadPct: 0, goalPct: null, overBy: 0 },
       days: [{ date: '2026-09-17', dow: 'Thu', holiday: false }],
       availability: { m1: ['1'] },
-      mix: {}, mixVsTarget: [], unassigned: { points: 0, count: 0, items: [] },
+      // A real `mix` shape, not `{}`: the stub's mixBar returned '' for anything,
+      // which let the fixture drift away from what the model actually returns.
+      mix: { total: 0, byCategory: {} }, mixVsTarget: [],
+      items: [],
+      unowned: { points: 0, done: 0, count: 0, items: [], people: [] },
+      unassigned: { points: 0, done: 0, count: 0, items: [] },
+      offRoster: { points: 0, done: 0, count: 0, items: [], people: [] },
       history: [], calibration: null, note: '',
       roster: { counts: { total: 1, assigned: 0, planned: 0, fromTeam: 1, added: 0, removed: 0 }, added: [], removed: [], members: [{ id: 'm1', name: 'Someone', onSprint: 'team' }] },
       lock: { state: 'future', readOnly: false, reason: null },

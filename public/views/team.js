@@ -140,7 +140,7 @@ const TeamView = (() => {
                   <td><strong>${UI.esc(sp.calendarName || (sp.number != null ? `Sprint ${sp.number}` : sp.name))}</strong></td>
                   <td class="muted">${UI.esc(sp.name)}</td>
                   <td><span class="tag ${sp.state === 'active' ? 'ok' : ''}">${UI.esc(sp.state || '—')}</span></td>
-                  <td class="muted">${UI.date(sp.start)} – ${UI.date(sp.end)}</td>
+                  <td class="muted" data-sort-value="${UI.esc(sp.start || '')}">${UI.date(sp.start)} – ${UI.date(sp.end)}</td>
                   <td class="num">${sp.count}</td>
                   <td class="num">${UI.num(sp.points)}</td>
                   <td class="num">${UI.num(sp.donePoints)}</td>

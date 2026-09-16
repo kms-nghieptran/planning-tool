@@ -7,6 +7,22 @@ const SprintView = (() => {
 
     const byStatus = groupBy(d.items, i => i.status || '—');
     const byMember = d.rows.filter(r => r.status !== 'Released' && (r.planned || r.actual));
+    /* Work that landed on nobody ON THE ROSTER is part of the sprint — it is
+       already in Committed and in the item table below. Leaving it out of THIS
+       table made the per-person column add up to less than the commitment with
+       no visible reason why.
+
+       It comes in two kinds and they are NOT the same thing:
+         · `offRoster` has an owner with a name who is simply not on this
+           sprint's roster. Each of those people gets their own row, named,
+           because calling their work "unassigned" was plainly false — it is
+           what made a sprint where every item named someone report 53 items
+           with no assignee.
+         · `unassigned` really has nobody in the Assignee field, and gets the
+           one anonymous row it deserves. */
+    const off = (d.offRoster && d.offRoster.people) || [];
+    const un = d.unassigned || { count: 0, points: 0, done: 0 };
+    const left = (p, done) => Math.round((p - done) * 10) / 10;
 
     mount.innerHTML = `
       <section class="section">
@@ -62,6 +78,24 @@ const SprintView = (() => {
                   <td>${UI.bar(r.actual, r.planned || 1, r.goalPct != null && r.goalPct < w.timeElapsedPct - 20 ? 'under' : '')}</td>
                   <td class="num">${UI.num(r.remainingPoints)}</td>
                 </tr>`).join('')}
+                ${off.map(o => `
+                <tr class="unassigned-row">
+                  <td title="Assigned to ${UI.esc(o.name)}, who is not on this sprint's roster — their capacity is not being planned for.">
+                    <div class="name-cell">${UI.avatar(o.name)}${UI.esc(o.name)} <span class="tag warn">not on sprint</span></div>
+                  </td>
+                  <td class="num">${UI.num(o.planned)}</td>
+                  <td class="num">${UI.num(o.actual)}</td>
+                  <td>${UI.bar(o.actual, o.planned || 1)}</td>
+                  <td class="num">${UI.num(left(o.planned, o.actual))}</td>
+                </tr>`).join('')}
+                ${un.count ? `
+                <tr class="unassigned-row">
+                  <td title="Nobody is in the Assignee field on these items."><span class="tag warn">No assignee</span> <span class="muted">${un.count} item${un.count === 1 ? '' : 's'}</span></td>
+                  <td class="num">${UI.num(un.points)}</td>
+                  <td class="num">${UI.num(un.done)}</td>
+                  <td>${UI.bar(un.done, un.points || 1)}</td>
+                  <td class="num">${UI.num(left(un.points, un.done))}</td>
+                </tr>` : ''}
               </tbody>
             </table>
           </div>
@@ -79,56 +113,12 @@ const SprintView = (() => {
         ${p.unestimated.count ? card('Committed without an estimate', 'The commitment number is only as good as these', p.unestimated.items, state) : ''}
       </section>` : ''}
 
-      <section class="section">
-        <div class="section-head"><h2>All sprint items</h2><span class="muted">${d.items.length} items</span></div>
-        <div class="table-wrap">
-          <table>
-            <thead><tr><th>Key</th><th>Summary</th><th>Category</th><th>Assignee</th><th>Status</th><th class="num">Points</th><th>Component</th><th>Epic</th></tr></thead>
-            <tbody>${d.items.slice().sort(byStatusThenPoints).map(i => `
-              <tr>
-                <td>${UI.issueKey(i.key)}</td>
-                <td class="wrap">${UI.esc(i.summary)}</td>
-                <td><span class="tag"><i class="dot" style="background:${UI.CATEGORY_COLORS[i.category]}"></i>${UI.esc((state.categories[i.category] || {}).label || i.category)}</span></td>
-                <td>${i.assignee ? `<div class="name-cell">${UI.avatar(i.assignee)}${UI.esc(i.assignee)}</div>` : '<span class="tag warn">unassigned</span>'}</td>
-                <td>${UI.esc(i.status || '—')}</td>
-                <td class="num">${i.points == null ? '<span class="tag risk">—</span>' : UI.num(i.points)}</td>
-                <td class="muted">${UI.esc((i.components || [])[0] || '—')}</td>
-                <td>${epicCell(i)}</td>
-              </tr>`).join('')}
-            </tbody>
-          </table>
-        </div>
-      </section>
+      ${componentProgress(d, w)}
+
+      ${UI.itemsTable(d.items, state)}
     `;
   }
 
-  /**
-   * The Epic cell.
-   *
-   * A story has one epic (its parent); a maintenance ticket can relate to
-   * several, and a handful of them relate to five or six. Showing all of them
-   * inline turns the row into a paragraph, so two are shown and the rest are
-   * counted — the full list is in the hover, which is where you go when the
-   * count is what caught your eye.
-   *
-   * The key is always shown even when we have the name, because the key is
-   * what you paste into Jira.
-   */
-  function epicCell(i) {
-    const list = i.epics || [];
-    if (!list.length) return '<span class="muted">—</span>';
-    const label = (e) => `${e.key}${e.name ? ` · ${e.name}` : ''}`;
-    const VIA = { relates: 'relates to', 'relates-parent': 'parent of a related issue', parent: 'parent' };
-    const title = list.map(e => `${label(e)} (${VIA[e.via] || e.via}${e.unconfirmed ? ', type not confirmed as Epic' : ''})`).join('\n');
-    const shown = list.slice(0, 2).map(e => `
-      <span class="tag${e.unconfirmed ? '' : ' ok'}" title="${UI.esc(title)}">
-        ${UI.issueKey(e.key)}${e.name ? ` ${UI.esc(trim(e.name))}` : ''}
-      </span>`).join(' ');
-    const more = list.length > 2 ? ` <span class="muted" title="${UI.esc(title)}">+${list.length - 2}</span>` : '';
-    return `<div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center">${shown}${more}</div>`;
-  }
-
-  const trim = (s) => (String(s).length > 34 ? `${String(s).slice(0, 33)}…` : String(s));
 
   function card(title, sub, items, state) {
     return `
@@ -148,6 +138,59 @@ const SprintView = (() => {
       </div>`;
   }
 
+  /**
+   * Where the sprint stands, one row per product component.
+   *
+   * The per-person table answers "who is carrying what"; this answers "which
+   * area of the product is moving", which is the question you actually take
+   * into a sprint review. Grouping is by PRODUCT component — the tool markers
+   * (TrueTest, Katalon) ride along on two thirds of the items and would
+   * otherwise be the biggest row on the screen while meaning nothing.
+   *
+   * A component behind the sprint's own elapsed time is marked, on the same
+   * rule the per-person table uses, so "we are on day eight of ten and this
+   * area is at 30%" is visible rather than arithmetic.
+   */
+  function componentProgress(d, w) {
+    const c = d.byComponent || { rows: [], shared: 0 };
+    if (!c.rows.length) return '';
+    const behind = (r) => r.points > 0 && r.donePct < w.timeElapsedPct - 20;
+    return `
+      <section class="section">
+        <div class="section-head">
+          <h2>Per-component progress</h2>
+          <span class="muted">
+            ${c.rows.length} component${c.rows.length === 1 ? '' : 's'} · delivered against committed
+            ${c.shared ? ` · ${c.shared} item${c.shared === 1 ? '' : 's'} in more than one component, counted in each — so the column totals more than the commitment` : ''}
+          </span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr>
+              <th>Component</th><th class="num">Items</th><th class="num">Committed</th>
+              <th class="num">Done</th><th style="min-width:110px">Progress</th>
+              <th class="num">Left</th><th>Attention</th>
+            </tr></thead>
+            <tbody>${c.rows.map(r => `
+              <tr>
+                <td>${UI.esc(r.component)}</td>
+                <td class="num">${r.count}</td>
+                <td class="num">${UI.num(r.points)}</td>
+                <td class="num">${UI.num(r.done)}</td>
+                <td>${UI.bar(r.done, r.points || 1, behind(r) ? 'under' : '')}</td>
+                <td class="num">${UI.num(r.remaining)}</td>
+                <td>
+                  ${behind(r) ? `<span class="tag warn" title="${r.donePct}% delivered on day ${w.elapsed} of ${w.workingDays}">behind the sprint</span>` : ''}
+                  ${r.blocked ? `<span class="tag risk">${r.blocked} blocked</span>` : ''}
+                  ${r.unestimated ? `<span class="tag">${r.unestimated} unestimated</span>` : ''}
+                </td>
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+      </section>`;
+  }
+
   function groupBy(items, fn) {
     const m = new Map();
     for (const i of items) {
@@ -156,13 +199,6 @@ const SprintView = (() => {
       const g = m.get(k); g.points += Number(i.points) || 0; g.count++;
     }
     return [...m.values()].map(g => ({ ...g, points: Math.round(g.points * 10) / 10 })).sort((a, b) => b.points - a.points);
-  }
-
-  const ORDER = ['open', 'refinement', 'in dev', 'in testing', 'done'];
-  function byStatusThenPoints(a, b) {
-    const ai = ORDER.indexOf(String(a.status || '').toLowerCase());
-    const bi = ORDER.indexOf(String(b.status || '').toLowerCase());
-    return (ai < 0 ? 99 : ai) - (bi < 0 ? 99 : bi) || (b.points || 0) - (a.points || 0);
   }
 
   return { render };

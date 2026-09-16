@@ -65,7 +65,7 @@ const CapacityView = (() => {
         </div>
       </section>
 
-      ${(overCount || slackCount || data.unassigned.points) ? `
+      ${(overCount || slackCount || data.unowned.points) ? `
       <section class="section">
         <div class="card">
           <div class="eyebrow"><i></i>Balance</div>
@@ -73,6 +73,7 @@ const CapacityView = (() => {
             ${overCount ? `<li class="risk">${overCount} ${overCount > 1 ? 'people are' : 'person is'} over ${s.workloadOverPct}% — move work before the sprint starts, not at the review</li>` : ''}
             ${slackCount ? `<li class="warn">${slackCount} ${slackCount > 1 ? 'people have' : 'person has'} unused capacity</li>` : ''}
             ${data.unassigned.points ? `<li class="warn">${UI.num(data.unassigned.points)} pts in this sprint have no assignee <button class="btn ghost sm" data-act="show-unassigned">Show ${data.unassigned.count}</button></li>` : ''}
+            ${offRosterLine(data)}
           </ul>
         </div>
       </section>` : ''}
@@ -186,6 +187,14 @@ const CapacityView = (() => {
           <div style="margin-top:8px"><button class="btn sm" data-act="save-note">Save note</button></div>
         </div>
       </section>
+
+      ${/* The same table the Active sprint screen shows, from the same helper.
+           Balancing a sprint ends in the tickets — you move work between people
+           by picking specific items — and having to change screens to see them
+           meant holding the grid in your head while you looked. Last on the
+           page, because you come to it after the numbers, and sortable like
+           every other grid, so "who has the big ones" is one click. */ ''}
+      ${UI.itemsTable(data.items, state, { sub: UI.esc(sprint.name || state.sprintId) })}
     `;
 
     wire(state, mount);
@@ -204,10 +213,16 @@ const CapacityView = (() => {
     const guest = on.historic ? '<span class="tag" title="Was on this sprint, but is not on the team any more">past member</span>'
       : on.notOnTeamList ? '<span class="tag warn" title="Did work in this sprint but is not on the team list">not on the team</span>'
         : '';
+    // This row's name came from you; the work came from Jira under a different
+    // one, and they were matched. Shown because it is the one link the tool
+    // worked out rather than was told, and you are the one who would know.
+    const matched = (on.matchedNames || []).length
+      ? `<span class="tag" title="Work assigned in Jira to ${UI.esc(on.matchedNames.join(', '))} is counted here — matched by name, because this row has no Jira account on it">= ${UI.esc(on.matchedNames.join(', '))}</span>`
+      : '';
     return `
       <tr class="${r.status === 'Released' ? 'released' : ''}" data-member="${r.memberId}">
         <td class="muted">${UI.esc(r.role)}</td>
-        <td><div class="name-cell">${UI.avatar(r.name)}<span>${UI.esc(r.name)}${r.status === 'Released' ? ' <span class="tag">Released</span>' : ''}${why}${guest}</span></div></td>
+        <td><div class="name-cell">${UI.avatar(r.name)}<span>${UI.esc(r.name)}${r.status === 'Released' ? ' <span class="tag">Released</span>' : ''}${why}${guest}${matched}</span></div></td>
         <td class="num"><input type="number" min="0" max="100" step="5" value="${r.supportPct}" data-support="${r.memberId}" style="width:64px;text-align:right"></td>
         <td class="num">${UI.num(r.availableDays)}</td>
         <td class="num">${UI.num(r.capacityHours)}</td>
@@ -259,6 +274,28 @@ const CapacityView = (() => {
       const label = v === 'WO' ? '' : v === 'H' ? 'H' : v === '0' ? '✕' : v === '0.5' ? '½' : '';
       return `<div class="day" data-v="${v}" data-i="${i}" title="${d.date || ''}${d.holiday ? ' · public holiday' : ''}">${label}</div>`;
     }).join('')}</div>`;
+  }
+
+  /**
+   * Work assigned to someone who is not on this sprint's roster.
+   *
+   * This used to be folded into the "no assignee" line, which was simply untrue
+   * of it — every one of these tickets names a person. It is also a different
+   * problem with a different fix: unassigned work needs an owner, while this
+   * work HAS one the sprint is not being planned around. So the line names them
+   * and points at the two ways out.
+   */
+  function offRosterLine(d) {
+    const o = d.offRoster;
+    if (!o || !o.points) return '';
+    const who = o.people.slice(0, 3).map(p => `${UI.esc(p.name)} (${UI.num(p.planned)})`);
+    const rest = o.people.length - who.length;
+    return `<li class="warn">
+      ${UI.num(o.points)} pts assigned to ${o.people.length} ${o.people.length === 1 ? 'person' : 'people'} not on this sprint —
+      ${who.join(', ')}${rest > 0 ? ` and ${rest} more` : ''}.
+      Add them to the sprint to count their capacity, or move the work.
+      <button class="btn ghost sm" data-act="show-off-roster">Show ${o.count}</button>
+    </li>`;
   }
 
   /**
@@ -420,7 +457,9 @@ const CapacityView = (() => {
         const r = data.rows.find(x => x.memberId === act.dataset.member);
         UI.drawer(itemsDrawer(r.name, r.items, state));
       } else if (kind === 'show-unassigned') {
-        UI.drawer(itemsDrawer('Unassigned in this sprint', data.unassigned.items, state));
+        UI.drawer(itemsDrawer('No assignee in this sprint', data.unassigned.items, state));
+      } else if (kind === 'show-off-roster') {
+        UI.drawer(itemsDrawer('Assigned to people not on this sprint', data.offRoster.items, state));
       } else if (kind === 'save-note') {
         await UI.jsonPut('/api/note', { teamId: state.teamId, sprintId: state.sprintId, text: UI.$('#sprintNote', mount).value });
         UI.toast('Note saved');

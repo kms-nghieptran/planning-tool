@@ -89,7 +89,7 @@ const ForecastView = (() => {
               ${d.rows.map(r => `
                 <tr>
                   <td><strong>${UI.esc(r.name)}</strong></td>
-                  <td class="muted">${UI.date(r.start)} – ${UI.date(r.end)}</td>
+                  <td class="muted" data-sort-value="${UI.esc(r.start || '')}">${UI.date(r.start)} – ${UI.date(r.end)}</td>
                   <td class="num">${r.headcount}</td>
                   <td class="num">${UI.num(r.availableDays)}</td>
                   <td class="num">${UI.num(r.capacityHours)}</td>

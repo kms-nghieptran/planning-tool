@@ -396,7 +396,7 @@ const CoverageReport = (() => {
                 <td class="num">${r.kse.total || '—'}</td>
                 <td class="num ${r.kse.automatable ? `pct ${tone(r.kse.coveragePct)}` : 'muted'}">${r.kse.automatable ? UI.pct(r.kse.coveragePct) : '—'}</td>
                 <td>
-                  <div class="mixbar" style="height:8px">
+                  <div class="mixbar" style="height:8px" data-sort-value="${r.truetestShare}">
                     <i style="width:${r.truetestShare}%;background:${TOOL_COLOR.truetest}" title="TrueTest ${r.truetest.total}"></i>
                     <i style="width:${100 - r.truetestShare}%;background:${TOOL_COLOR.kse}" title="KSE ${r.kse.total}"></i>
                   </div>

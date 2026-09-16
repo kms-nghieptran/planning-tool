@@ -180,11 +180,20 @@ const SearchView = (() => {
     </div>`;
   }
 
+  /**
+   * This grid sorts on the SERVER, because it is paginated — sorting the fifty
+   * rows on screen would quietly claim to have sorted the thousands behind
+   * them. The `data-sort` attribute is also what tells the shared browser-side
+   * sorter to keep its hands off this table; the caret comes from the same
+   * stylesheet rule as every other grid, so one gesture looks like one gesture.
+   */
   function headerCell(key, d) {
     const col = d.columns.find(c => c.key === key) || { label: key };
     const on = state.sort === key;
-    const arrow = on ? (state.dir === 'desc' ? ' ↓' : ' ↑') : '';
-    return `<th class="${col.num ? 'num' : ''} sortable" data-sort="${key}">${UI.esc(col.label)}${arrow}</th>`;
+    const dir = state.dir === 'desc' ? 'desc' : 'asc';
+    return `<th class="${col.num ? 'num ' : ''}sortable${on ? ` sort-${dir}` : ''}"
+      aria-sort="${on ? (dir === 'desc' ? 'descending' : 'ascending') : 'none'}"
+      data-sort="${key}">${UI.esc(col.label)}</th>`;
   }
 
   function cell(row, key, d) {
