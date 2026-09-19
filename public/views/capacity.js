@@ -562,7 +562,7 @@ const CapacityView = (() => {
           <div style="display:flex;gap:8px;align-items:center;margin-bottom:4px">
             ${UI.issueKey(i.key)}
             <span class="tag"><i class="dot" style="background:${UI.CATEGORY_COLORS[i.category]}"></i>${UI.esc((state.categories[i.category] || {}).label || i.category)}</span>
-            <span class="tag">${UI.esc(i.status || '—')}</span>
+            ${UI.statusText(i)}
             <span class="spacer"></span>
             <strong>${i.points == null ? '<span class="tag risk">no estimate</span>' : `${i.points} pts`}</strong>
           </div>

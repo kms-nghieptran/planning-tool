@@ -61,8 +61,26 @@ fs.writeFileSync(path.join(SCRATCH, 'store', 'plan.json'), JSON.stringify({
     source: 'jira',
     members: [member('m1', 'Hien Phan', 'acc-hien'), member('m2', 'Thao Dang', 'acc-thao'),
       member('m3', 'Hy Nguyen', 'acc-hy'), member('m4', 'Chau Tran', 'acc-chau')],
+  }, {
+    // A team on a DIFFERENT cadence, whose board has none of the numbered
+    // sprints above — the shape Malphite is in, and the one that exposed the
+    // bug: every sprint belonging to another team's board was being reported
+    // as this team's own local sprint.
+    id: 'malphite', name: 'Katalon Auto Malphite', jiraName: 'Katalon Auto Malphite', boardId: '9173',
+    jiraTeams: [], components: [], sprintKeywords: [],
+    settings: { hoursPerDay: 7, hoursPerPoint: 2.9, ceremonyHours: 9 },
+    source: 'jira', members: [],
   }],
-  sprints: [sprint('S38', 'closed'), sprint('S39', 'active'), sprint('S40', 'future')],
+  sprints: [
+    sprint('S38', 'closed'), sprint('S39', 'active'), sprint('S40', 'future'),
+    // Created in this tool, on nobody's board: no `source`, no `byTeam`. This
+    // is what "local" is supposed to mean.
+    { id: 'L1', number: null, name: 'Planning week', start: '2026-09-07', end: '2026-09-11', byTeam: {} },
+    // Created here, and since ADOPTED by one board: still no `source`, but Titan
+    // now has its own copy. It is local to everyone except Titan.
+    { id: 'L2', number: null, name: 'Hardening week', start: '2026-09-21', end: '2026-09-25',
+      byTeam: { titan: { jiraId: '9500', name: 'Hardening week', state: 'future', start: '2026-09-21', end: '2026-09-25' } } },
+  ],
   holidays: [], availability: {}, support: {}, ceremony: {}, overrides: {},
   risks: [], notes: {}, excluded: {}, ignoredBoards: [], savedSearches: [],
   categoryRules: null, mixTargets: null, sprintRoster: {}, scenarios: [],
@@ -110,6 +128,43 @@ const checks = [];
 const check = (name, fn) => checks.push([name, fn]);
 
 console.log('\nWhat the server does with requests the UI would never send\n');
+
+/* ── whose sprints are these? ────────────────────────────────────────
+   "Local" means a sprint authored in this tool. It was being computed as "any
+   sprint this team's board does not have", which is a different set entirely —
+   it swept in every sprint belonging to every OTHER team's board.
+
+   Malphite is where it showed: a TrueTest board running weekly and fortnightly
+   "TT Week" sprints, so almost the whole numbered calendar looked foreign to it
+   and 44 of Jira's own sprints were listed as Malphite's local ones, under a
+   caption saying they existed only in the local calendar. */
+
+check('A TEAM IS NOT SHOWN OTHER TEAMS\' SPRINTS AS ITS OWN', async () => {
+  const r = await call('GET', '/api/sprints?team=malphite');
+  assert.strictEqual(r.status, 200);
+  const names = r.body.local.map(s => s.name).sort();
+  assert.deepStrictEqual(names, ['Hardening week', 'Planning week'],
+    `only the sprints actually created here — got ${JSON.stringify(names)}`);
+});
+
+check('and the numbered sprints from another board are not listed at all', async () => {
+  const r = await call('GET', '/api/sprints?team=malphite');
+  const everywhere = [...r.body.local, ...r.body.active, ...r.body.future, ...r.body.closed, ...r.body.unknown];
+  const strays = everywhere.filter(s => /^Sprint S\d/.test(s.name));
+  assert.deepStrictEqual(strays, [], `Titan's sprints are not Malphite's, anywhere on the payload`);
+});
+
+check('the team that DOES own them still sees them, and sees the local one too', async () => {
+  const r = await call('GET', '/api/sprints?team=titan');
+  const owned = [...r.body.active, ...r.body.future, ...r.body.closed].map(s => s.name).sort();
+  assert.ok(owned.length >= 3, `Titan keeps its own sprints, got ${JSON.stringify(owned)}`);
+  assert.deepStrictEqual(r.body.local.map(s => s.name), ['Planning week'],
+    'a sprint created here is local to every team whose board lacks it');
+  // "Hardening week" was created here too, but Titan's board has adopted it, so
+  // for Titan it is a real sprint rather than one waiting to be adopted.
+  assert.ok(!r.body.local.some(s => s.name === 'Hardening week'),
+    'a sprint this board already has is not also offered as a local one');
+});
 
 /* ── the lock ──────────────────────────────────────────────────────── */
 

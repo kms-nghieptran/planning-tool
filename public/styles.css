@@ -32,6 +32,14 @@
   --cat-supp:  var(--brand-purple);
   --cat-other: var(--app-fg-3);
 
+  /* Status text — see the ramp near `.st-todo`. Text-safe by measurement,
+     which is why they are not the fill tokens above. */
+  --st-todo:   var(--app-fg-3);
+  --st-ready:  var(--brand-blue);
+  --st-doing:  #9A5D00;
+  --st-review: #6E3AFF;
+  --st-done:   #00736A;
+
   /* day-grid cells */
   --day-work: transparent;
   --day-off:  color-mix(in srgb, var(--brand-pink) 16%, transparent);
@@ -57,6 +65,11 @@
   --brand-pink:    #FF4D93;
   --warn:          #F0A93B;
   --day-we:        #1A1C3A;
+  /* Lifted off the dark card: the light-mode amber, purple and teal are all
+     under 3.3:1 here, and status is the one place they carry actual words. */
+  --st-doing:      #F0A93B;
+  --st-review:     #A98BFF;
+  --st-done:       #34D8C8;
 }
 
 * { box-sizing: border-box; }
@@ -581,6 +594,67 @@ select.prio option[value="4"] { color: var(--app-fg-3); }
 .tag.prio-tag.prio-p2 { color: var(--warn);       border-color: color-mix(in srgb, var(--warn) 55%, transparent); }
 .tag.prio-tag.prio-p3 { color: var(--brand-blue); border-color: color-mix(in srgb, var(--brand-blue) 50%, transparent); }
 .tag.prio-tag.prio-p4 { color: var(--app-fg-3);   border-color: var(--app-line); }
+
+/* STATUS, COLOURED BY POSITION IN THE FLOW.
+   Five stages, not eight statuses — "In Dev" and "In Testing" are the same
+   thing to a reader scanning a column (work is moving), and colouring them
+   apart would make the column a legend to memorise instead of a progression to
+   read: grey has not started, blue is queued, amber is moving, purple is
+   waiting on someone else, teal is finished.
+
+   Amber and purple carry a little weight because they are the two that mean
+   someone should look: work still in flight, and work parked on another
+   person. Done deliberately does NOT — a column that is mostly Done should
+   read as calm, and bolding the majority value only makes noise.
+
+   Text, not a pill: these sit in dense tables already carrying a category tag
+   and a priority tag, and a third filled shape per row would win a fight none
+   of them should be having. */
+   These are their OWN tokens rather than reuses of --ok / --warn /
+   --brand-purple, because those three are tuned to be seen as FILLS — a dot, a
+   bar, a tinted cell — and a fill only has to be visible, while text has to be
+   readable. Measured against the surfaces they land on, the fill versions are
+   2.5:1 (teal on white) and 2.7:1 (purple on the dark card): fine as a 10px
+   square, illegible as the word "Done" on 4,201 rows. Every value below clears
+   4.5:1 on both the card and the subtle-striped row, in both themes.
+
+   `--st-todo` is the one exception, and deliberately: it IS --app-fg-3, the
+   muted foreground every em-dash and secondary label on the page already uses.
+   Work that has not started should read exactly as quiet as everything else
+   that is quiet, not one notch louder because it happens to be in a column. */
+.st        { color: var(--app-fg-2); }
+.st-todo   { color: var(--st-todo); }
+.st-ready  { color: var(--st-ready); }
+.st-doing  { color: var(--st-doing);  font-weight: var(--font-weight-medium, 500); }
+.st-review { color: var(--st-review); font-weight: var(--font-weight-medium, 500); }
+.st-done   { color: var(--st-done); }
+
+/* A NUMBER YOU CAN OPEN.
+   It is a <button> so the keyboard and a screen reader get it for free, and
+   everything here is undoing what a button looks like: a count in a table has
+   to stay a count, aligned with the column and weighted like its neighbours,
+   or a table of forty of them turns into a wall of controls.
+
+   So the affordance is held back until it is wanted — a dotted underline on
+   hover, a real focus ring on tab. `currentColor` throughout, so the cell that
+   is green because the number is good, or bold because it is a total, still is.
+   `inherit` on the font matters more than it looks: a button takes the OS
+   control font, which is not the tabular figure set the rest of the column
+   uses, and one cell in a different typeface reads as broken before it reads
+   as clickable. */
+.numlink {
+  font: inherit; color: inherit; font-variant-numeric: tabular-nums;
+  background: none; border: 0; padding: 0; margin: 0;
+  cursor: pointer; border-bottom: 1px dotted transparent;
+}
+.numlink:hover { border-bottom-color: currentColor; }
+.numlink:focus-visible { outline: 2px solid var(--brand-blue); outline-offset: 2px; border-radius: 2px; }
+/* The KPI tile's value is 800-weight and large; the dotted rule under it at
+   that size reads as an underline rather than a hint, so it is held to hover
+   only and kept thin. */
+.kpi .value .numlink { font-weight: inherit; }
+/* Printing a report, every dotted hint is noise — nothing is clickable on paper. */
+@media print { .numlink { border-bottom-color: transparent !important; } }
 
 /* Coverage movement — the delta headline above the trend chart.
    The number is the point of the section, so it carries the stat weight and the

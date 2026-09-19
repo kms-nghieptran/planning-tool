@@ -167,7 +167,7 @@ const TeamView = (() => {
                 <tr>
                   <td>${UI.issueKey(i.key)}</td>
                   <td class="wrap">${UI.esc(i.summary)}</td>
-                  <td>${UI.esc(i.status || '—')}</td>
+                  <td>${UI.statusText(i)}</td>
                   <td class="muted">${UI.esc(i.priority || '—')}</td>
                   <td class="num">${i.points == null ? '<span class="tag risk">—</span>' : UI.num(i.points)}</td>
                   <td class="muted">${UI.esc((i.components || [])[0] || '—')}</td>

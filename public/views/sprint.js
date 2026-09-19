@@ -71,7 +71,7 @@ const SprintView = (() => {
       <section class="section">
         <div class="kpis">
           ${UI.kpi({ label: 'Capacity', value: UI.int(t.predicted), unit: 'pts', foot: `${UI.num(t.capacityHours)} h across ${t.headcount} ${t.headcount === 1 ? 'person' : 'people'}`, tone: 'brand' })}
-          ${UI.kpi({ label: 'Committed', value: UI.int(p.committed), unit: 'pts', foot: `${d.items.length} items · ${headroom(t, p)}`, tone: t.predicted && p.committed > t.predicted ? 'risk' : '' })}
+          ${UI.kpi({ label: 'Committed', value: UI.drillNumber(p.committed, { act: 'drill', scope: '__sprint', col: 'committed' }, { zero: UI.int(p.committed) }), unit: 'pts', foot: `${UI.drillNumber(d.items.length, { act: 'drill', scope: '__sprint', col: 'items' })} items · ${headroom(t, p)}`, tone: t.predicted && p.committed > t.predicted ? 'risk' : '' })}
           ${UI.kpi({ label: 'Done', value: UI.int(p.done), unit: 'pts', foot: `${p.donePct}% of commitment`, tone: p.donePct >= w.timeElapsedPct ? 'ok' : '' })}
           ${UI.kpi({ label: 'Sprint elapsed', value: `${w.timeElapsedPct}`, unit: '%', foot: `Day ${w.elapsed} of ${w.workingDays} working days` })}
           ${UI.kpi({ label: 'Projected landing', value: p.projected == null ? '—' : UI.int(p.projected), unit: 'pts', foot: p.projectedVsCommitted == null ? 'Not enough of the sprint elapsed' : (p.projectedVsCommitted >= 0 ? `${UI.num(p.projectedVsCommitted)} pts above commitment` : `${UI.num(Math.abs(p.projectedVsCommitted))} pts short`), tone: p.projectedVsCommitted == null ? '' : p.projectedVsCommitted < -2 ? 'risk' : 'ok' })}
@@ -154,11 +154,46 @@ const SprintView = (() => {
        browser's own renderer produces exactly what is on screen, and its
        dialogue offers "Save as PDF" on every platform this runs on. */
     mount.addEventListener('click', (e) => {
-      const btn = e.target.closest && e.target.closest('[data-act="export-pdf"]');
-      if (!btn) return;
-      e.preventDefault();
-      exportPdf(d, state);
+      if (!e.target.closest) return;
+
+      const pdf = e.target.closest('[data-act="export-pdf"]');
+      if (pdf) { e.preventDefault(); exportPdf(d, state); return; }
+
+      const n = e.target.closest('[data-act="drill"]');
+      if (n) { e.preventDefault(); openDrill(d, state, n.dataset.scope, n.dataset.col); }
     });
+  }
+
+  /**
+   * Open the set behind one number.
+   *
+   * The keys come from the payload, never from a second count done here — the
+   * whole point of a drill-in is that it shows what the number is made of, and
+   * a list assembled by different code is a list that can disagree with the
+   * figure that opened it.
+   *
+   * `committed` is the exception that proves it: the KPI counts POINTS over the
+   * sprint's items, so its set is the item list, and the drawer adds the points
+   * up again from the same items. One source, two readings of it.
+   */
+  function openDrill(d, state, scope, col) {
+    const t = d.testCases || {};
+    const source = scope === '__sprint'
+      ? { items: (d.items || []).map(i => i.key) }
+      : scope === '__total'
+        ? ((t.totals || {}).keys || {})
+        : (((t.rows || []).find(r => r.component === scope) || {}).keys || {});
+    const keys = col === 'committed' ? (source.items || []) : (source[col] || []);
+    const where = scope === '__sprint' || scope === '__total' ? 'this sprint' : scope;
+
+    UI.drawer(UI.drillDrawer({
+      title: `${TITLE[col] || col} — ${where}`,
+      meaning: MEANING[col] || '',
+      keys,
+      items: d.items || [],
+      catalogue: t.catalogue || {},
+      state,
+    }));
   }
 
   /**
@@ -313,6 +348,34 @@ const SprintView = (() => {
    * the distinct count across the sprint. Stated in the caption, because a
    * column that visibly does not sum reads as a bug until you know why.
    */
+  /* Every count in this table opens the set behind it.
+     The scope is the component name, or `__total` for the footer — one attribute
+     pair naming exactly which set, so the click handler looks the keys up in the
+     payload rather than working them out a second time and differently. A
+     component name with a quote in it would break the attribute, which is why it
+     goes through `drillNumber`'s escaping rather than into a template by hand. */
+  function drill(r, col) {
+    return UI.drillNumber(r[col], { act: 'drill', scope: r.component == null ? '__total' : r.component, col });
+  }
+
+  /* What each column counts, in one place — the drawer repeats the sentence it
+     was opened by, because a list of eleven epic keys means nothing without it. */
+  const MEANING = {
+    automated: 'Distinct parent epics of this component’s Stories whose Automation Status reads Automated.',
+    inFlight: 'Parent epics of this component’s Stories that are not Automated yet.',
+    maintained: 'Distinct test cases linked from this component’s Bucket Stories — one per "relates to" link.',
+    stories: 'Sprint items of type Story.',
+    buckets: 'Sprint items that are Bucket Stories — the maintenance containers.',
+    items: 'Every sprint item in this component.',
+    done: 'Sprint items here that are finished.',
+    committed: 'Every item committed to this sprint. The number above is their points.',
+  };
+  const TITLE = {
+    automated: 'Automated', inFlight: 'In flight', maintained: 'Maintained',
+    stories: 'Stories', buckets: 'Bucket stories', items: 'Items', done: 'Done',
+    committed: 'Committed',
+  };
+
   function testCaseSection(d) {
     const t = d.testCases;
     if (!t || !t.rows.length) return '';
@@ -342,24 +405,24 @@ const SprintView = (() => {
             <tbody>${t.rows.map(r => `
               <tr>
                 <td>${UI.esc(r.component)}</td>
-                <td class="num ${r.automated ? 'pct good' : 'muted'}">${r.automated || '—'}</td>
-                <td class="num ${r.inFlight ? '' : 'muted'}">${r.inFlight || '—'}</td>
-                <td class="num ${r.maintained ? '' : 'muted'}">${r.maintained || '—'}</td>
-                <td class="num muted">${r.stories || '—'}</td>
-                <td class="num muted">${r.buckets || '—'}</td>
-                <td class="num">${r.items}</td>
-                <td class="num">${r.done}</td>
+                <td class="num ${r.automated ? 'pct good' : ''}">${drill(r, 'automated')}</td>
+                <td class="num">${drill(r, 'inFlight')}</td>
+                <td class="num">${drill(r, 'maintained')}</td>
+                <td class="num">${drill(r, 'stories')}</td>
+                <td class="num">${drill(r, 'buckets')}</td>
+                <td class="num">${drill(r, 'items')}</td>
+                <td class="num">${drill(r, 'done')}</td>
               </tr>`).join('')}
             </tbody>
             <tfoot><tr>
               <td><strong>Sprint total</strong> <span class="muted" style="font-weight:400">distinct</span></td>
-              <td class="num"><strong>${UI.int(T.automated)}</strong></td>
-              <td class="num"><strong>${UI.int(T.inFlight)}</strong></td>
-              <td class="num"><strong>${UI.int(T.maintained)}</strong></td>
-              <td class="num">${UI.int(T.stories)}</td>
-              <td class="num">${UI.int(T.buckets)}</td>
-              <td class="num">${UI.int(T.items)}</td>
-              <td class="num">${UI.int(T.done)}</td>
+              <td class="num"><strong>${drill(T, 'automated')}</strong></td>
+              <td class="num"><strong>${drill(T, 'inFlight')}</strong></td>
+              <td class="num"><strong>${drill(T, 'maintained')}</strong></td>
+              <td class="num">${drill(T, 'stories')}</td>
+              <td class="num">${drill(T, 'buckets')}</td>
+              <td class="num">${drill(T, 'items')}</td>
+              <td class="num">${drill(T, 'done')}</td>
             </tr></tfoot>
           </table>
         </div>

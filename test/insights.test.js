@@ -20,6 +20,7 @@ const store = require('../lib/store');
 const insights = require('../lib/insights');
 const sync = require('../lib/sync');
 const csv = require('../lib/csv');
+const capacity = require('../lib/capacity');
 
 let passed = 0, failed = 0;
 async function check(name, fn) {
@@ -923,6 +924,72 @@ check('availability defaults follow the real sprint length', () => {
   assert.strictEqual(week.length, 7);
   assert.strictEqual(week[5], 'WO', 'Saturday 5 Sep is a weekend');
   assert.strictEqual(week[6], 'WO', 'Sunday 6 Sep too');
+});
+
+/* ── a fortnight is TEN working days, whichever way the timestamp fell ────
+   Jira's endDate is a timestamp and `.slice(0, 10)` lands on either the last
+   day of the sprint or the first day of the next one, depending on the time of
+   day and the board's timezone. In the real store that split the boards clean
+   down the middle: 66 sprints came out Thu → Thu (15 cells, 11 working days)
+   and 51 came out Thu → Wed (14 cells, 10). Same cadence, same fortnight, one
+   day of difference in a timestamp — and that day became a whole extra day of
+   capacity on half the boards. */
+
+check('A FORTNIGHT IS TEN WORKING DAYS, even when Jira ends it on the next sprint\'s first day', () => {
+  // Titan Sprint 33 exactly as the store holds it: Thu → Thu, 15 calendar days.
+  const days = insights.sprintDays({ start: '2026-06-11', end: '2026-06-25' });
+  assert.strictEqual(days.length, 14, `the grid is a fortnight, not ${days.length} days`);
+  assert.strictEqual(days[0], '2026-06-11');
+  assert.strictEqual(days[13], '2026-06-24', 'the last cell is the day before the next sprint starts');
+
+  const working = days.filter(d => ![0, 6].includes(new Date(`${d}T00:00:00Z`).getUTCDay()));
+  assert.strictEqual(working.length, 10, `ten working days, got ${working.length}`);
+});
+
+check('and the board that ends it on Wednesday counts the SAME ten', () => {
+  // Ruby Sprint 33: the same fortnight, one day shorter in Jira.
+  const ruby = insights.sprintDays({ start: '2026-06-11', end: '2026-06-24' });
+  const titan = insights.sprintDays({ start: '2026-06-11', end: '2026-06-25' });
+  assert.deepStrictEqual(ruby, titan, 'two boards on the same cadence get the same grid');
+});
+
+check('a weekly sprint is still five working days, not rounded up to a fortnight', () => {
+  // "TT Week 18May-24May" as stored: Mon → Mon, 8 calendar days.
+  const days = insights.sprintDays({ start: '2026-05-18', end: '2026-05-25' });
+  assert.strictEqual(days.length, 7, 'a week snaps to a week, never to a fortnight');
+  const working = days.filter(d => ![0, 6].includes(new Date(`${d}T00:00:00Z`).getUTCDay()));
+  assert.strictEqual(working.length, 5);
+});
+
+check('a span that is NOT near a whole week is left exactly as measured', () => {
+  // 11 calendar days is 4 off a week and 3 off a fortnight: nobody meant this,
+  // so it stays visible rather than being quietly rewritten into a fortnight.
+  assert.strictEqual(insights.snapToWeeks(11), 11);
+  assert.strictEqual(insights.snapToWeeks(4), 4);
+  // ...while the timestamp wobble either side of a real cadence is absorbed.
+  for (const n of [12, 13, 14, 15, 16]) assert.strictEqual(insights.snapToWeeks(n), 14, `${n} → 14`);
+  for (const n of [5, 6, 7, 8, 9]) assert.strictEqual(insights.snapToWeeks(n), 7, `${n} → 7`);
+  for (const n of [19, 20, 21, 22, 23]) assert.strictEqual(insights.snapToWeeks(n), 21, `${n} → 21`);
+});
+
+check('a row saved against the OLD longer grid does not smuggle an eleventh day back in', () => {
+  const sprint = { start: '2026-06-11', end: '2026-06-25' };
+  // What was on disk before the snap: fifteen cells, every working day a full day.
+  const stale = ['1', '1', 'WO', 'WO', '1', '1', '1', '1', '1', 'WO', 'WO', '1', '1', '1', '1'];
+  const fitted = insights.fitRow(stale, sprint, []);
+  assert.strictEqual(fitted.length, 14, 'the row is cut to the grid');
+  assert.strictEqual(capacity.availableDays(fitted), 10, `summing it gives ten, got ${capacity.availableDays(fitted)}`);
+  assert.strictEqual(capacity.availableDays(stale), 11, 'and the unfitted row is exactly the bug being fixed');
+});
+
+check('a row saved SHORT takes the default for the days it never had', () => {
+  const sprint = { start: '2026-06-11', end: '2026-06-25' };
+  const short = ['0.5', '1', 'WO', 'WO', '1'];
+  const fitted = insights.fitRow(short, sprint, []);
+  assert.strictEqual(fitted.length, 14);
+  assert.strictEqual(fitted[0], '0.5', 'what the person actually entered is untouched');
+  assert.strictEqual(fitted[13], '1', 'the unentered tail is a normal working day');
+  assert.strictEqual(fitted[9], 'WO', 'and its weekends are still weekends');
 });
 
 /* ── CSV ──────────────────────────────────────────────────────────────── */

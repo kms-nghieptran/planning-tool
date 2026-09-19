@@ -216,6 +216,20 @@ const VIEW = fs.readFileSync(path.join(__dirname, '..', 'public', 'views', 'spri
 
 /** Render the Active sprint view against a payload and hand back the HTML. */
 async function renderSprint(payload) {
+  return (await renderSprintClickable(payload)).html;
+}
+
+/**
+ * The same render, with a mount that can actually be clicked and a record of
+ * what the drawer was given.
+ *
+ * The drill-in is the one feature here that cannot be checked from the HTML:
+ * the markup proves a button exists, not that clicking it finds the right set.
+ * So the container records the delegated listener the view binds — the same
+ * pattern ui-wiring.test.js uses — and `click(attrs)` fires a synthetic event
+ * whose `closest` answers for the attributes of the number being clicked.
+ */
+async function renderSprintClickable(payload) {
   let html = '';
   const el = () => ({
     addEventListener() {}, value: '', hidden: false, dataset: {}, style: {}, setAttribute() {},
@@ -233,13 +247,26 @@ async function renderSprint(payload) {
   vm.runInContext(`${fs.readFileSync(path.join(__dirname, '..', 'public', 'ui.js'), 'utf8')}\n;globalThis.UI = UI;`, ctx);
   ctx.UI.api = async () => payload;
   vm.runInContext(`${VIEW}\n;globalThis.__v = SprintView;`, ctx);
+  let drawn = null;
+  ctx.UI.drawer = (h) => { drawn = h; };
+
+  const listeners = [];
   const mount = {
-    style: {}, addEventListener() {},
+    style: {},
+    addEventListener(type, fn) { if (type === 'click') listeners.push(fn); },
     querySelector: () => el(), querySelectorAll: () => [],
     set innerHTML(v) { html = v; }, get innerHTML() { return html; },
   };
   await ctx.__v.render({ teamId: 'titan', sprintId: 'S40', categories: {}, teams: [{ id: 'titan', name: 'T' }] }, mount);
-  return html;
+
+  const click = (dataset) => {
+    drawn = null;
+    const node = { dataset };
+    const target = { closest: (sel) => (sel === `[data-act="${dataset.act}"]` ? node : null) };
+    for (const fn of listeners) fn({ target, preventDefault() {} });
+    return drawn;
+  };
+  return { html, click, ctx };
 }
 
 /** The real payload, built the way the route builds it. */
@@ -318,6 +345,124 @@ check('and it does not cry wolf once the links are there', async () => {
 check('the unlinked-story gap is stated on the screen too', async () => {
   const html = await renderSprint(payloadFor([story('A-1', null, ['PS_A'])]));
   assert.match(html, /no parent epic/, 'a count that is short has to say why on the page it is short on');
+});
+
+/* ── every number opens the set it is the size of ──────────────────────
+   A drill-in has exactly one way to be wrong that matters: the list it opens
+   is not the thing that was counted. It renders perfectly either way — a
+   plausible list under a plausible number — which is the same failure mode
+   this whole table was built to guard against, one level down. */
+
+const DRILL_ITEMS = [
+  story('A-1', 'E-1', ['PS_A'], { status: 'Done' }),
+  story('A-2', 'E-1', ['PS_A']),                        // same epic: one test case, two items
+  story('A-3', 'E-3', ['PS_A', 'PS_B']),                // in flight, and in two components
+  bucket('M-1', ['PS_A'], ['T-100', 'T-101']),
+  bucket('M-2', ['PS_B'], ['T-101']),                   // shares T-101 with M-1
+];
+
+check('EVERY COUNT CARRIES THE KEYS IT IS THE COUNT OF', () => {
+  const t = insights.testCaseSummary(DRILL_ITEMS, store(EPICS));
+  const cols = ['automated', 'inFlight', 'maintained', 'stories', 'buckets', 'items', 'done'];
+  for (const r of t.rows) {
+    for (const c of cols) {
+      assert.strictEqual(r.keys[c].length, r[c], `${r.component}.${c}: ${r[c]} counted, ${r.keys[c].length} keys`);
+    }
+  }
+  for (const c of cols) {
+    assert.strictEqual(t.totals.keys[c].length, t.totals[c], `total ${c}: ${t.totals[c]} counted, ${t.totals.keys[c].length} keys`);
+  }
+});
+
+check('and the total\'s keys are DISTINCT, not the rows concatenated', () => {
+  const t = insights.testCaseSummary(DRILL_ITEMS, store(EPICS));
+  // A-3 is in two components and T-101 is linked from two bucket stories, so
+  // stitching the rows together would list both twice — a list longer than the
+  // number above it, which is the one thing a drill-in must never do.
+  const stitched = t.rows.reduce((n, r) => n + r.keys.items.length, 0);
+  assert.ok(stitched > t.totals.keys.items.length, 'the fixture really does share an item across components');
+  assert.strictEqual(new Set(t.totals.keys.items).size, t.totals.keys.items.length, 'no key twice in the sprint list');
+  assert.strictEqual(new Set(t.totals.keys.maintained).size, t.totals.keys.maintained.length, 'nor in the maintained list');
+  assert.deepStrictEqual([...t.totals.keys.maintained].sort(), ['T-100', 'T-101'], 'T-101 counted once, not twice');
+});
+
+check('the catalogue carries what the sprint item list cannot', () => {
+  const t = insights.testCaseSummary(DRILL_ITEMS, store(EPICS));
+  // Epics and linked test cases are NOT sprint items, so without this the
+  // drawer would have keys it cannot show anything for.
+  assert.ok(t.catalogue['E-1'], 'the automated epic is there');
+  assert.strictEqual(t.catalogue['E-1'].kind, 'epic');
+  assert.strictEqual(t.catalogue['E-1'].summary, 'E-1', 'with enough to display');
+  assert.ok(t.catalogue['T-100'], 'and the linked test case');
+  assert.strictEqual(t.catalogue['T-100'].absent, true, 'marked as one this tool has no local copy of');
+});
+
+check('CLICKING A NUMBER OPENS EXACTLY THAT MANY ROWS', async () => {
+  const r = await renderSprintClickable(payloadFor(DRILL_ITEMS));
+  const t = insights.testCaseSummary(DRILL_ITEMS, store(EPICS));
+
+  for (const row of t.rows) {
+    for (const col of ['automated', 'inFlight', 'maintained', 'stories', 'buckets', 'items', 'done']) {
+      if (!row[col]) continue;
+      const html = r.click({ act: 'drill', scope: row.component, col });
+      assert.ok(html, `${row.component}.${col} opened nothing`);
+      const shown = (html.match(/border-bottom:1px solid var\(--app-line-soft\)/g) || []).length;
+      assert.strictEqual(shown, row[col], `${row.component}.${col}: number says ${row[col]}, drawer shows ${shown}`);
+    }
+  }
+  // And the footer's totals, which are a different set again.
+  for (const col of ['automated', 'maintained', 'items']) {
+    const html = r.click({ act: 'drill', scope: '__total', col });
+    const shown = (html.match(/border-bottom:1px solid var\(--app-line-soft\)/g) || []).length;
+    assert.strictEqual(shown, t.totals[col], `total ${col}: number says ${t.totals[col]}, drawer shows ${shown}`);
+  }
+});
+
+check('a test case with no local copy is still listed, not quietly dropped', async () => {
+  const r = await renderSprintClickable(payloadFor(DRILL_ITEMS));
+  const html = r.click({ act: 'drill', scope: '__total', col: 'maintained' });
+  assert.match(html, /T-100/, 'the key is shown');
+  assert.match(html, /Not in the local store/, 'and said to be unsynced rather than left blank');
+  assert.match(html, /2 not synced locally/, 'counted in the header too');
+});
+
+check('A KEY THE DRAWER CANNOT RESOLVE AT ALL IS STILL A ROW', async () => {
+  const r = await renderSprintClickable(payloadFor(DRILL_ITEMS));
+  // Neither a sprint item nor in the catalogue — the case a future caller, or a
+  // catalogue that drifts from the key lists, produces. The drawer must still
+  // be as long as the number that opened it: a list that is quietly SHORT than
+  // its own count is the one outcome a drill-in can never have, and it is the
+  // outcome that looks completely normal on screen.
+  const html = r.ctx.UI.drillDrawer({ title: 'x', keys: ['GHOST-1', 'A-1'], items: DRILL_ITEMS, catalogue: {} });
+  const shown = (html.match(/border-bottom:1px solid var\(--app-line-soft\)/g) || []).length;
+  assert.strictEqual(shown, 2, `two keys in, ${shown} rows out`);
+  assert.match(html, /GHOST-1/, 'the unresolvable one is shown as itself');
+  assert.match(html, /2 items/, 'and counted in the heading');
+});
+
+check('the Committed tile opens the sprint, and adds its points up from the same items', async () => {
+  const r = await renderSprintClickable(payloadFor(DRILL_ITEMS));
+  const html = r.click({ act: 'drill', scope: '__sprint', col: 'committed' });
+  const shown = (html.match(/border-bottom:1px solid var\(--app-line-soft\)/g) || []).length;
+  assert.strictEqual(shown, DRILL_ITEMS.length, 'every committed item');
+  assert.match(html, /15 pts/, 'five items at three points');
+});
+
+check('a zero is not a button — nothing to show means nothing to click', async () => {
+  const html = await renderSprint(payloadFor([story('A-1', 'E-3', ['PS_A'])]));
+  // That component automates nothing, so its Automated cell must be an em-dash.
+  assert.ok(!/class="numlink"[^>]*data-col="automated"[^>]*>0</.test(html), 'no zero rendered as a control');
+  assert.match(html, /<span class="muted">—<\/span>/, 'an em-dash instead');
+});
+
+check('and the numbers are buttons, reachable without a mouse', async () => {
+  const html = await renderSprint(payloadFor(DRILL_ITEMS));
+  assert.match(html, /<button type="button" class="numlink" data-act="drill" data-scope="PS_A" data-col="automated">/,
+    'a real button carrying which set it opens');
+  // The component name goes through escaping, not into a template by hand.
+  const odd = await renderSprint(payloadFor([story('A-1', 'E-1', ['R&D_"odd"'])]));
+  assert.ok(!/data-scope="R&D_"odd""/.test(odd), 'a quote in a component name does not break out of the attribute');
+  assert.match(odd, /data-scope="R&amp;D_&quot;odd&quot;"/, 'it is escaped');
 });
 
 /* ── run ───────────────────────────────────────────────────────────── */

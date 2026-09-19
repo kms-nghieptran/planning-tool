@@ -264,7 +264,11 @@ check('and their real leave grid is what the sprint shows', () => {
   const snap = { issues: Object.fromEntries(worked.map(i => [i.key, i])), byTeam: { titan: { sprintIssues: { 900: worked.map(i => i.key) } } }, people: [] };
 
   const v = insights.capacityView(plan, snap, team, sprint('S38', 'closed'));
-  assert.deepStrictEqual(v.availability['titan-thuan-dinh-cong-ngoc'], ['1', '1', '0.5', 'WO'],
+  const row = v.availability['titan-thuan-dinh-cong-ngoc'];
+  // The row is fitted to the sprint's day grid, so the tail is filled in — but
+  // WHAT THIS PERSON ENTERED is what comes back, not a fresh default row. The
+  // half-day and the day off are the tell: a default grid has neither.
+  assert.deepStrictEqual(row.slice(0, 4), ['1', '1', '0.5', 'WO'],
     'the right name with a blank grid looks exactly like "nothing was ever entered"');
 });
 

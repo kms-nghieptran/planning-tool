@@ -408,6 +408,107 @@ const UI = (() => {
     return (ai < 0 ? 99 : ai) - (bi < 0 ? 99 : bi) || (b.points || 0) - (a.points || 0);
   }
 
+  /* ── status colour ────────────────────────────────────────────────────
+     Status is coloured by WHERE THE WORK IS IN THE FLOW, not by the name of
+     the status, so the column reads as a progression: not started → queued →
+     in flight → waiting on someone → done.
+
+     The board's eight statuses are named here, but a name is NOT the only way
+     in. A Jira workflow gains statuses without telling anyone, and the first
+     time one appears it would be the single uncoloured word in a column of
+     colour — which reads as "this row is odd" rather than "this status is
+     new". So an unrecognised name falls back to Jira's OWN status category,
+     which every status has: `new` and `done` land exactly right, and
+     `indeterminate` means something is happening, which is the in-flight tone.
+
+     Falls through to no class at all only when there is no name and no
+     category — a genuine blank, which should look like the em-dash it is. */
+  const STATUS_STAGE = {
+    'open': 'todo', 'refinement': 'todo', 'backlog': 'todo', 'to do': 'todo',
+    'ready for dev': 'ready', 'ready for testing': 'ready', 'ready': 'ready',
+    'in dev': 'doing', 'in testing': 'doing', 'in progress': 'doing',
+    'acceptance/feedback': 'review', 'in review': 'review', 'code review': 'review',
+    'done': 'done', 'closed': 'done', 'resolved': 'done',
+  };
+  const CATEGORY_STAGE = { new: 'todo', indeterminate: 'doing', done: 'done' };
+
+  /** Which stage of the flow a status sits at: name first, Jira's category as the net. */
+  function statusStage(issue) {
+    const i = typeof issue === 'string' ? { status: issue } : (issue || {});
+    const byName = STATUS_STAGE[String(i.status || '').trim().toLowerCase()];
+    return byName || CATEGORY_STAGE[String(i.statusCategory || '').toLowerCase()] || null;
+  }
+
+  /** The status, coloured. Text only — a filled pill on every row is louder than the row. */
+  function statusText(issue) {
+    const i = typeof issue === 'string' ? { status: issue } : (issue || {});
+    if (!i.status) return '<span class="muted">—</span>';
+    const stage = statusStage(i);
+    return `<span class="st${stage ? ` st-${stage}` : ''}">${esc(i.status)}</span>`;
+  }
+
+  /* ── a number you can open ────────────────────────────────────────────
+     Every count on a summary table is the size of a set, and "which ones?" is
+     the next question every single time. These two turn a count into the way
+     to ask it.
+
+     `drillNumber` renders a real <button>, not a styled span: this is an action
+     and it has to be reachable by keyboard and announced as one. A zero is NOT
+     a button — an em-dash that opens an empty drawer teaches people the control
+     is broken, so nothing to show means nothing to click. */
+  function drillNumber(n, attrs = {}, { zero = '—' } = {}) {
+    if (!n) return `<span class="muted">${zero}</span>`;
+    const data = Object.entries(attrs).map(([k, v]) => ` data-${k}="${esc(v)}"`).join('');
+    return `<button type="button" class="numlink"${data}>${int(n)}</button>`;
+  }
+
+  /**
+   * The drawer behind one of those numbers.
+   *
+   * A key resolves in one of three ways, and all three are shown rather than
+   * filtered: a sprint item (everything known — status, points, who has it), a
+   * catalogue entry for something outside the sprint (the parent epics behind
+   * Automated, the test cases behind Maintained), or a key with nothing behind
+   * it at all. THAT LAST ONE IS THE IMPORTANT CASE. A "relates to" link can
+   * point at an issue this tool has never synced, and dropping those would make
+   * the list shorter than the number that opened it — the one thing a drill-in
+   * must never do. It is listed as itself, linked to Jira, and labelled.
+   */
+  function drillDrawer({ title, meaning, keys = [], items = [], catalogue = {}, state = {} }) {
+    const byKey = new Map((items || []).filter(Boolean).map(i => [String(i.key).toUpperCase(), i]));
+    const cats = (state && state.categories) || {};
+    const rows = (keys || []).map((k) => {
+      const key = String(k).toUpperCase();
+      return byKey.get(key) || catalogue[key] || { key, absent: true, kind: 'item' };
+    });
+    const points = rows.reduce((t, r) => t + (Number(r.points) || 0), 0);
+    const missing = rows.filter(r => r.absent).length;
+
+    const line = (r) => `
+      <div style="padding:11px 0;border-bottom:1px solid var(--app-line-soft)">
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:4px">
+          ${issueKey(r.key)}
+          ${r.category ? `<span class="tag"><i class="dot" style="background:${CATEGORY_COLORS[r.category]}"></i>${esc((cats[r.category] || {}).label || r.category)}</span>` : ''}
+          ${r.type && !r.category ? `<span class="tag">${esc(r.type)}</span>` : ''}
+          ${r.status ? statusText(r) : ''}
+          <span class="spacer"></span>
+          ${r.points == null ? '' : `<strong>${num(r.points)} pts</strong>`}
+        </div>
+        ${r.summary ? `<div style="font-size:13px">${esc(r.summary)}</div>` : ''}
+        ${r.absent ? `<div class="muted" style="font-size:11.5px;margin-top:3px">Not in the local store — open it in Jira to see this ${esc(r.kind || 'item')}</div>` : ''}
+        ${(r.components || []).length ? `<div class="muted" style="font-size:11.5px;margin-top:3px">${esc(r.components.join(', '))}</div>` : ''}
+      </div>`;
+
+    return `
+      <div class="eyebrow"><i></i>${esc(title)}</div>
+      <h2 style="margin:6px 0 2px">${int(rows.length)} ${rows.length === 1 ? 'item' : 'items'}</h2>
+      ${meaning ? `<p class="muted" style="font-size:12.5px;margin:2px 0 0;max-width:60ch">${esc(meaning)}</p>` : ''}
+      <div class="muted" style="margin:10px 0 16px;font-size:12px">
+        ${points ? `${num(points)} pts · ` : ''}${missing ? `${int(missing)} not synced locally` : 'all resolved from the local store'}
+      </div>
+      ${rows.length ? rows.map(line).join('') : '<div class="empty">Nothing here</div>'}`;
+  }
+
   const clip = (s, n = 34) => (String(s).length > n ? `${String(s).slice(0, n - 1)}…` : String(s));
 
   /**
@@ -494,7 +595,7 @@ const UI = (() => {
                 <td class="wrap">${esc(i.summary)}</td>
                 <td><span class="tag"><i class="dot" style="background:${CATEGORY_COLORS[i.category]}"></i>${esc((cats[i.category] || {}).label || i.category)}</span></td>
                 <td>${i.assignee ? `<div class="name-cell">${avatar(i.assignee)}${esc(i.assignee)}</div>` : '<span class="tag warn">unassigned</span>'}</td>
-                <td>${esc(i.status || '—')}</td>
+                <td>${statusText(i)}</td>
                 <td class="num">${i.points == null ? '<span class="tag risk">—</span>' : num(i.points)}</td>
                 <td class="muted">${esc((i.components || [])[0] || '—')}</td>
                 <td>${epicCell(i)}</td>
@@ -695,5 +796,5 @@ const UI = (() => {
   }
 
   return { esc, el, $, $$, num, pct, int, date, dateTime, ago, initials, avatar, personColor, workloadClass, toast, drawer, closeDrawer, api, jsonPut, jsonPost, jsonDelete, kpi, bar, mixBar, pointsFieldNote, CATEGORY_COLORS, setJiraBase, issueUrl, issueKey, issueKeys, jiraSearch, componentSearchUrl, combo, wireCombo, matchText, fitChars, sortable, sortTable, sortableTable, sortNumber,
-    itemsTable, epicCell, byStatusThenPoints };
+    itemsTable, epicCell, byStatusThenPoints, statusText, statusStage, drillNumber, drillDrawer };
 })();

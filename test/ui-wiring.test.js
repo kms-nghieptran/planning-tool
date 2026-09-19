@@ -187,6 +187,73 @@ check('and the narrow layout keeps its own drawer, untouched', () => {
     'the collapse itself is scoped there too, so it cannot fight the mobile drawer');
 });
 
+/* ── status colour ───────────────────────────────────────────────────── */
+
+check('EVERY STATUS ON THE BOARD IS COLOURED, and by stage rather than by name', () => {
+  const ctx = sandbox([]);
+  // The eight statuses the real store actually holds, and what each means.
+  const board = {
+    'Open': 'todo', 'Refinement': 'todo',
+    'Ready for Dev': 'ready', 'Ready for Testing': 'ready',
+    'In Dev': 'doing', 'In Testing': 'doing',
+    'Acceptance/Feedback': 'review',
+    'Done': 'done',
+  };
+  for (const [status, stage] of Object.entries(board)) {
+    assert.strictEqual(ctx.UI.statusStage(status), stage, `${status} is ${stage}`);
+    assert.ok(ctx.UI.statusText({ status }).includes(`st-${stage}`), `${status} renders with st-${stage}`);
+  }
+  // Case and spacing come from Jira, not from us.
+  assert.strictEqual(ctx.UI.statusStage('  IN DEV '), 'doing');
+});
+
+check('a status nobody has seen before still gets a colour, from Jira\'s own category', () => {
+  const ctx = sandbox([]);
+  // The workflow gains "Awaiting Deploy" one day and tells no one. Uncoloured,
+  // it would be the single plain word in a column of colour — which reads as
+  // "this row is odd", not "this status is new".
+  assert.strictEqual(ctx.UI.statusStage({ status: 'Awaiting Deploy', statusCategory: 'indeterminate' }), 'doing');
+  assert.strictEqual(ctx.UI.statusStage({ status: 'Icebox', statusCategory: 'new' }), 'todo');
+  assert.strictEqual(ctx.UI.statusStage({ status: 'Shipped', statusCategory: 'done' }), 'done');
+  // The name still wins when we know it, whatever the category says.
+  assert.strictEqual(ctx.UI.statusStage({ status: 'Done', statusCategory: 'new' }), 'done');
+});
+
+check('a blank status stays an em-dash, not a coloured nothing', () => {
+  const ctx = sandbox([]);
+  const out = ctx.UI.statusText({ status: '' });
+  assert.ok(out.includes('—'), 'it reads as empty');
+  assert.ok(!/st-\w/.test(out), `nothing to colour means no stage class — got ${out}`);
+  assert.strictEqual(ctx.UI.statusStage({ status: 'Nonsense' }), null, 'and an unknown name with no category is honestly unknown');
+});
+
+check('the status cell escapes what Jira sent', () => {
+  const ctx = sandbox([]);
+  const out = ctx.UI.statusText({ status: '<img src=x onerror=alert(1)>' });
+  assert.ok(!out.includes('<img'), `markup must not survive into the cell — got ${out}`);
+  assert.ok(out.includes('&lt;img'), 'it is shown as text');
+});
+
+check('and every stage the code can produce has a colour to show for it', () => {
+  const ctx = sandbox([]);
+  const css = fs.readFileSync(path.join(VIEWS, '..', 'styles.css'), 'utf8');
+  // Whatever stages the mapping can yield, the sheet must define — a stage
+  // added to ui.js with no rule here is an invisible no-op, and nothing else
+  // would catch it.
+  const stages = new Set();
+  for (const s of ['Open', 'Ready for Dev', 'In Dev', 'Acceptance/Feedback', 'Done']) stages.add(ctx.UI.statusStage(s));
+  for (const c of ['new', 'indeterminate', 'done']) stages.add(ctx.UI.statusStage({ status: 'x', statusCategory: c }));
+  for (const stage of stages) {
+    assert.ok(new RegExp(`\\.st-${stage}\\s*\\{`).test(css), `.st-${stage} has no rule in styles.css`);
+    // ...and each takes its colour from a token, so dark mode follows without
+    // a second ramp written somewhere else.
+    assert.ok(new RegExp(`\\.st-${stage}\\s*\\{[^}]*var\\(--st-${stage}\\)`).test(css),
+      `.st-${stage} must take its colour from --st-${stage}, not a literal`);
+  }
+  assert.ok(/\[data-theme="dark"\][^}]*--st-done:/s.test(css),
+    'dark mode lifts the ones that are unreadable on the dark card');
+});
+
 /* ── and the behaviour it was found through ─────────────────────────── */
 
 check('ONE CLICK ON "SAVE CURRENT PLAN" SAVES ONE SCENARIO', async () => {

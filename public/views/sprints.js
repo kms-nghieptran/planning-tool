@@ -55,7 +55,12 @@ const SprintsView = (() => {
                 <tr>
                   <td><strong>${UI.esc(s.calendarName || (s.number != null ? `Sprint ${s.number}` : s.name))}</strong></td>
                   <td class="muted">${UI.esc(s.name)}</td>
-                  <td class="muted" data-sort-value="${UI.esc(s.start || '')}">${UI.date(s.start)} – ${UI.date(s.end)}</td>
+                  <!-- The end date is the sprint's last WORKING day, derived from the
+                       start and the cadence, because Jira's own end is a timestamp that
+                       lands a day later on half the boards. Where the two differ, what
+                       Jira says is in the hover — a corrected date nobody can trace back
+                       is a date nobody can check. -->
+                  <td class="muted" data-sort-value="${UI.esc(s.start || '')}"${s.jiraEnd ? ` title="Last working day of the sprint. Jira's end date is ${UI.esc(s.jiraEnd)}, which is the next sprint's first day."` : ''}>${UI.date(s.start)} – ${UI.date(s.end)}</td>
                   <td class="num">${s.count}</td>
                   <td class="num">${UI.num(s.points)}</td>
                   ${future ? '' : `

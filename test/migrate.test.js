@@ -40,6 +40,7 @@ process.env.DB_FILE = path.join(SCRATCH, 'test.db');
 const db = require('../lib/db');
 const imp = require('../lib/import-json');
 const project = require('../lib/project');
+const store = require('../lib/store');
 
 let passed = 0, failed = 0;
 function check(name, fn) {
@@ -237,6 +238,58 @@ check('THE PLAN COMES BACK EXACTLY AS IT WENT IN', () => {
   const plan = PLAN();
   imp.importAll({ snapshot: SNAPSHOT(), plan });
   same(plan, project.plan(), 'plan');
+});
+
+/* ── the sprint-date seam ─────────────────────────────────────────────
+   The projection above is a PURE READ, and the check before this one is the
+   proof of it. The sprint-date normalisation therefore sits one layer up, in
+   `store.getPlan`, which is the first point above every consumer — the eight
+   screens that print a date and the capacity grid that derives its day window
+   from the same fields.
+
+   These two checks pin the seam from both sides. Without the second, the first
+   time anyone saved a holiday the derived end dates would be written into the
+   database as though Jira had said them, and the raw values — the only thing
+   that lets a wrong date be traced — would be gone for good. */
+
+check('THE STORE HANDS OUT NORMALISED SPRINT DATES', () => {
+  const plan = PLAN();
+  imp.importAll({ snapshot: SNAPSHOT(), plan });
+  store.invalidate();
+
+  const out = store.getPlan();
+  const s39 = out.sprints.find(s => s.id === 'S39');
+  // 3 Sep → 16 Sep is Thu → Wed, already a clean fortnight, so it is untouched.
+  assert.strictEqual(s39.end, '2026-09-16');
+  assert.strictEqual(s39.jiraEnd, undefined, 'nothing added where nothing was wrong');
+
+  // The TT week is Mon → Mon: eight calendar days for a one-week sprint.
+  const tt = out.sprints.find(s => s.id === 'J16178');
+  assert.strictEqual(tt.end, '2026-05-22', `Fri 22 May, got ${tt.end}`);
+  assert.strictEqual(tt.jiraEnd, '2026-05-25', 'and Jira\'s own date is kept');
+  assert.strictEqual(tt.byTeam.ruby.end, '2026-05-22', 'the team\'s own copy too, from its OWN start');
+  assert.strictEqual(tt.start, '2026-05-18', 'the start is never moved');
+});
+
+check('AND WHAT GOES BACK IN IS WHAT JIRA SAID', () => {
+  const plan = PLAN();
+  imp.importAll({ snapshot: SNAPSHOT(), plan });
+  store.invalidate();
+
+  // Exactly what a route does: read the whole plan, change one field, save it.
+  const edited = store.getPlan();
+  store.savePlan({ ...edited, holidays: ['2026-12-25'] });
+  store.invalidate();
+
+  // The stored row still holds Jira's date, not the one the screen showed.
+  const row = db.get("SELECT end FROM calendar_sprint WHERE id = 'J16178'");
+  assert.strictEqual(row.end, '2026-05-25', `the database keeps Jira's date, got ${row.end}`);
+  const team = db.get("SELECT end FROM calendar_sprint_team WHERE sprint_id = 'J16178'");
+  assert.strictEqual(team.end, '2026-05-25', 'and so does the team row');
+  // And no derived key leaked in as a column of its own.
+  assert.ok(!('jiraEnd' in row), 'jiraEnd is a read-time field, never a stored one');
+  // The edit itself landed.
+  assert.deepStrictEqual(store.getPlan().holidays, ['2026-12-25']);
 });
 
 check('THE SNAPSHOT COMES BACK EXACTLY AS IT WENT IN', () => {

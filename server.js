@@ -376,12 +376,29 @@ async function handleApi(req, res, url) {
         return {
           id: s2.id, number: s2.number, name: t.name || s2.name, calendarName: s2.name,
           state: t.state || 'unknown', start: t.start || s2.start, end: t.end || s2.end,
+          // What Jira actually said, where the derived last-working-day differs
+          // from it. Carried from whichever of the two rows the dates came from,
+          // so the hover on the screen explains the date the screen is showing.
+          jiraEnd: (t.end ? t.jiraEnd : s2.jiraEnd) || undefined,
           jiraId: t.jiraId,
           count: stat.count || 0, points: stat.points || 0, donePoints: stat.donePoints || 0,
         };
       })
       .sort((a, b) => reconcile.compareSprints(b, a));
-    const local = plan.sprints.filter(s2 => !(s2.byTeam && s2.byTeam[team.id]))
+    /* SPRINTS YOU CREATED HERE — not "every sprint this team's board lacks".
+       `source` is absent only on a sprint authored in this tool; the sync sets
+       it to 'jira' on everything it brought in. Without that test, a sprint
+       from ANOTHER team's board counts as this team's local one, and the
+       screen says so: it told Malphite that 44 sprints "exist in the local
+       calendar but not on this team's Jira board" when all 44 came from Jira,
+       on the Titan and Ruby boards, on a cadence Malphite does not run.
+
+       It hit Malphite hardest precisely because it is the team least like the
+       others — a TrueTest board on weekly and fortnightly "TT Week" sprints,
+       so almost the whole numbered calendar looked foreign to it and got
+       listed. Titan and Ruby own most of that calendar, so they showed 12 and
+       13 strays and it read as a quirk rather than a bug. */
+    const local = plan.sprints.filter(s2 => s2.source == null && !(s2.byTeam && s2.byTeam[team.id]))
       .map(s2 => ({ id: s2.id, number: s2.number, name: s2.name, state: 'local', start: s2.start, end: s2.end, count: 0, points: 0, donePoints: 0 }))
       .sort((a, b) => reconcile.compareSprints(b, a));
     return json(res, 200, {
