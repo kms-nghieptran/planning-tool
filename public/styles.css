@@ -40,6 +40,18 @@
   --st-review: #6E3AFF;
   --st-done:   #00736A;
 
+  /* BACKLOG SERIES — a 2×2, and the palette says so: hue is the KIND (blue for
+     build, pink for maintenance, matching the category colours used elsewhere)
+     and the darker of each pair is TrueTest. Each fill carries its own label
+     ink, chosen by measurement rather than always-white: a fill light enough to
+     read against the dark card is too light to carry white text, and that
+     tension is why the ink is a token and not a constant. Every pairing below
+     clears 4.5:1 for its label and 2.8:1 between the two members of its pair. */
+  --bl-tt-build:      #0047B3;  --bl-tt-build-ink:  #FFFFFF;
+  --bl-kse-build:     #2E86FF;  --bl-kse-build-ink: #10112A;
+  --bl-tt-maint:      #A3004A;  --bl-tt-maint-ink:  #FFFFFF;
+  --bl-kse-maint:     #FF5C9B;  --bl-kse-maint-ink: #10112A;
+
   /* day-grid cells */
   --day-work: transparent;
   --day-off:  color-mix(in srgb, var(--brand-pink) 16%, transparent);
@@ -70,6 +82,11 @@
   --st-doing:      #F0A93B;
   --st-review:     #A98BFF;
   --st-done:       #34D8C8;
+  /* Lifted off the dark card, with the inks re-chosen for the new fills. */
+  --bl-tt-build:      #2E5FD0;  --bl-tt-build-ink:  #FFFFFF;
+  --bl-kse-build:     #7FB3FF;  --bl-kse-build-ink: #10112A;
+  --bl-tt-maint:      #C0246B;  --bl-tt-maint-ink:  #FFFFFF;
+  --bl-kse-maint:     #FF8FB8;  --bl-kse-maint-ink: #10112A;
 }
 
 * { box-sizing: border-box; }
@@ -628,6 +645,19 @@ select.prio option[value="4"] { color: var(--app-fg-3); }
 .st-doing  { color: var(--st-doing);  font-weight: var(--font-weight-medium, 500); }
 .st-review { color: var(--st-review); font-weight: var(--font-weight-medium, 500); }
 .st-done   { color: var(--st-done); }
+
+/* A TAG YOU CAN OPEN.
+   Same reasoning as `.numlink` below: a real <button>, with everything that
+   makes it look like one undone. The tag keeps its own shape and colour so a
+   row of them still reads as a summary of what changed rather than as a
+   toolbar; only the pointer, the hover and a proper focus ring are added. */
+.tag.tag-btn {
+  font: inherit; color: inherit; background: none;
+  cursor: pointer; text-align: left;
+}
+.tag.tag-btn:hover { border-color: currentColor; }
+.tag.tag-btn:focus-visible { outline: 2px solid var(--brand-blue); outline-offset: 2px; }
+@media print { .tag.tag-btn { cursor: auto; } }
 
 /* A NUMBER YOU CAN OPEN.
    It is a <button> so the keyboard and a screen reader get it for free, and

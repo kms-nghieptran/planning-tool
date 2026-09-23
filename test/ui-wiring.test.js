@@ -187,6 +187,94 @@ check('and the narrow layout keeps its own drawer, untouched', () => {
     'the collapse itself is scoped there too, so it cannot fight the mobile drawer');
 });
 
+/* ── the nav ─────────────────────────────────────────────────────────── */
+
+/** ROUTES and the nav it renders, evaluated from the real app.js. */
+function navOf() {
+  const ctx = sandbox([]);
+  /* app.js boots itself on load, so it needs the handful of browser globals
+     that boot touches. They are stubs, not a DOM: this check is about the route
+     table and how the nav filters it, and a real DOM would add a great deal of
+     surface for no extra confidence. */
+  const el = () => ({
+    innerHTML: '', textContent: '', hidden: false, dataset: {}, style: {}, value: '',
+    addEventListener() {}, setAttribute() {}, getAttribute: () => null,
+    classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+    querySelector: () => el(), querySelectorAll: () => [],
+    replaceChildren() {}, append() {}, appendChild() {}, remove() {},
+    content: { firstElementChild: null },
+  });
+  ctx.document = {
+    documentElement: el(), body: el(), title: '',
+    addEventListener() {}, createElement: () => el(),
+    querySelector: () => el(), querySelectorAll: () => [],
+  };
+  ctx.window = { addEventListener() {}, removeEventListener() {}, matchMedia: () => ({ matches: false, addEventListener() {} }), print() {} };
+  ctx.location = { hash: '#team', href: '' };
+  ctx.localStorage = { getItem: () => null, setItem() {}, removeItem() {} };
+  ctx.fetch = async () => ({ ok: true, text: async () => '{}' });
+  ctx.UI.$ = () => el();
+  ctx.UI.$$ = () => [];
+  /* boot() adopts /api/state and reaches deep into it. Rather than enumerate
+     that shape here — which would make this check fail every time an unrelated
+     field is added to the payload — the stub answers ANY path: every property
+     is another such object, and it is array-like where something iterates it.
+     The check is about the route table, not about the state contract. */
+  const anything = () => new Proxy(Object.assign([], { length: 0 }), {
+    get(t, k) {
+      if (k === Symbol.iterator || k === 'length' || typeof k === 'symbol') return Reflect.get(t, k);
+      if (k in t && typeof t[k] === 'function') return t[k].bind(t);
+      return anything();
+    },
+  });
+  ctx.UI.api = async () => anything();
+  vm.runInContext(`${fs.readFileSync(path.join(VIEWS, '..', 'app.js'), 'utf8')}\n;globalThis.__app = App;`, ctx);
+  return { routes: ctx.__app.ROUTES, ctx };
+}
+
+check('THE COVERAGE PAGE IS CALLED "OVERALL COVERAGE"', () => {
+  const { routes } = navOf();
+  const cov = routes.find(r => r.id === 'reports/coverage');
+  assert.ok(cov, 'the route still exists');
+  assert.strictEqual(cov.label, 'Overall Coverage');
+});
+
+check('AND AUTOMATION COVERAGE IS OFF THE NAV BUT STILL REACHABLE', () => {
+  // Hidden, not deleted: an old bookmark or a link in a message has to open the
+  // page rather than silently landing on Team, which looks like a broken link.
+  const { routes } = navOf();
+  const auto = routes.find(r => r.id === 'reports/automation');
+  assert.ok(auto, 'the route is still registered, so the URL still resolves');
+  assert.strictEqual(auto.hidden, true, 'and it is marked hidden rather than removed');
+});
+
+check('a hidden route is dropped from the rendered nav, and only from there', () => {
+  const app = fs.readFileSync(path.join(VIEWS, '..', 'app.js'), 'utf8');
+  const nav = app.slice(app.indexOf('function renderNav()'), app.indexOf('function renderCrumbs()'));
+  assert.match(nav, /visibleRoutes\(\)/, 'the nav renders the filtered list');
+  const routeFor = app.slice(app.indexOf('const routeFor ='), app.indexOf('const routeFor =') + 200);
+  assert.ok(!/hidden/.test(routeFor), 'but route resolution must NOT filter, or the page becomes unreachable');
+});
+
+check('and a group left empty by hiding does not leave a bare heading', () => {
+  // Headings are positional entries in the same list. Hiding the only route
+  // under one would print a heading with nothing beneath it, which reads as a
+  // page that failed to load rather than one that was never there.
+  const { ctx } = navOf();
+  const shown = ctx.__app.ROUTES.filter(r => r.group || !r.hidden);
+  const kept = shown.filter((r, i) => {
+    if (!r.group) return true;
+    const next = shown[i + 1];
+    return Boolean(next) && !next.group;
+  });
+  for (let i = 0; i < kept.length; i++) {
+    if (kept[i].group) assert.ok(kept[i + 1] && !kept[i + 1].group, `"${kept[i].group}" has nothing under it`);
+  }
+  // Reports still has entries, so it survives.
+  assert.ok(kept.some(r => r.group === 'Reports'), 'Reports keeps its heading — Delivery metrics and Overall Coverage remain');
+  assert.ok(!kept.some(r => r.id === 'reports/automation'), 'and the hidden one is gone from the list');
+});
+
 /* ── status colour ───────────────────────────────────────────────────── */
 
 check('EVERY STATUS ON THE BOARD IS COLOURED, and by stage rather than by name', () => {

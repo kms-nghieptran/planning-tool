@@ -25,6 +25,7 @@ const { Jira } = require('./lib/jira');
 const reconcile = require('./lib/reconcile');
 const metrics = require('./lib/metrics');
 const coverage = require('./lib/coverage');
+const backlogProfile = require('./lib/backlog-profile');
 const covHistory = require('./lib/coverage-history');
 const priority = require('./lib/priority');
 const reset = require('./lib/reset');
@@ -507,7 +508,42 @@ async function handleApi(req, res, url) {
      /api/reports/coverage: that one is read on every keystroke of the component
      picker, and the movement query walks a table with a row per component per
      day. Separate means the picker stays instant and this can be windowed. */
+  /* THE BACKLOG PROFILE — how much work was outstanding, period by period.
+     Component filter is shared with the Coverage report above it, so selecting
+     a component narrows both and the two sections keep answering the same
+     question about the same slice. */
+  if (p === '/api/reports/backlog' && req.method === 'GET') {
+    const snap = store.getSnapshot();
+    const scope = (cfg.metrics || {}).coverageScope || 'Epic';
+    const picked = q.getAll('component').filter(Boolean);
+    const want = new Set(picked);
+
+    /* The events come from the changelog table; the tool and the component
+       come from the epic AS IT STANDS NOW. That is deliberate — re-tagging an
+       epic in Jira should correct every past bar, not leave history stamped
+       with a label that has since changed. */
+    const byKey = covHistory.transitionsByKey();
+    const epics = Object.values(snap.issues || {})
+      .filter(i => String(i.issueType || '').trim().toLowerCase() === String(scope).toLowerCase())
+      .filter(i => !want.size || coverage.productComponents(i).some(c => want.has(c)))
+      .map(i => ({ key: i.key, components: i.components || [], transitions: byKey.get(i.key) || [] }));
+
+    return json(res, 200, {
+      ...backlogProfile.profile(epics, {
+        grain: q.get('grain') || 'month',
+        periods: q.get('periods'),
+      }),
+      scope,
+      components: picked,
+      grains: backlogProfile.GRAINS,
+      // Nothing to count until the changelog has been read once. The screen
+      // needs to tell the difference between "a quiet year" and "never asked".
+      backfilled: byKey.size > 0,
+    });
+  }
+
   if (p === '/api/reports/coverage/movement' && req.method === 'GET') {
+    const plan = store.getPlan();
     const m = (cfg.metrics || {});
     const scope = m.coverageScope || 'Epic';
     const days = Math.min(730, Math.max(7, Number(q.get('days')) || 180));
@@ -518,8 +554,16 @@ async function handleApi(req, res, url) {
     // headline trend, which is the honest shape rather than a plausible sum.
     const picked = q.getAll('component').filter(Boolean);
     const component = picked.length === 1 ? picked[0] : null;
+    const moved = covHistory.movement(component, { scope, since });
     return json(res, 200, {
-      ...covHistory.movement(component, { scope, since }),
+      ...moved,
+      // The movers carry the priority he set on each component, from the same
+      // plan the component table reads. Without it the two tables on one page
+      // would answer "how important is this" differently — one with a level,
+      // one with nothing — and the mover list is exactly where the question
+      // gets asked, because it is the list of what to do something about.
+      movers: priority.decorate(moved.movers || [], plan),
+      priorityLevels: priority.LEVELS,
       selected: picked,
       multi: picked.length > 1,
       days,
@@ -535,6 +579,45 @@ async function handleApi(req, res, url) {
   /* Backfill the past from Jira's own transition history. Explicitly invoked:
      it is a heavy read and an inference, and neither belongs on a schedule the
      user did not ask for. */
+  /* WHICH EPICS PRODUCED ONE DRIVER TAG — "Automated +5" opened up.
+     The tags on the movers table are net deltas of counts; this answers "which
+     ones" from the transition history, with arrivals and departures kept apart
+     so the drawer never shows a list of seven under a heading saying five. */
+  if (p === '/api/reports/coverage/moved' && req.method === 'GET') {
+    const snap = store.getSnapshot();
+    const m = (cfg.metrics || {});
+    const scope = m.coverageScope || 'Epic';
+    const days = Math.min(730, Math.max(7, Number(q.get('days')) || 180));
+    const since = new Date(Date.now() - days * 86400000);
+    const bucket = q.get('bucket') || '';
+    const component = q.get('component') || null;
+
+    const issues = snap.issues || {};
+    const moved = covHistory.movedEpics({
+      bucket, component, since, lookup: (k) => issues[k] || null,
+    });
+
+    // Each key resolved to something displayable, once, so the screen renders a
+    // list rather than re-reading the snapshot per row.
+    const seen = new Map();
+    for (const e of [...moved.arrived, ...moved.left]) {
+      if (seen.has(e.key)) continue;
+      const i = issues[e.key];
+      seen.set(e.key, i
+        ? { key: e.key, summary: i.summary || '', status: i.status || '', statusCategory: i.statusCategory || '',
+            automationStatus: i.automationStatus || '', components: coverage.productComponents(i) }
+        : { key: e.key, absent: true });
+    }
+
+    return json(res, 200, {
+      ...moved,
+      bucket, component, days, scope,
+      catalogue: Object.fromEntries(seen),
+      label: (coverage.BUCKETS.find(b => b.key === bucket) || {}).label || bucket,
+      backfilled: covHistory.transitionsByKey().size > 0,
+    });
+  }
+
   if (p === '/api/reports/coverage/backfill' && req.method === 'POST') {
     const body = await readJsonBody(req);
     const m = (cfg.metrics || {});
@@ -554,9 +637,15 @@ async function handleApi(req, res, url) {
       const out = covHistory.record(r.rows, { at: r.at, scope, source: 'changelog' });
       written += out.written; kept += out.kept;
     }
+    // The same fetch feeds two things: daily readings (above) and the raw
+    // events (here). Splitting them into two backfills would mean two passes
+    // over the whole changelog for one user action.
+    const saved = covHistory.saveTransitions(epics);
+    store.invalidate();
+
     const truncated = epics.filter(e => e.truncated).length;
     const withHistory = epics.filter(e => e.transitions.length).length;
-    store.audit('coverage.history.backfill', { epics: epics.length, dates: dates.length, written, kept, truncated });
+    store.audit('coverage.history.backfill', { epics: epics.length, dates: dates.length, written, kept, truncated, transitions: saved.written });
     return json(res, 200, {
       ok: true, epics: epics.length, withHistory, truncated,
       dates: dates.length, written, keptObservations: kept,

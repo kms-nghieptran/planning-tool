@@ -1000,6 +1000,98 @@ check('A COMBINATION GETS NO TREND LINE, because none was ever recorded', async 
     'and draws no line through readings that do not exist');
 });
 
+/* ── priority on the movers table ────────────────────────────────────── */
+
+/* A movement payload with enough history to reach the movers table — below
+   `hasTrend` the section short-circuits to the "run a backfill" card. */
+const MOVED = (movers, levels) => ({
+  hasTrend: true, days: 180, sources: [], buckets: [],
+  span: { from: '2026-03-01', to: '2026-09-01', readings: 12 },
+  from: { at: '2026-03-01', coveragePct: 40 }, to: { at: '2026-09-01', coveragePct: 55 },
+  deltaPct: 15, points: [{ at: '2026-03-01', coveragePct: 40, covered: 8, automatable: 20 },
+    { at: '2026-09-01', coveragePct: 55, covered: 11, automatable: 20 }],
+  movers, priorityLevels: levels,
+});
+
+const MOVER = (component, priority) => ({
+  component, family: 'R&D — product regression',
+  from: 40, to: 55, delta: 15, automatableFrom: 20, automatableTo: 22, automatableDelta: 2,
+  drivers: [], priority, priorityLabel: priority ? `P${priority}` : null,
+});
+
+check('THE MOVERS TABLE SHOWS THE PRIORITY HE SET', async () => {
+  // The movers list is exactly where "how important is this" gets asked — it is
+  // the list of what to do something about — and without the column the two
+  // tables on one page answer that question differently.
+  const payload = payloadFor({});
+  const moved = MOVED([MOVER(NLG, 1), MOVER(SIG, null)], [{ value: 1, key: 'p1', label: 'P1', name: 'Critical' }]);
+  const section = await renderCoverage(payload, moved);
+  const start = section.indexOf('Which components moved');
+  assert.ok(start > -1, 'the section renders');
+  const table = section.slice(start, start + 2600);
+
+  assert.match(table, /<th[^>]*>Priority<\/th>/, 'the column is there');
+  assert.match(table, /class="tag prio-tag prio-p1"[^>]*>P1</, 'a set level shows as its own tag');
+  assert.match(table, /<span class="muted">—<\/span>/, 'and an unset one is an em-dash, not P0');
+});
+
+check('and it is READ-ONLY here — the component table owns the value', async () => {
+  // Two live selects for one value on one page is two things to keep in step,
+  // and the one that is not focused is the one that looks wrong.
+  const payload = payloadFor({});
+  const moved = MOVED([MOVER(NLG, 2)], [{ value: 2, key: 'p2', label: 'P2', name: 'High' }]);
+  const section = await renderCoverage(payload, moved);
+  const start = section.indexOf('Which components moved');
+  const end = section.indexOf('</table>', start);
+  const table = section.slice(start, end);
+  assert.ok(!/<select/.test(table), 'no editable control in the movers table');
+  assert.ok(/data-priority=/.test(section), 'the editable one still exists further down the page');
+});
+
+check('EVERY "WHAT MOVED" TAG OPENS THE EPICS BEHIND IT', async () => {
+  const payload = payloadFor({});
+  const moved = MOVED([{ ...MOVER(NLG, 1), buckets: { automated: 5, maintenance: -2 } }],
+    [{ value: 1, key: 'p1', label: 'P1', name: 'Critical' }]);
+  const section = await renderCoverage(payload, moved);
+  const start = section.indexOf('Which components moved');
+  const table = section.slice(start, section.indexOf('</table>', start));
+
+  // A real button, not a styled span: these are actions, so the keyboard has to
+  // reach them and a screen reader has to announce them as such.
+  assert.match(table, /<button type="button" class="tag tag-btn" data-act="moved"/, 'the tag is a button');
+  assert.match(table, /data-bucket="automated"/, 'and says which bucket it opens');
+  assert.match(table, new RegExp(`data-component="${NLG.replace(/&/g, '&amp;').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"`),
+    'and which component, escaped');
+  assert.match(table, /Automated <strong>\+5<\/strong>/, 'while still reading as the summary it was');
+});
+
+check('AND THE ROUTE IS WHAT PUTS THE PRIORITY ON THEM', () => {
+  // The checks above feed the payload straight to the view, so they stay green
+  // if the route stops decorating and every row arrives without a level — the
+  // column would then render a full column of em-dashes and look merely unset.
+  // Asserted against the source because answering the route for real needs a
+  // populated coverage_reading table, which is a different suite's fixture.
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const route = server.slice(server.indexOf("p === '/api/reports/coverage/movement'"));
+  const body = route.slice(0, route.indexOf('\n  }'));
+  assert.match(body, /movers: priority\.decorate\(/, 'the movers are decorated from the plan');
+  assert.match(body, /priorityLevels: priority\.LEVELS/, 'and the labels travel with them');
+  // From the SAME source the component table reads, not a second copy.
+  assert.match(body, /store\.getPlan\(\)/, 'the levels come from the plan he edits');
+});
+
+check('the priority column sorts unset last, not first', async () => {
+  // A blank cell sorts before everything as an empty string, which would put
+  // the components nobody has ranked at the top of a list about what to do next.
+  const payload = payloadFor({});
+  const moved = MOVED([MOVER(NLG, null), MOVER(SIG, 1)], [{ value: 1, key: 'p1', label: 'P1', name: 'Critical' }]);
+  const section = await renderCoverage(payload, moved);
+  const start = section.indexOf('Which components moved');
+  const table = section.slice(start, section.indexOf('</table>', start));
+  assert.match(table, /data-sort-value="99"/, 'unset carries a high sort key so it lands last');
+  assert.match(table, /data-sort-value="1"/, 'and a set one carries its level');
+});
+
 check('THE SECTION IS LAST ON THE PAGE, AFTER EVERY TABLE IT READS', async () => {
   // His call on where it reads best, and the reasoning holds: the findings are
   // conclusions drawn from all three tables above them, and a conclusion placed

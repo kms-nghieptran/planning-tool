@@ -550,6 +550,7 @@ check('NO VIEW PRINTS AN ISSUE KEY WITHOUT GOING THROUGH THE HELPER', () => {
     'backlog.js': ['c'],   // c.key — a COMPONENT name in the filter dropdown
     'fields.js': ['f'],    // f.key — a custom field's search slug
     'settings.js': ['choice'], // choice.key — a <option> value in the rule editor
+    'report-coverage.js': ['lvl'], // lvl.key — a priority level's slug, not an issue
   };
 
   const offenders = [];

@@ -341,8 +341,11 @@ check('weeklyDates walks back in even steps and ends on the last day', () => {
 
 const VIEW = fs.readFileSync(path.join(__dirname, '..', 'public', 'views', 'report-coverage.js'), 'utf8');
 
-/** Render the real view with the real ui.js and charts.js. */
-async function renderCoverage(payload, moved) {
+/** Render the real view with the real ui.js and charts.js.
+    `backlog` defaults to null — the same thing the route's `.catch(() => null)`
+    hands the view when it has nothing, so every caller written before the
+    Backlog section existed keeps rendering exactly what it used to. */
+async function renderCoverage(payload, moved, backlog = null) {
   let html = '';
   const el = () => ({
     addEventListener() {}, value: '', hidden: false, dataset: {}, style: {}, disabled: false,
@@ -366,7 +369,12 @@ async function renderCoverage(payload, moved) {
   const read = (f) => fs.readFileSync(path.join(__dirname, '..', 'public', f), 'utf8');
   vm.runInContext(`${read('ui.js')}\n;globalThis.UI = UI;`, ctx);
   vm.runInContext(`${read('charts.js')}\n;globalThis.Charts = Charts;`, ctx);
-  ctx.UI.api = async (p) => { asked.push(p); return p.includes('/movement') ? moved : payload; };
+  ctx.UI.api = async (p) => {
+    asked.push(p);
+    if (p.includes('/movement')) return moved;
+    if (p.includes('/backlog')) return backlog;
+    return payload;
+  };
   vm.runInContext(`${VIEW}\n;globalThis.__v = CoverageReport;`, ctx);
   const clicks = [];
   const sent = [];
@@ -499,11 +507,186 @@ check('EVERY SYNC RECORDS A READING — the only moment it can be taken', () => 
     'and it must never fail the sync — a sync that pulled 9,000 issues has succeeded');
 });
 
+/* ── which epics produced one driver tag ──────────────────────────────
+   "Automated +5" on the movers table is a net delta of COUNTS taken from two
+   daily readings. Opening it has to answer "which five?" from a different
+   source — the transition history — and the two measurements do not always
+   agree, which is the thing these checks are really about. */
+
+const wipeMoves = () => db.run('DELETE FROM automation_transition');
+const saveMoves = (key, moves, truncated = false) =>
+  hist.saveTransitions([{ key, transitions: moves.map(([at, from, to]) => ({ at, from, to })), truncated }]);
+const epicIn = (key, components) => ({ key, issueType: 'Epic', components, labels: [], summary: key });
+
+check('OPENING A DRIVER LISTS THE EPICS THAT MOVED INTO THAT BUCKET', () => {
+  reset(); wipeMoves();
+  saveMoves('E-1', [['2026-06-01T00:00:00Z', 'Ready for Automation', 'Automated']]);
+  saveMoves('E-2', [['2026-06-02T00:00:00Z', 'Maintenance', 'Automated']]);
+  saveMoves('E-3', [['2026-06-03T00:00:00Z', 'Ready for Automation', 'Blocked']]);
+
+  const lookup = (k) => epicIn(k, ['R&D_Sig_Regression']);
+  const r = hist.movedEpics({ bucket: 'automated', component: 'R&D_Sig_Regression', since: '2026-01-01', lookup });
+  assert.deepStrictEqual(r.arrived.map(x => x.key).sort(), ['E-1', 'E-2']);
+  assert.deepStrictEqual(r.left, [], 'nothing left Automated');
+  assert.strictEqual(r.net, 2);
+});
+
+check('AND THE ONES THAT MOVED OUT, kept apart from the ones that moved in', () => {
+  // A "+5" can be seven in and two out. One list under a heading saying five
+  // would be a list that does not match its own number.
+  reset(); wipeMoves();
+  saveMoves('E-1', [['2026-06-01T00:00:00Z', 'Ready for Automation', 'Automated']]);
+  saveMoves('E-2', [['2026-06-02T00:00:00Z', 'Ready for Automation', 'Automated']]);
+  saveMoves('E-3', [['2026-06-05T00:00:00Z', 'Automated', 'Maintenance']]);
+
+  const lookup = (k) => epicIn(k, ['R&D_Sig_Regression']);
+  const r = hist.movedEpics({ bucket: 'automated', component: 'R&D_Sig_Regression', since: '2026-01-01', lookup });
+  assert.deepStrictEqual(r.arrived.map(x => x.key).sort(), ['E-1', 'E-2']);
+  assert.deepStrictEqual(r.left.map(x => x.key), ['E-3']);
+  assert.strictEqual(r.net, 1, 'and the net is stated rather than implied');
+});
+
+check('a move WITHIN one bucket is not a move at all', () => {
+  // "Done" is the board's alias for Automated. Automated → Done changes the
+  // field and changes nothing about coverage, so it must not appear in either
+  // list — it would be an epic that "moved" while the number stood still.
+  reset(); wipeMoves();
+  saveMoves('E-1', [['2026-06-01T00:00:00Z', 'Automated', 'Done']]);
+  const r = hist.movedEpics({ bucket: 'automated', component: 'C', since: '2026-01-01', lookup: (k) => epicIn(k, ['C']) });
+  assert.deepStrictEqual([r.arrived.length, r.left.length], [0, 0]);
+});
+
+check('the window is respected — a move before it is not in it', () => {
+  reset(); wipeMoves();
+  saveMoves('E-old', [['2025-01-01T00:00:00Z', 'Ready for Automation', 'Automated']]);
+  saveMoves('E-new', [['2026-06-01T00:00:00Z', 'Ready for Automation', 'Automated']]);
+  const lookup = (k) => epicIn(k, ['C']);
+  const r = hist.movedEpics({ bucket: 'automated', component: 'C', since: '2026-01-01', lookup });
+  assert.deepStrictEqual(r.arrived.map(x => x.key), ['E-new']);
+  const all = hist.movedEpics({ bucket: 'automated', component: 'C', since: null, lookup });
+  assert.strictEqual(all.arrived.length, 2, 'and with no window, both');
+});
+
+check('THE COMPONENT COMES FROM THE EPIC NOW, so a re-tag corrects the past', () => {
+  reset(); wipeMoves();
+  saveMoves('E-1', [['2026-06-01T00:00:00Z', 'Ready for Automation', 'Automated']]);
+  const inA = hist.movedEpics({ bucket: 'automated', component: 'A', since: null, lookup: (k) => epicIn(k, ['A']) });
+  const inB = hist.movedEpics({ bucket: 'automated', component: 'A', since: null, lookup: (k) => epicIn(k, ['B']) });
+  assert.strictEqual(inA.arrived.length, 1);
+  assert.strictEqual(inB.arrived.length, 0, 'the same event, under the component the epic carries today');
+});
+
+check('an epic this tool has no copy of is left out of a component list', () => {
+  // The drawer is always opened FROM a component, so an epic that cannot be
+  // placed in one would be listed under a heading it may not belong to.
+  reset(); wipeMoves();
+  saveMoves('GHOST', [['2026-06-01T00:00:00Z', 'Ready for Automation', 'Automated']]);
+  const scoped = hist.movedEpics({ bucket: 'automated', component: 'C', since: null, lookup: () => null });
+  assert.strictEqual(scoped.arrived.length, 0);
+  // Across every component there is no heading to be wrong about, so it counts.
+  const all = hist.movedEpics({ bucket: 'automated', component: null, since: null, lookup: () => null });
+  assert.strictEqual(all.arrived.length, 1);
+});
+
+check('a truncated history is never stored, so it cannot half-answer', () => {
+  reset(); wipeMoves();
+  saveMoves('E-cut', [['2026-06-01T00:00:00Z', 'Ready for Automation', 'Automated']], true);
+  const r = hist.movedEpics({ bucket: 'automated', component: null, since: null, lookup: () => null });
+  assert.strictEqual(r.arrived.length, 0, 'a partial history undercounts, which looks exactly like a quiet month');
+});
+
+check('asking for no bucket returns nothing rather than everything', () => {
+  reset(); wipeMoves();
+  saveMoves('E-1', [['2026-06-01T00:00:00Z', 'Ready for Automation', 'Automated']]);
+  assert.deepStrictEqual(hist.movedEpics({ bucket: '', since: null, lookup: () => null }),
+    { arrived: [], left: [], net: 0 });
+  assert.deepStrictEqual(hist.movedEpics({}), { arrived: [], left: [], net: 0 });
+});
+
 check('and the routes are registered', () => {
   const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   assert.match(server, /p === '\/api\/reports\/coverage\/movement'/);
   assert.match(server, /p === '\/api\/reports\/coverage\/backfill'/);
   assert.match(server, /searchWithHistory/, 'the backfill needs Jira\'s transition history to read');
+  assert.match(server, /p === '\/api\/reports\/coverage\/moved'/, 'and the drill-in behind a driver tag');
+});
+
+/* ── the backfill control is reachable from every state ────────────────
+   THE BUG THESE EXIST FOR. The button used to be rendered in exactly one
+   branch: the "no history yet" callout in Coverage movement. That branch
+   disappears the moment two syncs have recorded a reading — but the
+   transitions it reads live in a different table that ONLY this button
+   fills, so the Backlog chart and the "what moved" drawer went on saying
+   "run Backfill from Jira history" with no button left anywhere to press.
+   An instruction naming a control that is not on the page is not an
+   instruction. Each check below pins one state the control must survive. */
+
+/** A backlog payload with bars but no changelog read yet — the empty state. */
+const backlogUnread = () => ({
+  grain: 'month', scope: 'Epic', backfilled: false, epics: 5, withEvents: 0, events: 0,
+  buckets: [{ key: 'ttBuild', label: 'New TT Build' }],
+  periods: [{ label: 'Sep', start: '2026-09-01', end: '2026-09-30', partial: true, counts: { ttBuild: 0 }, total: 0 }],
+});
+
+check('THE BACKFILL BUTTON SURVIVES THE TREND APPEARING', async () => {
+  // movedFixture() has two readings, so hasTrend is true and the callout that
+  // used to hold the only button is gone. The button must not go with it.
+  const r_ = await renderCoverage(payloadFor(), movedFixture());
+  assert.match(r_.html, /data-act="backfill"/,
+    'with a trend on screen there was no way left to fill the transition table');
+});
+
+check('it is reachable with several components selected too', async () => {
+  const r_ = await renderCoverage(payloadFor(), { ...movedFixture(), multi: true, selected: ['PS_A', 'PS_B'] });
+  assert.match(r_.html, /data-act="backfill"/, 'the multi-component branch never rendered one at all');
+});
+
+check('and it is still there before any history exists', async () => {
+  // The state it always worked in — kept honest so the shared helper cannot
+  // fix the two broken branches by quietly breaking the one that was fine.
+  const r_ = await renderCoverage(payloadFor(), { points: [], hasTrend: false, movers: [], sources: [] });
+  assert.match(r_.html, /data-act="backfill"/);
+});
+
+check('the Backlog empty state carries its own button, not a pointer to one', async () => {
+  const r_ = await renderCoverage(payloadFor(), movedFixture(), backlogUnread());
+  const at = r_.html.indexOf('No automation history yet');
+  assert.ok(at > 0, 'the empty state has to render');
+  // Within the section itself, not somewhere further down the page.
+  const section = r_.html.slice(at, at + 900);
+  assert.match(section, /data-act="backfill"/,
+    'the message that asks for the backfill must be within reach of it');
+});
+
+check('EACH SECTION OFFERS ITS OWN, rather than one button somewhere on the page', async () => {
+  /* Scoped deliberately. "There is a backfill button in the document" is the
+     weaker claim, and it is satisfied by a page that puts one three sections
+     away from the message asking for it — which is the scrolling hunt this
+     whole fix exists to remove. So the assertion is made INSIDE the Coverage
+     movement section, for every branch of it, with the Backlog section already
+     rendering one of its own so a stray match cannot stand in. */
+  const branches = [
+    ['trend', movedFixture()],
+    ['no trend', { points: [], hasTrend: false, movers: [], sources: [] }],
+    ['multi', { ...movedFixture(), multi: true, selected: ['PS_A', 'PS_B'] }],
+  ];
+  for (const [name, moved] of branches) {
+    const html = (await renderCoverage(payloadFor(), moved, backlogUnread())).html;
+    const at = html.indexOf('Coverage movement');
+    assert.ok(at > 0, `${name}: the section has to render`);
+    // To the end of the card — the component grid is the next thing on screen.
+    const cut = html.indexOf('Coverage by component', at);
+    const section = html.slice(at, cut > at ? cut : html.length);
+    assert.match(section, /data-act="backfill"/,
+      `${name}: the movement section leaves you scrolling for the control`);
+  }
+});
+
+check('pressing it posts the backfill — the control is wired, not just printed', async () => {
+  const r_ = await renderCoverage(payloadFor(), movedFixture());
+  await r_.click('[data-act="backfill"]', { act: 'backfill' });
+  assert.deepStrictEqual(r_.sent.map(s => [s[0], s[1]]), [['POST', '/api/reports/coverage/backfill']],
+    'a button that renders but sends nothing is the same dead end in a different shape');
 });
 
 /* ── run ───────────────────────────────────────────────────────────── */

@@ -37,6 +37,14 @@ const CoverageReport = (() => {
   // is a lens on one dataset, not a place you deep-link to.
   let days = 180;
 
+  // The backlog window. Module state for the same reason `days` is — and its
+  // own, not shared with the movement window above: "the last thirteen weeks
+  // of backlog" and "six months of coverage movement" are two questions a
+  // reader asks at once, and one control driving both would mean never being
+  // able to look at them on their scales at the same time.
+  let grain = 'month';
+  const PERIODS = { week: 13, month: 12, year: 3 };
+
   const tone = (p) => (p >= 80 ? 'good' : p < 50 ? 'over' : 'under');
 
   async function render(state, mount) {
@@ -45,9 +53,10 @@ const CoverageReport = (() => {
       : '';
     // In parallel: the movement query walks a different table and there is no
     // reason for the reader to wait for one before the other starts.
-    const [d, moved] = await Promise.all([
+    const [d, moved, backlog] = await Promise.all([
       UI.api(`/api/reports/coverage${qs}`),
       UI.api(`/api/reports/coverage/movement${qs}${qs ? '&' : '?'}days=${days}`).catch(() => null),
+      UI.api(`/api/reports/backlog${qs}${qs ? '&' : '?'}grain=${grain}&periods=${PERIODS[grain]}`).catch(() => null),
     ]);
 
     if (!d.total && !d.components.length) {
@@ -81,6 +90,7 @@ const CoverageReport = (() => {
       </section>
 
       ${statusSection(d)}
+      ${backlogSection(backlog)}
       ${movementSection(d, moved)}
       ${d.selected.length === 1 ? '' : componentSection(d, rows)}
       ${toolSection(d, toolRows)}
@@ -91,6 +101,35 @@ const CoverageReport = (() => {
       const w = e.target.closest('[data-days]');
       if (w) { e.preventDefault(); days = Number(w.dataset.days) || 180; App.refresh(); return; }
 
+      const gr = e.target.closest('[data-grain]');
+      if (gr) { e.preventDefault(); grain = gr.dataset.grain; App.refresh(); return; }
+
+      const mv = e.target.closest('[data-act="moved"]');
+      if (mv) {
+        e.preventDefault();
+        const { component, bucket } = mv.dataset;
+        // The delta the tag itself shows, so the drawer can say when the two
+        // measurements disagree instead of quietly showing the smaller one.
+        const shown = Number(String(mv.textContent).replace(/[^0-9+-]/g, '')) || 0;
+        UI.drawer('<div class="empty">Reading the change history…</div>');
+        try {
+          const r = await UI.api(`/api/reports/coverage/moved?component=${encodeURIComponent(component)}`
+            + `&bucket=${encodeURIComponent(bucket)}&days=${days}`);
+          UI.drawer(r.backfilled
+            ? movedDrawer(r, shown)
+            /* The drawer is rendered outside this view's mount, so a button
+               placed in here would never reach the click handler above. It
+               names where the real one is instead — and now there is one at
+               the foot of this very section, whatever state it is in. */
+            : '<div class="empty"><strong>No change history yet.</strong><br><br>'
+              + 'Close this and press <strong>Backfill from Jira history</strong> '
+              + 'at the foot of the Coverage movement section.</div>');
+        } catch (err) {
+          UI.drawer(`<div class="empty">Could not read the change history — ${UI.esc(err.message)}</div>`);
+        }
+        return;
+      }
+
       const bf = e.target.closest('[data-act="backfill"]');
       if (bf) {
         e.preventDefault();
@@ -100,7 +139,7 @@ const CoverageReport = (() => {
         UI.toast('Reading Jira transition history — this takes a minute…');
         try {
           const r = await UI.jsonPost('/api/reports/coverage/backfill', { weeks: 26 });
-          UI.toast(`${r.withHistory} of ${r.epics} ${UI.esc('')}had transitions · ${r.dates} dates reconstructed`
+          UI.toast(`${r.withHistory} of ${r.epics} had transitions · ${r.dates} dates reconstructed`
             + (r.truncated ? ` · ${r.truncated} had more history than Jira returned` : ''));
           App.refresh();
         } catch (err) {
@@ -404,6 +443,128 @@ const CoverageReport = (() => {
    *
    * MOVEMENT IS IN PERCENTAGE POINTS. 50% to 55% is "+5 points", never "+10%".
    */
+  /* THE BACKLOG, PERIOD BY PERIOD.
+     Four series, one 2×2: two tools, each doing build work and maintenance.
+     The colours say so — hue is the KIND, matching the category colours the
+     rest of the app uses, and the darker of each pair is TrueTest — so the
+     shape of the split reads before any number does. */
+  const BACKLOG_COLORS = {
+    ttBuild: { color: 'var(--bl-tt-build)', ink: 'var(--bl-tt-build-ink)' },
+    kseBuild: { color: 'var(--bl-kse-build)', ink: 'var(--bl-kse-build-ink)' },
+    ttMaint: { color: 'var(--bl-tt-maint)', ink: 'var(--bl-tt-maint-ink)' },
+    kseMaint: { color: 'var(--bl-kse-maint)', ink: 'var(--bl-kse-maint-ink)' },
+  };
+  const GRAIN_LABEL = { week: 'Week', month: 'Month', year: 'Year' };
+
+  /**
+   * THE BACKFILL CONTROL — AND WHY IT IS A FUNCTION RATHER THAN ONE BUTTON.
+   *
+   * It used to be rendered in exactly one place: the "no history yet" callout
+   * inside Coverage movement. That callout only appears while `hasTrend` is
+   * false, which is true only until the second sync has recorded a reading.
+   *
+   * But the transitions this button reads live in a DIFFERENT table from those
+   * readings, and only this button ever fills it. So the moment two syncs had
+   * run, the trend appeared, the callout went away, and the button went with
+   * it — while the Backlog chart and the "what moved" drawer were still empty
+   * and still saying, correctly but uselessly, "run Backfill from Jira
+   * history". The instruction outlived the only control that could obey it.
+   *
+   * The multi-component branch never rendered it at all, so selecting two
+   * components hid it too.
+   *
+   * Hence: one definition, rendered by every branch that can be on screen. A
+   * message that names an action must be within reach of that action, or it is
+   * not an instruction — it is a description of a dead end.
+   *
+   * It stays safe to press twice. The route writes transitions with INSERT OR
+   * REPLACE and never overwrites a reading a sync took for itself, so a second
+   * run costs a minute and changes nothing that was already right.
+   */
+  /* `src` is anything carrying a `scope` — the coverage payload or the backlog
+     one, since both sections render this and both know what they are counting.
+     `explain` is off where the surrounding copy already says what it does, and
+     `center` follows the `.empty` block it sits in rather than fighting it. */
+  function backfillButton(src, { explain = true, center = false } = {}) {
+    const scope = UI.esc(((src && src.scope) || 'Epic').toLowerCase());
+    return `
+      ${explain ? `<p class="muted" style="font-size:11.5px;margin:14px 0 10px">
+        Reads every ${scope}'s Automation Status transitions from Jira once. One pass fills all three things
+        that need them — the Backlog chart, the Coverage movement trend, and the lists behind each
+        "what moved" tag. Takes a minute; safe to run again.
+      </p>` : ''}
+      <div class="btn-row"${center ? ' style="justify-content:center;margin-top:0"' : ''}>
+        <button class="btn sm" data-act="backfill">Backfill from Jira history</button>
+      </div>`;
+  }
+
+  function backlogSection(b) {
+    const chips = ['week', 'month', 'year'].map(g =>
+      `<button class="chip${grain === g ? ' active' : ''}" data-grain="${g}">${GRAIN_LABEL[g]}</button>`).join('');
+    const head = `
+      <div class="section-head" style="margin-bottom:4px">
+        <h3>Backlog</h3>
+        <div class="spacer"></div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">${chips}</div>
+      </div>`;
+
+    if (!b || !b.periods || !b.periods.length) {
+      return `<section class="section">${head}
+        <div class="card"><div class="empty">Nothing to profile yet.</div></div>
+      </section>`;
+    }
+
+    /* AN EMPTY CHART AND AN UNASKED QUESTION LOOK IDENTICAL, and only one of
+       them is news. These bars are read from Jira's changelog, which arrives
+       with the backfill below — until that has run there are no events at all,
+       and drawing twelve empty months would report a year of doing nothing. */
+    if (!b.backfilled) {
+      return `<section class="section">${head}
+        <div class="card"><div class="empty">
+          <strong>No automation history yet.</strong><br><br>
+          These bars count the moments an ${UI.esc(b.scope || 'Epic')}'s Automation Status moved to Automated,
+          which lives in Jira's change history rather than in the ${UI.esc(b.scope || 'Epic')} as it stands today.
+          ${backfillButton({ scope: b.scope }, { center: true })}
+        </div></div>
+      </section>`;
+    }
+
+    const series = (b.buckets || []).map(x => ({ ...x, ...(BACKLOG_COLORS[x.key] || { color: 'var(--app-fg-3)' }) }));
+    const last = b.periods[b.periods.length - 1];
+    const first = b.periods[0];
+    const delta = last.total - first.total;
+    // The window's throughput. These are EVENTS, so unlike a backlog size the
+    // bars genuinely add up — summing them is the right thing to show.
+    const windowTotal = b.periods.reduce((n, p) => n + p.total, 0);
+
+    return `
+      <section class="section">
+        ${head}
+        <div class="card">
+          <div class="move-head">
+            <div>
+              <div class="eyebrow"><i></i>Automated in ${UI.esc(last.label)}${last.partial ? ' so far' : ''}</div>
+              <div class="kpi" style="padding:0"><div class="value">${UI.int(last.total)}<small>test cases</small></div></div>
+            </div>
+            <div class="move-delta ${delta > 0 ? 'up' : delta < 0 ? 'down' : ''}">
+              <strong>${UI.int(windowTotal)}</strong>
+              <span>across ${UI.esc(first.label)} – ${UI.esc(last.label)}</span>
+            </div>
+          </div>
+          ${Charts.stacked(b.periods, series)}
+          <div class="mixkey" style="margin-top:10px">
+            ${series.map(x => `<span><i style="background:${x.color}"></i>${UI.esc(x.label)} <strong>${UI.int((last.counts || {})[x.key] || 0)}</strong></span>`).join('')}
+          </div>
+          <p class="muted" style="font-size:11.5px;margin:10px 0 0">
+            ${UI.esc(b.basis)}
+            Read from Jira's change history, so it only goes back as far as the last backfill reached.
+            ${UI.int(b.withEvents)} of ${UI.int(b.epics)} ${UI.esc(b.scope || 'Epic')}s have ever been automated.
+            ${b.components && b.components.length ? `Filtered to ${UI.esc(b.components.join(', '))}.` : 'Across every component.'}
+          </p>
+        </div>
+      </section>`;
+  }
+
   function movementSection(d, m) {
     const windows = [30, 90, 180, 365];
     const head = `
@@ -431,8 +592,9 @@ const CoverageReport = (() => {
               Pick a single component for the chart.
             </p>
           </div>
-          ${moversTable(d, (m.movers || []).filter(r => (d.selected || []).includes(r.component)))}
+          ${moversTable(d, (m.movers || []).filter(r => (d.selected || []).includes(r.component)), m)}
           ${sourceNote(m)}
+          ${backfillButton(d)}
         </div>
       </section>`;
 
@@ -456,9 +618,7 @@ const CoverageReport = (() => {
               To have it now instead, <strong>Backfill from Jira</strong> replays each
               ${UI.esc(d.scope.toLowerCase())}'s Automation Status transitions and reconstructs the past six months.
             </p>
-            <div class="btn-row">
-              <button class="btn sm" data-act="backfill">Backfill from Jira history</button>
-            </div>
+            ${backfillButton(d, { explain: false })}
             <p class="muted" style="font-size:11.5px;margin:10px 0 0">
               A reconstruction places each ${UI.esc(d.scope.toLowerCase())} by Jira's own transition dates, but reads
               today's components and labels — so a suite something moved between is right in total and can be wrong
@@ -510,9 +670,10 @@ const CoverageReport = (() => {
             denominator faster than the numerator, which is a different problem from work going backwards.
           </p>
 
-          ${d.selected.length === 1 ? '' : moversTable(d, rows)}
+          ${d.selected.length === 1 ? '' : moversTable(d, rows, m)}
 
           ${sourceNote(m)}
+          ${backfillButton(d)}
         </div>
       </section>`;
   }
@@ -526,7 +687,19 @@ const CoverageReport = (() => {
    * shows only the components in the selection, ranked against each other. One
    * copy, so the columns cannot diverge between them.
    */
-  function moversTable(d, rows) {
+  /* READ-ONLY HERE, ON PURPOSE. The component table below owns the priority and
+     has the editable control; this column shows it. Two live selects for one
+     value on one page is two things to keep in step, and the one that is not
+     focused is the one that looks wrong. Border and text only, so a column of
+     them does not shout over the percentages beside it. */
+  function priorityTag(m, value) {
+    if (value == null) return '<span class="muted">—</span>';
+    const lvl = (m && m.priorityLevels || []).find(l => l.value === Number(value)) || {};
+    const cls = lvl.key ? `prio-${UI.esc(lvl.key)}` : `prio-p${Number(value)}`;
+    return `<span class="tag prio-tag ${cls}" title="${UI.esc(lvl.name || '')}">${UI.esc(lvl.label || `P${value}`)}</span>`;
+  }
+
+  function moversTable(d, rows, m) {
     if (!rows.length) return '';
     return `
             <h3 style="margin-top:22px">Which components moved</h3>
@@ -534,7 +707,9 @@ const CoverageReport = (() => {
             <div class="table-wrap" style="margin-top:10px">
               <table>
                 <thead><tr>
-                  <th>Component</th><th>Family</th>
+                  <th>Component</th>
+                  <th title="Set on the component table below — this column shows it, it does not own it">Priority</th>
+                  <th>Family</th>
                   <th class="num">Then</th><th class="num">Now</th><th class="num">Change</th>
                   <th class="num" title="Automatable ${UI.esc(d.scope.toLowerCase())}s — the denominator">Scope</th>
                   <th>What moved</th>
@@ -542,6 +717,7 @@ const CoverageReport = (() => {
                 <tbody>${rows.map(r => `
                   <tr>
                     <td>${componentCell(d, r.component)}</td>
+                    <td data-sort-value="${r.priority == null ? 99 : r.priority}">${priorityTag(m, r.priority)}</td>
                     <td class="muted">${UI.esc(r.family.split(' —')[0])}</td>
                     <td class="num muted">${UI.pct(r.from)}</td>
                     <td class="num pct ${tone(r.to)}">${UI.pct(r.to)}</td>
@@ -551,7 +727,7 @@ const CoverageReport = (() => {
                     <td class="num muted" title="Automatable went ${r.automatableFrom} → ${r.automatableTo}">
                       ${r.automatableDelta > 0 ? '+' : ''}${r.automatableDelta || '—'}
                     </td>
-                    <td>${drivers(r)}</td>
+                    <td>${drivers(r, d)}</td>
                   </tr>`).join('')}
                 </tbody>
               </table>
@@ -563,13 +739,67 @@ const CoverageReport = (() => {
   }
 
   /** The bucket changes behind one component's move, largest first. */
-  function drivers(r) {
+  /* EACH DRIVER OPENS THE EPICS BEHIND IT.
+     A real <button>, so the keyboard reaches it and a screen reader announces
+     it — these are actions, not decoration. The tag keeps its own look; only
+     the affordance is added, because a row of four filled buttons would read
+     as a toolbar rather than as a summary of what changed. */
+  function drivers(r, d) {
     const parts = Object.entries(r.buckets || {})
       .filter(([, v]) => v)
       .sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]))
       .slice(0, 3)
-      .map(([k, v]) => `<span class="tag"><i class="dot" style="background:${BUCKET_COLOR[k]}"></i>${UI.esc(bucketMeta(k).label)} <strong>${v > 0 ? '+' : ''}${v}</strong></span>`);
+      .map(([k, v]) => `<button type="button" class="tag tag-btn" data-act="moved"
+        data-component="${UI.esc(r.component)}" data-bucket="${UI.esc(k)}"
+        title="Show the ${UI.esc(((d && d.scope) || 'Epic').toLowerCase())}s behind this">
+        <i class="dot" style="background:${BUCKET_COLOR[k]}"></i>${UI.esc(bucketMeta(k).label)} <strong>${v > 0 ? '+' : ''}${v}</strong></button>`);
     return parts.length ? `<div style="display:flex;gap:4px;flex-wrap:wrap">${parts.join('')}</div>` : '<span class="muted">—</span>';
+  }
+
+  /**
+   * The drawer behind one driver tag.
+   *
+   * ARRIVALS AND DEPARTURES ARE SHOWN APART, and the net is stated. A "+5" can
+   * be seven in and two out; one list under a heading saying five would be a
+   * list that does not match its own number.
+   *
+   * And when the net does not equal the delta on the table, the drawer SAYS SO
+   * rather than showing the smaller figure quietly. A reading counts epics; a
+   * transition counts field changes. An epic created already Automated never
+   * transitioned into anything, and one re-tagged between components moves
+   * between two readings without a single status change. Those are real gaps,
+   * not rounding, and the reader is the one who can tell which.
+   */
+  function movedDrawer(res, delta) {
+    const group = (title, list, tone) => `
+      <div class="eyebrow" style="margin-top:14px"><i></i>${UI.esc(title)} — ${UI.int(list.length)}</div>
+      ${list.length ? list.map(e => {
+        const it = (res.catalogue || {})[e.key] || { key: e.key, absent: true };
+        return `<div style="padding:10px 0;border-bottom:1px solid var(--app-line-soft)">
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:3px">
+            ${UI.issueKey(e.key)}
+            <span class="tag ${tone}">${UI.esc(e.from || 'no status')} → ${UI.esc(e.to || 'no status')}</span>
+            <span class="spacer"></span>
+            <span class="muted" style="font-size:11.5px">${UI.date(String(e.at).slice(0, 10))}</span>
+          </div>
+          ${it.summary ? `<div style="font-size:13px">${UI.esc(it.summary)}</div>` : ''}
+          ${it.absent ? '<div class="muted" style="font-size:11.5px">Not in the local store — open it in Jira</div>' : ''}
+          ${(it.components || []).length ? `<div class="muted" style="font-size:11.5px;margin-top:2px">${UI.esc(it.components.join(', '))}</div>` : ''}
+        </div>`;
+      }).join('') : '<div class="muted" style="font-size:12px;padding:6px 0">None</div>'}`;
+
+    const mismatch = delta != null && res.net !== delta;
+    return `
+      <div class="eyebrow"><i></i>${UI.esc(res.label)}${res.component ? ` · ${UI.esc(res.component)}` : ''}</div>
+      <h2 style="margin:6px 0 2px">${res.net > 0 ? '+' : ''}${UI.int(res.net)}<small class="muted" style="font-size:13px;font-weight:400"> net over ${UI.int(res.days)} days</small></h2>
+      <p class="muted" style="font-size:12.5px;margin:2px 0 0;max-width:62ch">
+        ${UI.int(res.arrived.length)} moved in, ${UI.int(res.left.length)} moved out, from Jira's change history.
+        ${mismatch ? `The table says ${delta > 0 ? '+' : ''}${delta}: a reading counts ${UI.esc(res.scope.toLowerCase())}s and a
+          transition counts status changes, so one created already in this state, or re-tagged into this component,
+          moves the count without ever changing status.` : ''}
+      </p>
+      ${group('Moved in', res.arrived, 'ok')}
+      ${group('Moved out', res.left, 'warn')}`;
   }
 
   /**

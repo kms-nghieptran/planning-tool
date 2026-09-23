@@ -25,8 +25,12 @@ const App = (() => {
 
     { group: 'Reports' },
     { id: 'reports/delivery', label: 'Delivery metrics', view: () => DeliveryReport },
-    { id: 'reports/automation', label: 'Automation coverage', view: () => AutomationReport },
-    { id: 'reports/coverage', label: 'Coverage', view: () => CoverageReport },
+    // HIDDEN, NOT DELETED. Overall Coverage answers the same question with the
+    // movement, backlog and attention sections this one never had, so it is off
+    // the nav — but the route still resolves, so an old bookmark or a link in a
+    // message opens the page instead of silently landing on Team.
+    { id: 'reports/automation', label: 'Automation coverage', view: () => AutomationReport, hidden: true },
+    { id: 'reports/coverage', label: 'Overall Coverage', view: () => CoverageReport },
     { id: 'risks', label: 'Risks', view: () => RisksView, sprintScoped: true },
 
     { group: 'Data' },
@@ -113,7 +117,11 @@ const App = (() => {
   /* ─────────────────────────── navigation ─────────────────────────── */
 
   function renderNav() {
-    UI.$('#nav').innerHTML = ROUTES.map(r => {
+    /* A hidden route is dropped here and nowhere else: `routeFor` still finds
+       it, so the page stays reachable by URL. Filtering before the map also
+       means a group whose every route is hidden does not leave a bare heading
+       behind — see `visibleRoutes`. */
+    UI.$('#nav').innerHTML = visibleRoutes().map(r => {
       if (r.group) return `<div class="group">${UI.esc(r.group)}</div>`;
       const count = r.count ? r.count(state) : null;
       const sub = r.id.includes('/') ? ' sub' : '';
@@ -142,6 +150,24 @@ const App = (() => {
 
     // The sprint picker only belongs on views that are about one sprint.
     UI.$('#sprintPicker').hidden = !r.sprintScoped;
+  }
+
+  /**
+   * ROUTES minus the hidden ones, and minus any group heading left empty by
+   * their removal.
+   *
+   * The second part matters: headings are positional entries in the same list,
+   * so hiding the only route under one would print a heading with nothing
+   * beneath it — which reads as a page that failed to load rather than one that
+   * was never there.
+   */
+  function visibleRoutes() {
+    const shown = ROUTES.filter(r => r.group || !r.hidden);
+    return shown.filter((r, i) => {
+      if (!r.group) return true;
+      const next = shown[i + 1];
+      return Boolean(next) && !next.group;
+    });
   }
 
   function groupOf(id) {

@@ -273,5 +273,84 @@ const Charts = (() => {
     return frame(W, H, body);
   }
 
-  return { velocity, burndown, supplyDemand, ranked, spark, load, trend };
+  /**
+   * STACKED COLUMNS — the backlog, period by period, split four ways.
+   *
+   * THE PALETTE ENCODES THE STRUCTURE. These four series are not four unrelated
+   * things; they are a 2×2 — two tools, each doing build work and maintenance.
+   * So hue carries the KIND, matching the category colours this app already
+   * uses everywhere else (blue is new work, pink is maintenance), and the
+   * darker of each pair is TrueTest. A reader who knows the rest of the tool
+   * can read this legend without looking it up, and the shape of the split —
+   * "we are mostly maintenance now" — is visible before any number is.
+   *
+   * Every fill is dark enough to carry white text, which is what lets the
+   * value sit inside its own segment; a light tint would have forced the
+   * numbers outside and doubled the width of the chart.
+   *
+   * A VALUE IS DRAWN ONLY WHERE IT FITS. Thirteen weekly bars of four segments
+   * is fifty-two numbers, most of them on slivers too thin to hold one, and a
+   * 9px label straddling two segments is worse than no label. Everything is in
+   * the hover regardless, and the period total sits above the bar where there
+   * is always room for it.
+   */
+  function stacked(periods, series, { height = 300, unit = 'items' } = {}) {
+    const data = (periods || []).filter(Boolean);
+    const keys = (series || []).filter(s => s && s.key);
+    if (!data.length || !keys.length) return '';
+
+    const W = 900, H = height, padL = 42, padR = 14, padT = 16, padB = 44;
+    const iw = W - padL - padR, ih = H - padT - padB;
+    const max = nice(Math.max(1, ...data.map(p => p.total || 0)));
+    const step = iw / data.length;
+    const bw = Math.max(6, Math.min(58, step * 0.62));
+    const y = (v) => padT + ih - (v / max) * ih;
+
+    let body = '';
+    for (let g = 0; g <= 4; g++) {
+      const v = max * g / 4, yy = y(v);
+      body += `<line x1="${padL}" x2="${W - padR}" y1="${yy}" y2="${yy}" stroke="${GRID}"/>`;
+      body += `<text x="${padL - 6}" y="${yy + 3.5}" text-anchor="end" font-size="9" fill="${AXIS}">${Math.round(v)}</text>`;
+    }
+
+    data.forEach((p, i) => {
+      const cx = padL + step * i + step / 2;
+      const x = cx - bw / 2;
+      let acc = 0;
+      for (const s of keys) {
+        const v = (p.counts || {})[s.key] || 0;
+        if (v <= 0) continue;
+        const top = y(acc + v), h = Math.max(0.5, y(acc) - top);
+        body += `<rect x="${x}" y="${top}" width="${bw}" height="${h}" fill="${s.color}">`
+          + `<title>${esc(p.label)} — ${esc(s.label)}: ${v} ${esc(unit)}</title></rect>`;
+        // 13px of bar and 15px of bar width is the floor for a legible 9.5px
+        // number with air around it; below that the hover is the only sane
+        // place for the value.
+        if (h >= 13 && bw >= 15) {
+          // The ink comes WITH the fill. A fill light enough to read against the
+          // dark card is too light to carry white text, so a fixed white label
+          // is legible in one theme and a ghost in the other.
+          body += `<text x="${cx}" y="${top + h / 2 + 3.4}" text-anchor="middle" font-size="9.5"`
+            + ` font-weight="600" fill="${s.ink || '#FFFFFF'}" style="pointer-events:none">${v}</text>`;
+        }
+        acc += v;
+      }
+      if (acc > 0) {
+        body += `<text x="${cx}" y="${y(acc) - 5}" text-anchor="middle" font-size="9.5" font-weight="700"`
+          + ` fill="${AXIS}">${acc}</text>`;
+      }
+      // Every other label once the bars get tight, so they never overlap.
+      const skip = step < 34 && i % 2 === 1;
+      if (!skip) {
+        body += `<text x="${cx}" y="${H - 26}" text-anchor="middle" font-size="9.5" fill="${AXIS}">${esc(p.label)}</text>`;
+      }
+      if (p.partial) {
+        body += `<text x="${cx}" y="${H - 15}" text-anchor="middle" font-size="8" fill="${AXIS}" opacity=".75">so far</text>`;
+      }
+    });
+
+    return frame(W, H, body);
+  }
+
+  return { velocity, burndown, supplyDemand, ranked, spark, load, trend, stacked };
 })();
