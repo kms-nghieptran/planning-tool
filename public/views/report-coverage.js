@@ -99,14 +99,6 @@ const CoverageReport = (() => {
     mount.innerHTML = `
       ${printHeader(d, state, backlog, moved)}
 
-      <section class="section print-hide">
-        <div class="section-head">
-          <div class="spacer"></div>
-          <button class="btn ghost sm" data-act="export-pdf"
-            title="Opens your browser's print dialogue — choose &quot;Save as PDF&quot;">Export PDF</button>
-        </div>
-      </section>
-
       ${picker(d)}
 
       <section class="section">
@@ -503,11 +495,23 @@ const CoverageReport = (() => {
               No component named ${(d.componentMissing || []).map(x => `"${UI.esc(x)}"`).join(', ')} — ignored
             </div>` : ''}
           </div>
-          ${picked.length === 1 ? `
-            <a class="btn ghost sm" target="_blank" rel="noopener"
-               href="${UI.esc(UI.componentSearchUrl({ component: picked[0], project: d.project, scope: d.scope }) || '#')}"
-               title="Open the ${UI.esc(d.scope.toLowerCase())}s in ${UI.esc(picked[0])} in Jira">Open in Jira</a>` : ''}
-          ${picked.length ? '<button class="btn ghost sm" data-component="">Clear</button>' : ''}
+          ${/* THE ACTIONS, IN THE CARD RATHER THAN ON A ROW OF THEIR OWN.
+                Export PDF used to sit in an otherwise empty `section-head`
+                above this card — one right-aligned button and a spacer, which
+                cost a full band of whitespace between the breadcrumb and the
+                first thing on the page. It belongs beside the two buttons that
+                were already here: all three act on the selection this card
+                holds, and `.picker-card` is hidden in print, which is what the
+                removed section's `print-hide` was for. */''}
+          <div class="picker-actions">
+            ${picked.length === 1 ? `
+              <a class="btn ghost sm" target="_blank" rel="noopener"
+                 href="${UI.esc(UI.componentSearchUrl({ component: picked[0], project: d.project, scope: d.scope }) || '#')}"
+                 title="Open the ${UI.esc(d.scope.toLowerCase())}s in ${UI.esc(picked[0])} in Jira">Open in Jira</a>` : ''}
+            ${picked.length ? '<button class="btn ghost sm" data-component="">Clear</button>' : ''}
+            <button class="btn ghost sm" data-act="export-pdf"
+              title="Opens your browser's print dialogue — choose &quot;Save as PDF&quot;">Export PDF</button>
+          </div>
         </div>
       </section>`;
   }

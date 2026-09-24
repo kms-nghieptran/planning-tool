@@ -41,13 +41,13 @@ process.env.PORT = '0';
 const EPICS = [];
 let n = 0;
 /** An Epic, and the moment(s) its Automation Status reached Automated. */
-const epic = (component, tt, moves) => {
+const epic = (component, tt, moves, team = 'Katalon Auto Titan') => {
   n++;
   const key = `AUTOKAT-${100 + n}`;
   EPICS.push({
     key, project: 'AUTOKAT', summary: `${component} suite ${n}`, issueType: 'Epic',
-    status: 'Done', statusCategory: 'done', automationStatus: 'Automated',
-    components: tt ? [component, 'TrueTest'] : [component],
+    status: 'Done', statusCategory: 'done', automationStatus: 'Automated', team,
+    components: [].concat(component).concat(tt ? ['TrueTest'] : []),
     labels: [], blockedBy: [], sprints: [], datasets: ['epics'], moves,
   });
   return key;
@@ -67,11 +67,36 @@ const TWICE = epic('PS_Alpha', true, [
 // One that has never been automated at all — it must appear in no bar.
 const NEVER = epic('PS_Beta', false, []);
 
+/* ── the epics his two coverage settings are supposed to remove ──────
+   All four were automated in July, so each one would visibly inflate a bar it
+   has no business being in. They exist to be counted by the chart if either
+   setting stops being applied, which is the whole reason this fixture carries
+   a team on every epic. */
+const JUL = [['2026-07-19T09:00:00.000Z', 'Ready for Automation']];
+// A team he did not put on the list.
+const OTHER_TEAM = epic('PS_Alpha', true, JUL, 'Katalon Auto PS');
+// No team at all — the case the allow-list exists for.
+const NO_TEAM = epic('PS_Alpha', true, JUL, '');
+// Its only real component is one he excluded, so the epic leaves entirely.
+const EXCLUDED = epic('Technical_Works', true, JUL);
+// The second allowed team, so a check cannot pass by matching one name.
+const SECOND_TEAM = epic('PS_Beta', false, JUL, 'Katalon Auto Ruby');
+// Excluded component AND a real one: it KEEPS its place, on the strength of
+// the component that survives. The opposite mistake to EXCLUDED above.
+const MIXED = epic(['Technical_Works', 'PS_Alpha'], false, JUL);
+
+const EXCLUDED_COMPONENTS = ['Technical_Works'];
+const COVERAGE_TEAMS = ['Katalon Auto Titan', 'Katalon Auto Ruby'];
+// Everything the two settings should have removed, and nothing else.
+const BANISHED = [OTHER_TEAM, NO_TEAM, EXCLUDED];
+
 fs.writeFileSync(path.join(SCRATCH, 'store', 'plan.json'), JSON.stringify({
   version: 1, teams: [], sprints: [], holidays: [], availability: {}, support: {},
   ceremony: {}, overrides: {}, risks: [], notes: {}, excluded: {}, ignoredBoards: [],
   savedSearches: [], categoryRules: null, mixTargets: null, sprintRoster: {},
   scenarios: [], componentPriority: {},
+  // His decisions, the same two the Coverage headline above the chart obeys.
+  excludedComponents: EXCLUDED_COMPONENTS, coverageTeams: COVERAGE_TEAMS,
 }));
 
 fs.writeFileSync(path.join(SCRATCH, 'store', 'snapshot.json'), JSON.stringify({
@@ -97,6 +122,24 @@ for (const e of EPICS) {
 }
 
 let base = '';
+const put = (p, body) => new Promise((resolve, reject) => {
+  const payload = JSON.stringify(body);
+  const u = new URL(base + p);
+  const req = http.request({
+    hostname: u.hostname, port: u.port, path: u.pathname, method: 'PUT',
+    headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) },
+  }, (res) => {
+    let out = '';
+    res.on('data', c => { out += c; });
+    res.on('end', () => {
+      let parsed = null;
+      try { parsed = JSON.parse(out); } catch (_) { parsed = out; }
+      resolve({ status: res.statusCode, body: parsed });
+    });
+  });
+  req.on('error', reject);
+  req.end(payload);
+});
 const call = (p) => new Promise((resolve, reject) => {
   http.get(`${base}${p}`, (res) => {
     let out = '';
@@ -215,6 +258,70 @@ check('a component filter narrows the drawer exactly as it narrows the bar', asy
       assert.ok((d.body.catalogue[k.toUpperCase()].components || []).includes('PS_Alpha'), k);
     }
   }
+});
+
+/* ── THE CHART COUNTS WHAT THE HEADLINE ABOVE IT COUNTS ───────────────
+   The Backlog chart sits under the Coverage headline on one screen. Before
+   this, it obeyed neither of his two scope settings: the headline read 4,141
+   epics while the bars below it drew 4,144, and the drawer could list an epic
+   the chart above it had already dropped. Three readers, one population. */
+
+const everyKey = async (qs = '') => {
+  const c = await chart(qs);
+  const seen = new Set();
+  for (const period of c.body.periods) {
+    const d = await drill(period.start, '', qs);
+    for (const k of d.body.keys) seen.add(k);
+  }
+  return { total: c.body.periods.reduce((s, p) => s + p.total, 0), seen };
+};
+
+check('AN EPIC WHOSE TEAM IS NOT ON HIS LIST IS BEHIND NO BAR', async () => {
+  const { seen } = await everyKey();
+  assert.ok(!seen.has(OTHER_TEAM), `${OTHER_TEAM} (Katalon Auto PS) is still in the chart`);
+  assert.ok(!seen.has(NO_TEAM), `${NO_TEAM} (no team at all) is still in the chart`);
+  // And the allow-list is a list, not a single name: the second team survives.
+  assert.ok(seen.has(SECOND_TEAM), `${SECOND_TEAM} (Katalon Auto Ruby) was dropped — the allow-list only matched one name`);
+});
+
+check('AN EPIC WHOSE ONLY COMPONENT HE EXCLUDED IS BEHIND NO BAR', async () => {
+  const { seen } = await everyKey();
+  assert.ok(!seen.has(EXCLUDED), `${EXCLUDED} (Technical_Works only) is still in the chart`);
+  // But an epic that merely TOUCHES an excluded component keeps its place —
+  // the exclusion drops epics, not the components of epics that have others.
+  assert.ok(seen.has(MIXED), `${MIXED} was dropped, and it still has PS_Alpha on it`);
+});
+
+check('THE BARS AND THE DRAWER DROP THEM TOGETHER, never one without the other', async () => {
+  // A bar that counted a banished epic while the drawer refused to list it
+  // would satisfy both checks above and still be wrong on screen.
+  const c = await chart();
+  const jul = c.body.periods.find(p => p.start === '2026-07-01');
+  const d = await drill('2026-07-01', '');
+  assert.strictEqual(d.body.keys.length, jul.total, 'July: the bar and its list');
+  // July is where all four live, so the numbers there are the ones that move.
+  assert.ok(jul.total > 0, 'July has to have something left in it');
+  for (const k of BANISHED) assert.ok(!d.body.keys.includes(k), `${k} in July's drawer`);
+});
+
+check('AND CLEARING THE SETTINGS PUTS EXACTLY THOSE EPICS BACK', async () => {
+  /* The check the others cannot make: it proves the chart is READING the
+     settings rather than happening to agree with them. Without it, a route
+     that dropped these three for some unrelated reason would look correct. */
+  const before = await everyKey();
+  try {
+    await put('/api/coverage-teams', { teams: [] });
+    await put('/api/excluded-components', { components: [] });
+    const after = await everyKey();
+    assert.strictEqual(after.total, before.total + BANISHED.length,
+      `chart total went ${before.total} → ${after.total}, expected +${BANISHED.length}`);
+    for (const k of BANISHED) assert.ok(after.seen.has(k), `${k} did not come back`);
+  } finally {
+    await put('/api/coverage-teams', { teams: COVERAGE_TEAMS });
+    await put('/api/excluded-components', { components: EXCLUDED_COMPONENTS });
+  }
+  const restored = await everyKey();
+  assert.strictEqual(restored.total, before.total, 'and putting them back removes them again');
 });
 
 /* ── what it does with requests the UI would never send ──────────────── */

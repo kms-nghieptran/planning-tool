@@ -270,6 +270,27 @@ function findSprint(plan, id, teamId = null) {
   return insights.currentSprint(sprints, new Date(), teamId) || sprints[sprints.length - 1];
 }
 
+/* THE EPICS THE BACKLOG CHART IS ABOUT.
+   The chart sits under the coverage headline on one screen, so it must count
+   the same epics that headline counts: his excluded components and his team
+   allow-list come out of the plan and apply here exactly as they apply there.
+   Before this, they did not — the headline read 4,141 while the bars below it
+   drew 4,144, and the drawer could list an epic the chart above it had
+   dropped. `coverage.scoped` is now the single definition of the population,
+   and the component SELECTION (the picker both sections share) narrows it
+   afterwards, the way a selection should. */
+function backlogEpics(snap, plan, scope, picked, byKey) {
+  const want = new Set(picked);
+  const { all, comps } = coverage.scoped(snap, {
+    scope,
+    exclude: plan.excludedComponents || [],
+    teams: plan.coverageTeams || [],
+  });
+  return all
+    .filter(i => !want.size || comps(i).some(c => want.has(c)))
+    .map(i => ({ key: i.key, components: i.components || [], transitions: byKey.get(i.key) || [] }));
+}
+
 /* ───────────────────────────── routes ───────────────────────────── */
 
 async function handleApi(req, res, url) {
@@ -574,17 +595,13 @@ async function handleApi(req, res, url) {
     const snap = store.getSnapshot();
     const scope = (cfg.metrics || {}).coverageScope || 'Epic';
     const picked = q.getAll('component').filter(Boolean);
-    const want = new Set(picked);
 
     /* The events come from the changelog table; the tool and the component
        come from the epic AS IT STANDS NOW. That is deliberate — re-tagging an
        epic in Jira should correct every past bar, not leave history stamped
        with a label that has since changed. */
     const byKey = covHistory.transitionsByKey();
-    const epics = Object.values(snap.issues || {})
-      .filter(i => String(i.issueType || '').trim().toLowerCase() === String(scope).toLowerCase())
-      .filter(i => !want.size || coverage.productComponents(i).some(c => want.has(c)))
-      .map(i => ({ key: i.key, components: i.components || [], transitions: byKey.get(i.key) || [] }));
+    const epics = backlogEpics(snap, store.getPlan(), scope, picked, byKey);
 
     return json(res, 200, {
       ...backlogProfile.profile(epics, {
@@ -612,16 +629,13 @@ async function handleApi(req, res, url) {
     const snap = store.getSnapshot();
     const scope = (cfg.metrics || {}).coverageScope || 'Epic';
     const picked = q.getAll('component').filter(Boolean);
-    const want = new Set(picked);
     const byKey = covHistory.transitionsByKey();
-    const issues = snap.issues || {};
 
-    // Built exactly as /api/reports/backlog builds it — same filter, same
-    // transitions — so the set being counted and the set being listed are one.
-    const epics = Object.values(issues)
-      .filter(i => String(i.issueType || '').trim().toLowerCase() === String(scope).toLowerCase())
-      .filter(i => !want.size || coverage.productComponents(i).some(c => want.has(c)))
-      .map(i => ({ key: i.key, components: i.components || [], transitions: byKey.get(i.key) || [] }));
+    // Built by the same function /api/reports/backlog calls, rather than by the
+    // same code written twice — so the set being counted and the set being
+    // listed cannot drift apart one edit at a time.
+    const epics = backlogEpics(snap, store.getPlan(), scope, picked, byKey);
+    const issues = snap.issues || {};
 
     /* The SAME profile call the chart made. The period boundaries therefore
        come from the chart's own arithmetic rather than being recomputed here,
@@ -683,7 +697,10 @@ async function handleApi(req, res, url) {
     // headline trend, which is the honest shape rather than a plausible sum.
     const picked = q.getAll('component').filter(Boolean);
     const component = picked.length === 1 ? picked[0] : null;
-    const moved = covHistory.movement(component, { scope, since });
+    // The same exclusions the component table above this section obeys, out of
+    // the plan — so a component he took off that table cannot reappear here as
+    // the biggest mover on the page.
+    const moved = covHistory.movement(component, { scope, since, exclude: plan.excludedComponents || [] });
     return json(res, 200, {
       ...moved,
       // The movers carry the priority he set on each component, from the same

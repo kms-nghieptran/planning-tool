@@ -238,6 +238,66 @@ check('and a component with nothing automatable at either end is left out', () =
   assert.deepStrictEqual(hist.movers().map(x => x.component), []);
 });
 
+check('A COMPONENT HE EXCLUDED GETS NO MOVER ROW', () => {
+  /* The two halves of one screen. The component table above this section drops
+     Technical_Works and KAT_Common_Maintenance on his instruction; a mover row
+     for one of them underneath it is the same page answering "which components
+     are we tracking" two different ways — and because movers are sorted by how
+     far they moved, an excluded suite lands at the TOP of the list it does not
+     belong on. */
+  reset();
+  const at = (d, rows) => rows.forEach(r => hist.record([r], { at: d }));
+  at('2026-08-01', [
+    { component: 'Technical_Works', automated: 1, ready: 9 },
+    { component: 'KAT_Common_Maintenance', automated: 9, ready: 1 },
+    { component: 'PS_Real', automated: 4, ready: 6 },
+  ]);
+  at('2026-09-01', [
+    { component: 'Technical_Works', automated: 9, ready: 1 },
+    { component: 'KAT_Common_Maintenance', automated: 1, ready: 9 },
+    { component: 'PS_Real', automated: 5, ready: 5 },
+  ]);
+
+  // Unfiltered, the two excluded suites moved 80 points each and outrank the
+  // real one — so this fixture cannot pass by accident.
+  assert.deepStrictEqual(hist.movers().map(x => x.component),
+    ['KAT_Common_Maintenance', 'Technical_Works', 'PS_Real'],
+    'without the exclusion they are the top two movers');
+
+  const kept = hist.movers({ exclude: ['Technical_Works', 'KAT_Common_Maintenance'] });
+  assert.deepStrictEqual(kept.map(x => x.component), ['PS_Real'],
+    'and with it, only the components he still tracks have rows');
+
+  // Names are matched the way every other component setting matches them.
+  assert.deepStrictEqual(hist.movers({ exclude: ['  technical_works  '] }).map(x => x.component),
+    ['KAT_Common_Maintenance', 'PS_Real'], 'case and padding are not a way to slip past the setting');
+});
+
+check('and movement() carries the exclusion through to its movers', () => {
+  // movers() is reachable directly too, so the route's path THROUGH movement()
+  // has to be checked rather than assumed to follow.
+  reset();
+  const at = (d, rows) => rows.forEach(r => hist.record([r], { at: d }));
+  at('2026-08-01', [
+    { component: 'Technical_Works', automated: 1, ready: 9 },
+    { component: 'PS_Real', automated: 4, ready: 6 },
+    { component: '', automated: 5, ready: 15 },
+  ]);
+  at('2026-09-01', [
+    { component: 'Technical_Works', automated: 9, ready: 1 },
+    { component: 'PS_Real', automated: 5, ready: 5 },
+    { component: '', automated: 14, ready: 6 },
+  ]);
+
+  const m = hist.movement(null, { exclude: ['Technical_Works'] });
+  assert.deepStrictEqual(m.movers.map(x => x.component), ['PS_Real']);
+  // The exclusion removes rows from a table; it does not remove the history
+  // underneath them. Un-excluding it later has to bring the curve back, not
+  // start it again from today.
+  assert.ok(hist.series('Technical_Works').length >= 2,
+    'the readings themselves are still there — an exclusion is a view, not a delete');
+});
+
 check('the window narrows the comparison to readings inside it', () => {
   reset();
   hist.record([{ component: '', automated: 1, ready: 9 }], { at: '2026-01-01' });
@@ -650,6 +710,17 @@ check('asking for no bucket returns nothing rather than everything', () => {
 check('and the routes are registered', () => {
   const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   assert.match(server, /p === '\/api\/reports\/coverage\/movement'/);
+
+  /* AND THE MOVEMENT ROUTE HANDS HIS EXCLUSIONS DOWN. The model honours them
+     (checked for real above); what the source has to show is that the route
+     actually passes them, and passes the ones out of the PLAN rather than an
+     empty list that would make the whole setting a no-op. Asserted here for
+     the same reason as the block below: a live check needs a populated
+     coverage_reading table behind a booted server, which is another suite. */
+  const mv = server.slice(server.indexOf("p === '/api/reports/coverage/movement'"));
+  const mvBody = mv.slice(0, mv.indexOf('\n  if (p ==='));
+  assert.match(mvBody, /covHistory\.movement\([^)]*exclude:\s*plan\.excludedComponents/,
+    'the movers table has to be scoped by the same setting the component table obeys');
   assert.match(server, /p === '\/api\/reports\/coverage\/backfill'/);
   assert.match(server, /searchWithHistory/, 'the backfill needs Jira\'s transition history to read');
   assert.match(server, /p === '\/api\/reports\/coverage\/moved'/, 'and the drill-in behind a driver tag');
@@ -1035,11 +1106,49 @@ const headOf = (html) => {
   return html.slice(at, end > at ? end : at + 1200);
 };
 
+/**
+ * The block of markup that starts at `cls` and ends where it closes.
+ *
+ * A slice to the first `</div>` stops at the first nested child, so a check
+ * asking "is the button inside the card" would answer no for any card with
+ * structure. This counts depth.
+ */
+const blockOf = (html, cls) => {
+  // By class, not by the whole attribute: the card is `class="card picker-card"`
+  // and an exact-attribute match would report the element as missing.
+  const m = new RegExp(`class="[^"]*\\b${cls}\\b[^"]*"`).exec(html);
+  assert.ok(m, `there is no .${cls} on the page`);
+  const i = m.index;
+  const start = html.lastIndexOf('<div', i);
+  let depth = 0, k = start;
+  for (;;) {
+    const open = html.indexOf('<div', k);
+    const close = html.indexOf('</div>', k);
+    if (close < 0) return html.slice(start);
+    if (open >= 0 && open < close) { depth++; k = open + 4; } else {
+      depth--; k = close + 6;
+      if (depth === 0) return html.slice(start, k);
+    }
+  }
+};
+
 check('THE SCREEN OFFERS AN EXPORT, and the export is a print', async () => {
   const html = (await renderCoverage(payloadFor(), movedFixture(), backlogDrawn())).html;
   assert.match(html, /data-act="export-pdf"/, 'no Export PDF control');
   assert.match(html, /Export PDF/, 'the control is not labelled');
-  assert.match(html, /class="section print-hide"/, 'the button would print as a dead control');
+
+  /* AND IT DOES NOT PRINT. This used to be asserted as "a `section print-hide`
+     exists somewhere on the page", which was true whether or not the button
+     was inside it — and stayed true when the button moved into the picker
+     card. The property is about the BUTTON, so it is checked on the button:
+     it sits inside a container, and that container is one the print
+     stylesheet hides. Both links, or the chain proves nothing. */
+  assert.match(blockOf(html, 'picker-card'), /data-act="export-pdf"/,
+    'the export button is not inside the picker card any more — say where it is and that print hides it');
+  const at = PRINT_CSS.print.indexOf('.picker-card');
+  assert.ok(at > 0, 'and the picker card has to be hidden in print');
+  assert.match(PRINT_CSS.print.slice(at, PRINT_CSS.print.indexOf('}', at)), /display: none/,
+    'or the button prints as a dead control');
 });
 
 check('CLICKING IT PRINTS', async () => {
@@ -1123,8 +1232,61 @@ check('THE TITLE BLOCK IS PRINT-ONLY, and the button is screen-only', async () =
   const html = (await renderCoverage(payloadFor(), movedFixture(), backlogDrawn())).html;
   assert.match(PRINT_CSS.all, /^\.print-only \{ display: none; \}/m, 'the title block would show on screen');
   assert.match(PRINT_CSS.print, /\.print-only \{ display: block !important/, 'and never show in print');
-  assert.match(html, /class="section print-hide"/);
+  // The mirror of it: `print-hide` still has to mean what it says, for the
+  // sections that use it. The export button's own case is checked above, on
+  // the button, rather than on the existence of a class somewhere in the page.
   assert.match(PRINT_CSS.print, /\.print-hide \{ display: none !important/);
+  assert.ok(!/class="section print-hide"[^>]*>\s*<div class="section-head">\s*<div class="spacer">/.test(html),
+    'an empty section-head holding one right-aligned button is a band of whitespace, not a layout');
+});
+
+/* ── THE TOP OF THE PAGE ──────────────────────────────────────────────
+   Nothing precedes the picker card but the breadcrumb, so every pixel above
+   the Component field is the first thing anyone sees on this report and the
+   last thing anyone would defend. Two separate faults put a lot of them
+   there: a section holding one right-aligned button, and a flex row that
+   bottom-aligned a short control against a note that had grown to four lines.
+   Both are layout, and both are checked as layout — on the rule, since the
+   suite has no browser to measure in. */
+
+check('NOTHING STANDS BETWEEN THE BREADCRUMB AND THE PICKER', async () => {
+  const html = (await renderCoverage(payloadFor(), movedFixture(), backlogDrawn())).html;
+  // The print-only title block does not render on screen, so the picker card
+  // has to be the first thing that does.
+  const firstSection = html.indexOf('<section');
+  const card = html.indexOf('picker-card');
+  assert.ok(card > 0, 'there is no picker card');
+  const before = html.slice(firstSection, card);
+  assert.ok(!/<button|<a class="btn/.test(before),
+    'a control above the picker is a band of whitespace with one thing in it — put it in the card');
+});
+
+check('AND THE COMPONENT FIELD IS AT THE TOP OF THE CARD, not floated to its bottom', () => {
+  /* The rule, because this is where the pixels came from. The card holds items
+     of very different heights — a two-line combo, a four-line note — and
+     `align-items: flex-end` banks the whole difference ABOVE the shorter one.
+     That was 98px of empty card sitting on top of the Component field. */
+  const rule = PRINT_CSS.all.slice(PRINT_CSS.all.indexOf('.picker-card {'));
+  const decl = rule.slice(0, rule.indexOf('}'));
+  assert.match(decl, /align-items:\s*flex-start/,
+    'flex-end puts the height difference above the first control on the page');
+  assert.ok(!/align-items:\s*(flex-end|center)/.test(decl));
+});
+
+check('and the selection chips line up with the box they describe', () => {
+  /* Top-aligning the row fixed the card and left the chips a label's height
+     above the input they belong to. The offset is the field's own head — its
+     label line box plus the gap under it — taken from a variable rather than
+     copied as a number, because a copied number drifts the first time the
+     label changes and nothing fails. */
+  assert.match(PRINT_CSS.all, /--field-head:\s*calc\(var\(--field-label-line\)\s*\+\s*var\(--field-gap\)\)/,
+    'the field head has to be derived from the label metrics, not stated twice');
+  assert.match(PRINT_CSS.all, /\.picker-card > \.picked \{[^}]*margin-top:\s*var\(--field-head\)/,
+    'the chips must offset by exactly that, so they sit on the input rather than above it');
+  // And the metrics it is derived from have to be real rather than inherited,
+  // or the calc is built on a number nobody set.
+  assert.match(PRINT_CSS.all, /\.field \{[^}]*gap:\s*var\(--field-gap\)/);
+  assert.match(PRINT_CSS.all, /\.field > span \{[^}]*line-height:\s*var\(--field-label-line\)/);
 });
 
 check('PRINT HIDES EVERY CONTROL ON THIS PAGE', async () => {

@@ -5,6 +5,16 @@
    wide-tracked all-caps eyebrows with the pink dot. */
 
 :root {
+  /* A LABELLED FIELD'S HEAD — the label's line box and the gap beneath it, so
+     everything above the input. Declared here rather than left implicit
+     because a sibling laid out BESIDE a field has to offset itself by exactly
+     this much to line up with the input instead of with the label, and a
+     number copied into that sibling drifts the first time the label changes.
+     `.field` below is the one place these are spent. */
+  --field-gap: 3px;
+  --field-label-line: 15px;
+  --field-head: calc(var(--field-label-line) + var(--field-gap));
+
   /* app-level roles mapped onto the KMS token layer */
   --app-bg:        var(--color-bg, #FFFFFF);
   --app-surface:   var(--color-bg-raised, #FFFFFF);
@@ -211,9 +221,17 @@ a { color: var(--brand-blue); }
 .crumbs { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--app-fg-3); min-width: 0; }
 .crumbs b { color: var(--app-fg); font-weight: var(--font-weight-medium, 500); }
 .crumbs .sep { opacity: .5; }
-.field { display: flex; flex-direction: column; gap: 3px; }
+/* A labelled control. `--field-head` is the height of everything above the
+   input — the label's line box plus the gap under it — declared rather than
+   left implicit, because a sibling laid out BESIDE a field has to offset
+   itself by exactly this much to line up with the input rather than with the
+   label. The component picker's selection chips are that sibling. */
+.field { display: flex; flex-direction: column; gap: var(--field-gap); }
 .field.inline { flex-direction: row; align-items: center; gap: 8px; }
-.field > span { font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--app-fg-3); }
+.field > span {
+  font-size: 10px; line-height: var(--field-label-line);
+  letter-spacing: 0.14em; text-transform: uppercase; color: var(--app-fg-3);
+}
 .menu-btn { display: none; }
 
 /* The collapse toggle. Hidden below 1000px, where the sidebar is already an
@@ -496,9 +514,21 @@ tr.unassigned-row td { border-top: 1px dashed var(--app-line); }
 .combo-note { padding: 8px 11px; font-size: 11.5px; border-top: 1px solid var(--app-line-soft); }
 /* The picker row: box, explanation, actions. Wraps rather than squashing the
    box, because a search field narrower than its own placeholder is useless. */
-.picker-card { display: flex; gap: 16px; align-items: flex-end; flex-wrap: wrap; }
+/* TOP-ALIGNED, not bottom-aligned. These items are different heights — a
+   two-line combo beside a note that is now four, since the two scope settings
+   started explaining themselves there — and `flex-end` puts the whole
+   difference ABOVE the shorter one. That was 98px of blank card sitting on top
+   of the Component field, the first control on the page. Aligning to the top
+   puts the slack underneath, where it reads as room rather than as something
+   missing. */
+.picker-card { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
 .picker-card > .combo { min-width: 340px; flex: 1 1 340px; }
 .picker-note { flex: 1 1 240px; min-width: 0; }
+/* The card's actions, held together at its right edge. `margin-left: auto`
+   rather than a spacer element: when the card wraps at narrow widths the auto
+   margin collapses and the buttons sit under the note instead of being pushed
+   off on a line of their own. */
+.picker-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-left: auto; }
 
 /* One tool's status table inside the side-by-side breakdown.
    `min-width: 0` is the load-bearing part: without it a flex item refuses to
@@ -621,6 +651,11 @@ a.issue-key:focus-visible { outline: 2px solid var(--brand-blue); outline-offset
 /* The chosen components, beside the picker that adds them. A token field: the
    chips are the selection, the control above is only the way in. */
 .picked { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+/* The chips answer "what am I looking at" for the box beside them, so they sit
+   level with that box — not with the card's top edge, which is where a
+   top-aligned flex row would otherwise put them, a label's height above the
+   input they belong to. */
+.picker-card > .picked { margin-top: var(--field-head); }
 .picked-chip { display: inline-flex; align-items: center; gap: 6px; padding-right: 4px; }
 .picked-x {
   border: none; background: transparent; cursor: pointer; padding: 0 3px;
@@ -841,6 +876,52 @@ input[type="file"] { padding: 5px 8px; font-size: 12px; }
   border: 1px solid var(--app-line); background: transparent; color: var(--app-fg-2); cursor: pointer;
 }
 .chip.active { background: var(--brand-blue); border-color: var(--brand-blue); color: #fff; }
+/* A count inside a selected chip was inheriting the grey it has on white, and
+   grey on brand blue is the one combination on this page that fails contrast.
+   It is also the number the reader came for. */
+.chip.active .muted { color: rgba(255, 255, 255, .78); }
+
+/* ── A MENU OF VALUES, WITH THEIR COUNTS ──────────────────────────────
+   For picking an exact string out of the data — Jira Team values, and any
+   list like them. Three things it has to do that a row of pills does not:
+
+   ALIGN THE NUMBERS. The counts are the reason to look: "Katalon Auto PS 16"
+   next to "Katalon PSA (Titan) 1,529" is the fastest way to see you picked the
+   wrong one of two similar names. Ragged pills put every number in a different
+   place and the comparison has to be made one pair at a time.
+
+   KEEP EACH NAME ON ONE LINE. Wrapped inside a pill, "Katalon Auto Malphite
+   994" breaks after the name and orphans the count on its own line under it,
+   which is what it did here.
+
+   FILL THE WIDTH IT IS GIVEN. auto-fill rather than a fixed column count, so
+   the same markup is one column in a drawer and five in a full-width card. */
+.value-panel {
+  margin-top: 10px; padding: 11px 13px 12px;
+  border-radius: var(--radius-sm); background: var(--app-subtle);
+}
+.value-menu {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(215px, 1fr)); gap: 6px;
+}
+/* What the selection adds up to, kept with the buttons that change it. */
+.value-total {
+  margin-top: 11px; padding-top: 9px; border-top: 1px solid var(--app-line-soft);
+  font-size: 11.5px; color: var(--app-fg-2);
+}
+.value-total .warn-inline {
+  margin-left: 10px; padding-left: 10px; border-left: 1px solid var(--app-line);
+  color: var(--app-fg-3);
+}
+.value-menu .chip {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  border-radius: var(--radius-sm); padding: 7px 11px; text-align: left; min-width: 0;
+}
+/* The name truncates; the count never does — a clipped "1,5…" is worse than no
+   number at all, and the full name is on the button's own title. */
+.value-menu .chip > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.value-menu .chip > .muted { flex: none; font-variant-numeric: tabular-nums; }
+.value-menu .chip[disabled] { cursor: default; opacity: .62; border-style: dashed; }
+.value-menu .chip:not([disabled]):hover { border-color: var(--brand-blue); }
 
 .empty { padding: 36px; text-align: center; color: var(--app-fg-3); font-size: 13px; }
 
@@ -860,7 +941,13 @@ input[type="file"] { padding: 5px 8px; font-size: 12px; }
   .card.wide > .setting-row, .drawer-panel .setting-row {
     grid-template-columns: minmax(0, 170px) minmax(0, 1fr); gap: 14px; align-items: center;
   }
-  .card.wide > .setting-row .hint, .drawer-panel .setting-row .hint { grid-column: 2; }
+  /* Everything after the label belongs in the control column. Naming only the
+     hint left the next block added to a row — the team-value menu — to be
+     auto-placed into the 170px LABEL column, where it wrapped into a narrow
+     stack beside 1,200px of empty card. `> *:not(label)` is the rule that was
+     meant, and it cannot be got wrong again by adding a third child. */
+  .card.wide > .setting-row > *:not(label),
+  .drawer-panel .setting-row > *:not(label) { grid-column: 2; }
   /* Rows already sitting in a multi-column grid stay stacked — a label beside a
      control inside a 1/3-width column is the same overflow bug in miniature. */
   .card.wide .grid-2 .setting-row, .card.wide .grid-3 .setting-row {

@@ -366,19 +366,51 @@ const SettingsView = (() => {
     if (!values.length) return '';
     const chosen = new Set((s.plan.coverageTeams || []).map(v => String(v).trim().toLowerCase()));
     const on = (name) => chosen.has(String(name).trim().toLowerCase());
+    const noun = scopeNoun(s).toLowerCase();
+
+    /* THE RUNNING TOTAL, because the question underneath every click here is
+       "how many am I keeping?" and it was previously only answerable by
+       saving, walking to Overall Coverage and reading the headline. An epic is
+       on at most one team, so these counts are a partition and summing the
+       chosen ones is exact rather than an estimate.
+
+       Nothing chosen means no allow-list, which counts EVERYTHING. That state
+       gets its own sentence below rather than a number, because the sum of the
+       selected values is zero there and "0 of 4,147 counted" is the exact
+       opposite of what an empty list does. `kept` is only ever read inside the
+       other branch, so it is not given a fallback that would never be used. */
+    const total = values.reduce((a, v) => a + (v.count || 0), 0);
+    const picked = values.filter(v => on(v.name));
+    const kept = picked.reduce((a, v) => a + (v.count || 0), 0);
+    const pct = total ? Math.round((kept / total) * 100) : 0;
+    const unassigned = values.find(v => v.unassigned);
+
     return `
-      <div style="margin-top:10px;padding:10px 12px;border-radius:var(--radius-sm);background:var(--app-subtle)">
+      <div class="value-panel">
         <div class="eyebrow"><i></i>Team values in your data</div>
-        <div class="muted" style="font-size:11.5px;margin:6px 0 9px">
-          As Jira spells them, with ${UI.esc(scopeNoun(s).toLowerCase())} counts. Click to add —
+        <div class="muted" style="font-size:11.5px;margin:6px 0 10px">
+          As Jira spells them, with ${UI.esc(noun)} counts. Click to add or remove —
           these are the exact strings, which are often not the board names.
         </div>
-        <div style="display:flex;gap:6px;flex-wrap:wrap">
+        <div class="value-menu">
           ${values.map(v => `
             <button class="chip${on(v.name) ? ' active' : ''}" data-add-team="${UI.esc(v.name)}"
-              ${v.unassigned ? 'disabled title="Epics with no Team field — they cannot be allowed by name. An allow-list always excludes them."' : `title="${on(v.name) ? 'Already counted' : `Add ${UI.esc(v.name)}`}"`}>
-              ${UI.esc(v.name)} <span class="muted">${UI.int(v.count)}</span>
+              aria-pressed="${on(v.name) ? 'true' : 'false'}"
+              ${v.unassigned
+                ? `disabled title="${UI.esc(UI.int(v.count))} ${UI.esc(noun)}s with no Team field — they cannot be allowed by name. An allow-list always excludes them."`
+                : `title="${UI.esc(v.name)} — ${UI.esc(UI.int(v.count))} ${UI.esc(noun)}s. ${on(v.name) ? 'Click to stop counting it.' : 'Click to count it.'}"`}>
+              <span>${UI.esc(v.name)}</span> <span class="muted">${UI.int(v.count)}</span>
             </button>`).join('')}
+        </div>
+        <div class="value-total">
+          ${chosen.size
+            ? `<strong>${UI.int(kept)}</strong> of ${UI.int(total)} ${UI.esc(noun)}s counted
+               <span class="muted">(${pct}%)</span> — ${picked.length} of ${values.length} values`
+            : `<strong>All ${UI.int(total)} ${UI.esc(noun)}s counted</strong>
+               <span class="muted">— no allow-list, so every value above is in</span>`}
+          ${chosen.size && unassigned && unassigned.count
+            ? `<span class="warn-inline">${UI.int(unassigned.count)} of those dropped have no team at all</span>`
+            : ''}
         </div>
       </div>`;
   }
