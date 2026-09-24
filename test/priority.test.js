@@ -226,8 +226,13 @@ check('THE COLUMN IS EDITABLE IN EXACTLY ONE PLACE', () => {
 check('the cell carries a sort value, because a <select> has no text to sort on', () => {
   // textContent on a cell holding a dropdown returns every option concatenated,
   // so without this the column sorts by a string nobody can see.
-  assert.match(COVERAGE_VIEW, /data-sort-value="\$\{r\.priority == null \? 99 : r\.priority\}"/);
-  assert.match(SPRINT_VIEW, /data-sort-value="\$\{r\.priority == null \? 99 : r\.priority\}"/);
+  // UNSET_SORT rather than 99 — an em-dash, which `UI.sortable` pins last in
+  // both directions. 99 only pinned it last going up; going down it was the
+  // biggest number in the column and led the list.
+  for (const [name, src] of [['report-coverage.js', COVERAGE_VIEW], ['sprint.js', SPRINT_VIEW]]) {
+    assert.match(src, /data-sort-value="\$\{r\.priority == null \? UNSET_SORT : r\.priority\}"/, name);
+    assert.match(src, /const UNSET_SORT = '—';/, `${name} must define what it sorts an unset priority as`);
+  }
 });
 
 check('and a failed save puts the dropdown back rather than showing a level nobody stored', () => {

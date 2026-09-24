@@ -569,5 +569,155 @@ check('reconcileAll returns one summary covering boards, sprints and people', ()
   assert.ok(rep.index.ruby.backlogSource);
 });
 
+/* ── someone Jira knows, on a team they have no work in ──────────────────
+   HIS CASE, EXACTLY. Diep Tu is on three of his teams. On two they arrived
+   from a sync and carry an accountId; on Titan they were typed into the box
+   and carried none — so the row read "manual" and Jira had, as far as the tool
+   was concerned, never heard of them.
+
+   Why it could never heal is the interesting part. All 108 of Diep Tu's issues
+   sit on the TrueTest board; none are in any of Titan's 44 sprints. The
+   linking step only ever looked at people who had worked in THIS team's
+   sprints, so Titan's list would never contain them, however many syncs ran.
+
+   `Luis Romero` is the fixture's equivalent: he works only in Titan's sprints,
+   so adding him to Ruby reproduces the situation precisely. */
+
+const withDirectory = () => {
+  const snap = withIssues();
+  // What `snapshot.people` is: the whole Jira directory, not one team's.
+  snap.people = [
+    { name: 'Thao Dang', accountId: 'acc-thao' },
+    { name: 'Hy Nguyen', accountId: 'acc-hy' },
+    { name: 'Nam Hoang', accountId: 'acc-nam' },
+    { name: 'Luis Romero', accountId: 'acc-luis' },
+  ];
+  return snap;
+};
+const synced = (plan, snap) => {
+  r.reconcileSprints(plan, snap);
+  snap.byTeam = r.buildTeamIndex(plan, snap);
+  return snap;
+};
+
+check('A TYPED NAME THE TOOL ALREADY KNOWS IS LINKED, not stored as a stranger', () => {
+  const plan = basePlan();
+  const snap = withDirectory();
+  r.addMember(plan, 'ruby', { name: 'Luis Romero' }, { directory: snap.people });
+  const m = plan.teams[0].members.find(x => x.name === 'Luis Romero');
+  assert.strictEqual(m.jiraAccountId, 'acc-luis', 'the directory had this name against a real account');
+  assert.strictEqual(m.source, 'jira', 'and a row Jira identified is not something the user invented');
+});
+
+check('the match is on the WHOLE directory, not this team\'s sprint people', () => {
+  // Luis has never worked in a Ruby sprint. That is the case that could not
+  // heal before, and the one his report is about.
+  const plan = basePlan();
+  const snap = synced(basePlan(), withDirectory());
+  assert.ok(!(r.peopleByTeam(plan, snap).ruby || []).some(p => p.name === 'Luis Romero'),
+    'the fixture must not accidentally give Luis Ruby work');
+  r.addMember(plan, 'ruby', { name: 'Luis Romero' }, { directory: snap.people });
+  assert.strictEqual(plan.teams[0].members.find(x => x.name === 'Luis Romero').jiraAccountId, 'acc-luis');
+});
+
+check('AND AN ALREADY-TYPED ROW HEALS ON THE NEXT SYNC', () => {
+  // His existing data: the row is already there, unlinked. The fix has to
+  // repair it without anyone deleting and re-adding the person.
+  const plan = basePlan();
+  r.addMember(plan, 'ruby', { name: 'Luis Romero' });            // no directory — the old path
+  const before = plan.teams[0].members.find(x => x.name === 'Luis Romero');
+  assert.strictEqual(before.jiraAccountId, null, 'this is the state on disk today');
+  assert.strictEqual(before.source, 'manual');
+
+  const snap = synced(plan, withDirectory());
+  const rep = r.reconcileMembers(plan, snap, { autoAdd: false });
+  const after = plan.teams[0].members.find(x => x.name === 'Luis Romero');
+  assert.strictEqual(after.jiraAccountId, 'acc-luis', 'a sync must repair it');
+  assert.strictEqual(after.source, 'jira', 'and the source has to follow the link');
+  assert.ok(rep.linked.some(l => l.name === 'Luis Romero'), 'and the sync report should say so');
+});
+
+check('THE SOURCE FOLLOWS THE LINK — an accountId and "manual" cannot coexist', () => {
+  // The invariant `addMember` states in its own comment, which the linking
+  // step used to break: it set the accountId and left the label alone.
+  const plan = basePlan();
+  const snap = synced(plan, withDirectory());
+  r.reconcileMembers(plan, snap);
+  for (const team of plan.teams) {
+    for (const m of team.members || []) {
+      if (m.jiraAccountId) assert.strictEqual(m.source, 'jira', `${m.name} carries an accountId but reads as ${m.source}`);
+      if (m.source === 'jira') assert.ok(m.jiraAccountId, `${m.name} claims Jira supplied them but has no account`);
+    }
+  }
+});
+
+check('a genuinely unknown name is still manual, and still unlinked', () => {
+  // The fix must not make every typed name claim to be from Jira.
+  const plan = basePlan();
+  const snap = withDirectory();
+  r.addMember(plan, 'ruby', { name: 'Contractor With No Jira Account' }, { directory: snap.people });
+  const m = plan.teams[0].members.find(x => x.name === 'Contractor With No Jira Account');
+  assert.strictEqual(m.jiraAccountId, null);
+  assert.strictEqual(m.source, 'manual');
+});
+
+check('AN AMBIGUOUS NAME LINKS TO NEITHER of them', () => {
+  // Two humans sharing a display name is rare and real. Picking either attaches
+  // this row — and everything ever credited to it — to a coin toss.
+  const plan = basePlan();
+  const directory = [
+    { name: 'Minh Nguyen', accountId: 'acc-minh-1' },
+    { name: 'Minh Nguyen', accountId: 'acc-minh-2' },
+  ];
+  r.addMember(plan, 'ruby', { name: 'Minh Nguyen' }, { directory });
+  const m = plan.teams[0].members.find(x => x.name === 'Minh Nguyen');
+  assert.strictEqual(m.jiraAccountId, null, 'a guess here is worse than no link');
+  assert.strictEqual(m.source, 'manual');
+});
+
+check('and neither does an ambiguous name link during a sync', () => {
+  const plan = basePlan();
+  r.addMember(plan, 'ruby', { name: 'Minh Nguyen' });
+  const snap = synced(plan, withDirectory());
+  snap.people = [...snap.people, { name: 'Minh Nguyen', accountId: 'a1' }, { name: 'Minh Nguyen', accountId: 'a2' }];
+  r.reconcileMembers(plan, snap, { autoAdd: false });
+  assert.strictEqual(plan.teams[0].members.find(x => x.name === 'Minh Nguyen').jiraAccountId, null);
+});
+
+check('an explicit accountId still wins over the directory', () => {
+  // Picking someone off the discovered list is the strongest signal there is.
+  const plan = basePlan();
+  r.addMember(plan, 'ruby', { name: 'Luis Romero', accountId: 'acc-explicit' }, {
+    directory: [{ name: 'Luis Romero', accountId: 'acc-luis' }],
+  });
+  assert.strictEqual(plan.teams[0].members.find(x => x.name === 'Luis Romero').jiraAccountId, 'acc-explicit');
+});
+
+check('a missing directory is harmless — the old behaviour, unchanged', () => {
+  const plan = basePlan();
+  assert.doesNotThrow(() => r.addMember(plan, 'ruby', { name: 'Someone New' }));
+  assert.doesNotThrow(() => r.addMember(plan, 'ruby', { name: 'Someone Else' }, { directory: null }));
+  const snap = withIssues();                 // no `people` key at all
+  assert.doesNotThrow(() => r.reconcileMembers(plan, synced(plan, snap), { autoAdd: false }));
+});
+
+check('LINKED-BUT-IDLE IS REPORTED DIFFERENTLY FROM NOT-MATCHED-AT-ALL', () => {
+  /* After the fix Luis is linked on Ruby and still has no Ruby work — which is
+     true and fine. The screen used to call every such person a display-name
+     mismatch and tell the reader to add a Jira alias; for someone already
+     linked by accountId that is advice to fix something that is not broken. */
+  const plan = basePlan();
+  const snap = withDirectory();
+  r.addMember(plan, 'ruby', { name: 'Luis Romero' }, { directory: snap.people });
+  r.addMember(plan, 'ruby', { name: 'Ghost Person' });
+  synced(plan, snap);
+  const rep = r.reconcileMembers(plan, snap, { autoAdd: false });
+  const by = Object.fromEntries((rep.dormant.ruby || []).map(d => [d.name, d]));
+  assert.ok(by['Luis Romero'], 'Luis has no Ruby work, so he is dormant here');
+  assert.strictEqual(by['Luis Romero'].linked, true, 'but Jira knows exactly who he is');
+  assert.ok(by['Ghost Person'], 'and someone Jira has never seen is dormant too');
+  assert.strictEqual(by['Ghost Person'].linked, false, 'for an entirely different reason');
+});
+
 console.log(`\n${passed} passed, ${failed} failed\n`);
 process.exit(failed ? 1 : 0);

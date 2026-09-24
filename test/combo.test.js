@@ -101,6 +101,11 @@ function node(tag, attrStr = '') {
     matches(sel) {
       if (sel.startsWith('#')) return el.id === sel.slice(1);
       if (sel.startsWith('.')) return classes.has(sel.slice(1));
+      // `[attr]` and `[attr="value"]` — how the tag list finds its own box and
+      // its remove buttons. Added when that control arrived; the picker above
+      // only ever needed ids, classes and tags.
+      const at = /^\[([^\]=]+)(?:="([^"]*)")?\]$/.exec(sel);
+      if (at) return at[2] == null ? attrs[at[1]] != null : attrs[at[1]] === at[2];
       return el.tagName === sel.toUpperCase();
     },
     querySelectorAll(sel) {
@@ -327,6 +332,157 @@ check('and so does the sprint box floor', () => {
     'the sprint box rule neither outranks nor outlasts the generic input rule, so it will not apply');
   const rule = css.slice(at, css.indexOf('}', at));
   assert.ok(!/min-width:\s*(2[1-9]\d|[3-9]\d\d)px/.test(rule), 'a wide fixed minimum defeats the point of autosizing');
+});
+
+/* ── the tag list ────────────────────────────────────────────────────────
+   Sprint keywords and Jira Team values are LISTS that were edited as a
+   comma-joined string, which hid three things at once: that more than one was
+   allowed, which separator to use, and that a trailing comma stored an empty
+   keyword matching every sprint in the instance.
+
+   The server is what guarantees the data (see keywords.test.js and
+   sprint-api.test.js). These checks are about the control: that it shows a
+   list as a list, and that everything typed into it actually arrives. */
+
+function taglist(values) {
+  const root = parse(`<div>${UI.tagList({ name: 'kw:titan', values, placeholder: 'ruby', label: 'Add one' })}</div>`);
+  const saved = [];
+  // Copied into an array of THIS realm. `ui.js` runs in a vm context, so the
+  // lists it builds have a different Array.prototype and `deepStrictEqual`
+  // rejects them for the prototype alone, with contents that read as identical.
+  UI.wireTagList(root, 'kw:titan', (next) => saved.push([...next]));
+  const box = root.querySelector('[data-taglist="kw:titan"]');
+  const input = root.querySelector('[data-taginput="kw:titan"]');
+  return {
+    root, box, input, saved,
+    chips: () => box.querySelectorAll('.tagval-x').map(b => b.dataset.drop),
+    last: () => saved[saved.length - 1],
+    type(v) { input.value = v; return this; },
+    enter() { input.fire('keydown', { key: 'Enter' }); return this; },
+    blur() { input.fire('blur'); return this; },
+    back() { input.fire('keydown', { key: 'Backspace' }); return this; },
+    remove(v) {
+      const x = box.querySelectorAll('.tagval-x').find(b => b.dataset.drop === v);
+      assert.ok(x, `no chip for "${v}"`);
+      box.fire('click', { target: x });
+      return this;
+    },
+  };
+}
+
+check('EVERY VALUE IS ITS OWN CHIP, so a list looks like a list', () => {
+  // The whole point: a comma-joined string in a text box reads as one value.
+  const t = taglist(['ruby', 'TT Week']);
+  assert.deepStrictEqual(t.chips(), ['ruby', 'TT Week']);
+  assert.ok(t.input, 'and there is somewhere to add another');
+});
+
+check('an empty list still offers the add box, with the placeholder', () => {
+  const t = taglist([]);
+  assert.deepStrictEqual(t.chips(), []);
+  assert.strictEqual(t.input.getAttribute('placeholder'), 'ruby');
+});
+
+check('and once there is one, the placeholder says another is allowed', () => {
+  // The discoverability fix, in the one place a reader is looking.
+  assert.strictEqual(taglist(['ruby']).input.getAttribute('placeholder'), 'add another…');
+});
+
+check('ENTER ADDS WHAT WAS TYPED, to the list that is already there', () => {
+  const t = taglist(['ruby']).type('titan').enter();
+  assert.deepStrictEqual(t.last(), ['ruby', 'titan']);
+  assert.strictEqual(t.input.value, '', 'and the box is cleared for the next one');
+});
+
+check('BLUR COMMITS TOO — clicking away must not lose what was typed', () => {
+  // The obvious way to use this is to type and then click something else.
+  const t = taglist(['ruby']).type('titan').blur();
+  assert.deepStrictEqual(t.last(), ['ruby', 'titan']);
+});
+
+check('one typed entry can be several, split the way the server splits', () => {
+  assert.deepStrictEqual(taglist([]).type('ruby, titan; malphite').enter().last(),
+    ['ruby', 'titan', 'malphite']);
+});
+
+check('and a space is not a separator here either', () => {
+  assert.deepStrictEqual(taglist([]).type('TT Week').enter().last(), ['TT Week']);
+});
+
+check('AN EMPTY BOX SAVES NOTHING — blur must not fire a pointless write', () => {
+  // Every commit is a PUT and a re-render. Tabbing through the field would
+  // otherwise save the team on the way past.
+  const t = taglist(['ruby']).blur();
+  assert.deepStrictEqual(t.saved, [], 'no save at all');
+  t.type('   ').enter();
+  assert.deepStrictEqual(t.saved, [], 'and whitespace is nothing');
+});
+
+check('REMOVING A CHIP REMOVES EXACTLY IT', () => {
+  const t = taglist(['ruby', 'titan', 'malphite']).remove('titan');
+  assert.deepStrictEqual(t.last(), ['ruby', 'malphite']);
+});
+
+check('and the last one can be removed, leaving an empty list', () => {
+  // The rule must not become "you can never clear this field".
+  assert.deepStrictEqual(taglist(['ruby']).remove('ruby').last(), []);
+});
+
+check('backspace in an EMPTY box removes the last chip', () => {
+  assert.deepStrictEqual(taglist(['ruby', 'titan']).back().last(), ['ruby']);
+});
+
+check('but backspace while typing does not — that is just editing', () => {
+  const t = taglist(['ruby', 'titan']).type('mal').back();
+  assert.deepStrictEqual(t.saved, [], 'a chip vanishing mid-word is data loss');
+});
+
+check('and backspace with nothing to remove does nothing', () => {
+  assert.deepStrictEqual(taglist([]).back().saved, []);
+});
+
+check('a repeat is not added twice, whatever its case', () => {
+  assert.deepStrictEqual(taglist(['Ruby']).type('ruby').enter().last(), ['Ruby'],
+    'the first spelling stays — matching is case-insensitive downstream');
+  assert.deepStrictEqual(taglist(['ruby']).type('titan, TITAN').enter().last(), ['ruby', 'titan']);
+});
+
+check('A VALUE WITH MARKUP IN IT CANNOT ESCAPE INTO THE PAGE', () => {
+  // These come from plan.json, which a person edits by hand.
+  const html = UI.tagList({ name: 'kw:x', values: ['<img src=x onerror=alert(1)>'], placeholder: '' });
+  assert.ok(!html.includes('<img'), 'the chip label is not escaped');
+  assert.ok(html.includes('&lt;img'), 'and it is still shown, as text');
+});
+
+check('a quote in a value cannot break out of the remove button', () => {
+  // `data-drop="..."` is how a chip identifies itself to the click handler.
+  const html = UI.tagList({ name: 'kw:x', values: ['say "hi"'], placeholder: '' });
+  assert.ok(!/data-drop="say "hi""/.test(html), 'the attribute is unquoted by its own value');
+  assert.ok(html.includes('&quot;'), 'quotes are escaped');
+});
+
+check('the add box is a labelled control, not an anonymous input', () => {
+  const html = UI.tagList({ name: 'kw:x', values: [], placeholder: 'ruby', label: 'Add a keyword for Titan' });
+  assert.ok(html.includes('aria-label="Add a keyword for Titan"'), 'a screen reader hears nothing');
+  assert.ok(/aria-label="Remove ruby"/.test(UI.tagList({ name: 'k', values: ['ruby'] })),
+    'and each × has to say what it removes');
+});
+
+check('wiring a name that is not on the page is harmless', () => {
+  // Settings wires one per team, on a page that may have re-rendered.
+  const root = parse('<div></div>');
+  assert.doesNotThrow(() => UI.wireTagList(root, 'kw:nobody', () => { throw new Error('called'); }));
+});
+
+check('THE CONTROL LOOKS LIKE THE FIELDS BESIDE IT', () => {
+  // It replaces a text input in a row of three. Borrowing the input chrome is
+  // what stops one control in that row reading as a different kind of thing.
+  const at = css.indexOf('.taglist {');
+  assert.ok(at > 0, 'the tag list has no styling at all');
+  const rule = css.slice(at, css.indexOf('}', at));
+  assert.match(rule, /border: 1px solid var\(--app-line\)/, 'no border — it will not read as a field');
+  assert.match(rule, /flex-wrap: wrap/, 'without wrapping, a sixth keyword is off the edge of the card');
+  assert.ok(css.includes('.taglist:focus-within'), 'focus has to be visible on the box, not just the inner input');
 });
 
 /* ── run ──────────────────────────────────────────────────────────────── */

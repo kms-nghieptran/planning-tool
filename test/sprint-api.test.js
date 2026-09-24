@@ -461,6 +461,83 @@ check('THE SPRINT API ANSWERS WITH AN EPIC FOR BOTH KINDS OF WORK', async () => 
     'an item with neither reports no epic rather than borrowing one');
 });
 
+/* ── adding someone the tool already knows ─────────────────────────────── */
+
+check('TYPING A NAME JIRA KNOWS LINKS IT, over HTTP', async () => {
+  /* The path he actually used: the add box, a name typed by hand, no
+     accountId in the request. `Brand New Person` is in the fixture's Jira
+     directory with `acc-new` and is on nobody's roster — which is Diep Tu's
+     situation, where the tool held the account all along and stored null. */
+  const r = await call('POST', '/api/team/member', { teamId: 'titan', name: 'Brand New Person' });
+  assert.strictEqual(r.status, 200);
+  assert.strictEqual(r.body.member.jiraAccountId, 'acc-new', 'the route never handed over the directory');
+  assert.strictEqual(r.body.member.source, 'jira');
+});
+
+check('and a name it does not know is still manual', async () => {
+  const r = await call('POST', '/api/team/member', { teamId: 'titan', name: 'Someone Entirely New' });
+  assert.strictEqual(r.status, 200);
+  assert.strictEqual(r.body.member.jiraAccountId, null);
+  assert.strictEqual(r.body.member.source, 'manual');
+});
+
+/* ── keyword lists, as the SERVER stores them ────────────────────────────
+   The chips editor filters what it sends, but a tab left open since last week
+   still has live controls and `fetch` from a console never saw the UI at all.
+   An empty keyword matches every sprint in the instance, so the rule that
+   there is never one has to hold here, not in the browser. */
+
+const putTeam = (patch) => call('PUT', '/api/team', { teamId: 'titan', ...patch });
+
+check('A TRAILING COMMA CANNOT CREATE A KEYWORD THAT MATCHES EVERY SPRINT', async () => {
+  const r = await putTeam({ sprintKeywords: ['ruby', ''] });
+  assert.strictEqual(r.status, 200);
+  assert.deepStrictEqual(r.body.team.sprintKeywords, ['ruby']);
+  assert.deepStrictEqual(r.body.notes, ['1 empty entry was ignored'], 'and the save says what it dropped');
+});
+
+check('a raw string is parsed rather than stored as one', async () => {
+  // Nothing stops a caller sending the string the old UI built.
+  const r = await putTeam({ sprintKeywords: 'ruby, titan; malphite' });
+  assert.deepStrictEqual(r.body.team.sprintKeywords, ['ruby', 'titan', 'malphite']);
+});
+
+check('and a string would otherwise break every read of it', async () => {
+  // `'ruby'.some` is not a function — the stored shape has to be an array or
+  // the next read throws, which is a worse failure than a wrong match.
+  const r = await putTeam({ sprintKeywords: 'ruby' });
+  assert.ok(Array.isArray(r.body.team.sprintKeywords));
+  const after = await call('GET', '/api/sprints?team=titan');
+  assert.strictEqual(after.status, 200, 'reading sprints after the save must not throw');
+});
+
+check('duplicates collapse, so the list cannot grow by re-saving', async () => {
+  const r = await putTeam({ sprintKeywords: ['Ruby', 'ruby', 'RUBY', 'titan'] });
+  assert.deepStrictEqual(r.body.team.sprintKeywords, ['Ruby', 'titan']);
+});
+
+check('the same rule covers Jira Team field values', async () => {
+  // Same control, same failure — an empty value there claims every backlog item.
+  const r = await putTeam({ jiraTeams: ['Katalon Auto Titan', '', '  '] });
+  assert.deepStrictEqual(r.body.team.jiraTeams, ['Katalon Auto Titan']);
+});
+
+check('CLEARING THE FIELD STILL CLEARS IT', async () => {
+  // The rule must not become "you can never remove the last keyword".
+  const r = await putTeam({ sprintKeywords: [] });
+  assert.deepStrictEqual(r.body.team.sprintKeywords, []);
+  assert.deepStrictEqual(r.body.notes, [], 'and emptying a field is not an error');
+  const r2 = await putTeam({ sprintKeywords: ['titan'] });
+  assert.deepStrictEqual(r2.body.team.sprintKeywords, ['titan'], 'and it can be set again');
+});
+
+check('a field that was not sent is left alone', async () => {
+  await putTeam({ sprintKeywords: ['titan'], jiraTeams: ['Katalon Auto Titan'] });
+  const r = await putTeam({ name: 'Katalon Titan' });
+  assert.deepStrictEqual(r.body.team.sprintKeywords, ['titan'], 'saving the name must not wipe the keywords');
+  assert.deepStrictEqual(r.body.team.jiraTeams, ['Katalon Auto Titan']);
+});
+
 /* ── run ───────────────────────────────────────────────────────────── */
 
 server.listen(0, '127.0.0.1', async () => {

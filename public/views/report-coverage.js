@@ -43,9 +43,28 @@ const CoverageReport = (() => {
   // reader asks at once, and one control driving both would mean never being
   // able to look at them on their scales at the same time.
   let grain = 'month';
+  /* How many periods each window asks for. "all" is absent on purpose: it is
+     not a count, it is "back to the first event", and only the server knows
+     when that was. Sending no `periods` is what tells it so. */
   const PERIODS = { week: 13, month: 12, year: 3 };
 
   const tone = (p) => (p >= 80 ? 'good' : p < 50 ? 'over' : 'under');
+
+  /**
+   * WHAT AN UNSET PRIORITY SORTS AS.
+   *
+   * An em-dash, because `UI.sortable` treats that as "nothing here" and pins it
+   * to the bottom in BOTH directions. It used to be 99, which only works one
+   * way round: sorted descending, 99 is the largest number in the column, so
+   * every component nobody had judged rose to the top above the P1s. The cell's
+   * own comment already claimed it sorted last whichever way the column
+   * pointed — it did not, and now the grid opens on this column, the second
+   * click is where anyone would have found out.
+   *
+   * "Nobody decided" is not the bottom of the scale, and it is not the top of
+   * it either. It is not on the scale.
+   */
+  const UNSET_SORT = '—';
 
   async function render(state, mount) {
     const qs = selected.length
@@ -56,7 +75,8 @@ const CoverageReport = (() => {
     const [d, moved, backlog] = await Promise.all([
       UI.api(`/api/reports/coverage${qs}`),
       UI.api(`/api/reports/coverage/movement${qs}${qs ? '&' : '?'}days=${days}`).catch(() => null),
-      UI.api(`/api/reports/backlog${qs}${qs ? '&' : '?'}grain=${grain}&periods=${PERIODS[grain]}`).catch(() => null),
+      UI.api(`/api/reports/backlog${qs}${qs ? '&' : '?'}grain=${grain}`
+        + (PERIODS[grain] ? `&periods=${PERIODS[grain]}` : '')).catch(() => null),
     ]);
 
     if (!d.total && !d.components.length) {
@@ -77,6 +97,16 @@ const CoverageReport = (() => {
     const toolRows = family ? d.byTool.filter(r => r.family === family) : d.byTool;
 
     mount.innerHTML = `
+      ${printHeader(d, state, backlog, moved)}
+
+      <section class="section print-hide">
+        <div class="section-head">
+          <div class="spacer"></div>
+          <button class="btn ghost sm" data-act="export-pdf"
+            title="Opens your browser's print dialogue — choose &quot;Save as PDF&quot;">Export PDF</button>
+        </div>
+      </section>
+
       ${picker(d)}
 
       <section class="section">
@@ -103,6 +133,17 @@ const CoverageReport = (() => {
 
       const gr = e.target.closest('[data-grain]');
       if (gr) { e.preventDefault(); grain = gr.dataset.grain; App.refresh(); return; }
+
+      const pdf = e.target.closest('[data-act="export-pdf"]');
+      if (pdf) {
+        e.preventDefault();
+        UI.exportPdf(['Overall Coverage', d.selected.length ? d.selected.join(' + ') : 'all components',
+          new Date().toISOString().slice(0, 10)]);
+        return;
+      }
+
+      const bl = e.target.closest('[data-act="backlog"]');
+      if (bl) { e.preventDefault(); await openBacklogDrawer(bl.dataset); return; }
 
       const mv = e.target.closest('[data-act="moved"]');
       if (mv) {
@@ -186,6 +227,18 @@ const CoverageReport = (() => {
       }
     });
 
+    /* A BAR SEGMENT IS AN SVG <g>, NOT A <button>, so Enter and Space have to
+       be wired by hand — a `role="button"` that only answers the mouse is a
+       worse lie than no role at all. Space is prevented as well as handled,
+       or the page scrolls out from under the drawer that just opened. */
+    mount.addEventListener('keydown', async (e) => {
+      if (e.key !== 'Enter' && e.key !== ' ' && e.key !== 'Spacebar') return;
+      const g = e.target.closest && e.target.closest('g[data-act="backlog"]');
+      if (!g) return;
+      e.preventDefault();
+      await openBacklogDrawer(g.dataset);
+    });
+
     /* Priority saves on change, one row at a time.
        No Save button on purpose: a grid of 125 dropdowns with one save at the
        bottom is a grid you lose work in. The trade is that a failed write has
@@ -236,6 +289,99 @@ const CoverageReport = (() => {
       : `${d.selected.length} components combined`);
 
   /**
+   * THE TITLE BLOCK THE PDF NEEDS AND THE SCREEN DOES NOT.
+   *
+   * Every control on this page is hidden in print, and each of them was
+   * carrying a fact: the picker says which components, the window chips say
+   * over what period, the grain chips say how wide the backlog bars are, the
+   * family chips say which slice of the grid is showing. On screen those are
+   * all visible as the state of a control. On paper the control is gone and
+   * the number is left standing on its own.
+   *
+   * That is the specific way an exported report goes wrong: it is not that it
+   * looks bad, it is that a page headed "Coverage 62%" over a table of eleven
+   * components does not say it was filtered to one family, and the reader has
+   * no way to know. So everything a chip was saying is restated here in words.
+   *
+   * The two timestamps are both needed and they are different questions. The
+   * sync time is how old the FACTS are; the report time is when this page was
+   * taken. A PDF mailed on Friday from Monday's sync is a document that quietly
+   * ages into being wrong, and only the pair of them makes that visible.
+   */
+  /**
+   * WHAT THIS SCREEN IS NOT COUNTING.
+   *
+   * Every percentage here is read against a denominator, so a denominator that
+   * quietly got smaller is the one thing that must never happen silently. The
+   * exclusions are a deliberate setting and a good one — but a reader who
+   * cannot see them cannot check the figure, and "61.5%" means something
+   * different depending on what was left out of it.
+   *
+   * Both halves are stated: WHICH components, and HOW MANY epics went with
+   * them. The count is the part that matters — excluding a component nothing
+   * is tagged with changes nothing, and excluding one holding two hundred
+   * epics changes the headline.
+   */
+  function exclusionNote(d) {
+    const names = d.excludedComponents || [];
+    const teams = d.coverageTeams || [];
+    if (!names.length && !teams.length) return '';
+    const noun = d.scope.toLowerCase();
+    const lines = [];
+
+    if (names.length) {
+      const n = d.excludedEpics || 0;
+      lines.push(`Components not counted: ${names.join(', ')} — `
+        + (n ? `${UI.int(n)} ${noun}${n === 1 ? '' : 's'} whose only components are these`
+          : `no ${noun} sits only in ${names.length === 1 ? 'it' : 'them'}`) + '.');
+    }
+    if (teams.length) {
+      const n = d.excludedByTeam || 0;
+      lines.push(`Teams counted: ${teams.join(', ')}`
+        + (n ? ` — ${UI.int(n)} ${noun}${n === 1 ? '' : 's'} on another team, or on none, left out`
+          : ` — every ${noun} is on one of them`) + '.');
+    }
+    return `
+      <div class="muted" style="font-size:11.5px;margin-top:6px">
+        ${lines.map(l => `<div>${UI.esc(l)}</div>`).join('')}
+        <div style="margin-top:2px">Set in Integrations &amp; setup.</div>
+      </div>`;
+  }
+
+  function printHeader(d, state, b, m) {
+    const scope = d.selected.length ? d.selected.join(' + ') : 'All components';
+    const bits = [];
+    if (family) bits.push(`Family: ${family.split(' —')[0]}`);
+    bits.push(`Coverage movement over ${days >= 365 ? '1 year' : `${days} days`}`);
+    if (b && b.periods && b.periods.length) {
+      // What the backlog window RESOLVED to, not which chip was pressed: "All"
+      // chooses its own bar width, and on paper the chip that would have said
+      // so is not there.
+      const bars = b.window === 'all'
+        ? `all time, ${BAR_LABEL[b.grain] || b.grain} bars`
+        : `${b.periods.length} ${b.grain}${b.periods.length === 1 ? '' : 's'}`;
+      bits.push(`Backlog: ${bars}`);
+    }
+    if (m && m.span) bits.push(`${m.span.readings} coverage readings`);
+
+    return `
+      <div class="print-only" style="margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid var(--app-line)">
+        <div class="eyebrow"><i></i>KMS · Automation · Overall Coverage</div>
+        <h2 style="margin-top:6px">${UI.esc(scope)} — ${UI.pct(d.coveragePct)} automated</h2>
+        <div class="muted" style="font-size:11.5px;margin-top:4px">
+          ${UI.esc(bits.join(' · '))}
+        </div>
+        <div class="muted" style="font-size:11.5px;margin-top:3px">
+          ${UI.esc(d.basis || '')}
+        </div>
+        <div class="muted" style="font-size:11.5px;margin-top:3px">
+          Jira data synced ${UI.esc(state && state.syncedAt ? UI.dateTime(state.syncedAt) : 'never')} ·
+          report taken ${UI.esc(UI.dateTime(new Date().toISOString()))}
+        </div>
+      </div>`;
+  }
+
+  /**
    * A component name, as the thing you click.
    *
    * The NAME opens Jira filtered to that component — the same project and the
@@ -280,7 +426,7 @@ const CoverageReport = (() => {
     const levels = d.priorityLevels || [];
     const cur = r.priority == null ? '' : String(r.priority);
     return `
-      <td class="prio-cell" data-sort-value="${r.priority == null ? 99 : r.priority}">
+      <td class="prio-cell" data-sort-value="${r.priority == null ? UNSET_SORT : r.priority}">
         <select class="prio ${prioClass(d, r.priority)}" data-priority="${UI.esc(r.component)}" data-was="${cur}"
           title="${UI.esc(r.priority ? `${levelOf(d, r.priority).label} — ${levelOf(d, r.priority).name}` : 'No priority set')}">
           <option value=""${cur === '' ? ' selected' : ''}>—</option>
@@ -352,6 +498,7 @@ const CoverageReport = (() => {
             </div>` : ''}
           <div class="picker-note">
             <div class="muted" style="font-size:12px">${UI.esc(d.basis)}</div>
+            ${exclusionNote(d)}
             ${d.componentUnknown ? `<div class="tag warn" style="margin-top:6px">
               No component named ${(d.componentMissing || []).map(x => `"${UI.esc(x)}"`).join(', ')} — ignored
             </div>` : ''}
@@ -454,7 +601,13 @@ const CoverageReport = (() => {
     ttMaint: { color: 'var(--bl-tt-maint)', ink: 'var(--bl-tt-maint-ink)' },
     kseMaint: { color: 'var(--bl-kse-maint)', ink: 'var(--bl-kse-maint-ink)' },
   };
-  const GRAIN_LABEL = { week: 'Week', month: 'Month', year: 'Year' };
+  /* The windows, in the order they widen. "All" last because it is the one
+     that has no fixed length — it is however much history there turns out to
+     be, which is the answer you reach for after the three fixed ones. */
+  const WINDOWS = ['week', 'month', 'year', 'all'];
+  const GRAIN_LABEL = { week: 'Week', month: 'Month', year: 'Year', all: 'All' };
+  /** What "All" resolved its bars to, for the foot note. */
+  const BAR_LABEL = { week: 'weekly', month: 'monthly', year: 'yearly' };
 
   /**
    * THE BACKFILL CONTROL — AND WHY IT IS A FUNCTION RATHER THAN ONE BUTTON.
@@ -498,8 +651,27 @@ const CoverageReport = (() => {
       </div>`;
   }
 
+  /**
+   * What "All" turned out to mean, in words.
+   *
+   * The other three chips name their own bars — press Week and you get weeks.
+   * All does not: it picks the bar width from how much history there is, so
+   * without this the chart would silently change grain underneath him and the
+   * only clue would be the axis labels. Saying "yearly bars" is the difference
+   * between a chart that adapted and a chart that looks wrong.
+   *
+   * Nothing is said for the fixed windows, where the chip already is the answer.
+   */
+  function allNote(b) {
+    if (!b || b.window !== 'all') return '';
+    const bars = BAR_LABEL[b.grain] || `${b.grain}ly`;
+    const from = b.periods && b.periods.length ? b.periods[0].label : '';
+    return `All time, in ${UI.esc(bars)} bars${from ? ` from ${UI.esc(from)}` : ''}.`
+      + (b.clamped ? ' There is more history than fits — the oldest is off the left edge.' : '');
+  }
+
   function backlogSection(b) {
-    const chips = ['week', 'month', 'year'].map(g =>
+    const chips = WINDOWS.map(g =>
       `<button class="chip${grain === g ? ' active' : ''}" data-grain="${g}">${GRAIN_LABEL[g]}</button>`).join('');
     const head = `
       <div class="section-head" style="margin-bottom:4px">
@@ -551,12 +723,15 @@ const CoverageReport = (() => {
               <span>across ${UI.esc(first.label)} – ${UI.esc(last.label)}</span>
             </div>
           </div>
-          ${Charts.stacked(b.periods, series)}
+          ${Charts.stacked(b.periods, series, { drill: true, unit: 'automated' })}
           <div class="mixkey" style="margin-top:10px">
-            ${series.map(x => `<span><i style="background:${x.color}"></i>${UI.esc(x.label)} <strong>${UI.int((last.counts || {})[x.key] || 0)}</strong></span>`).join('')}
+            ${series.map(x => `<span><i style="background:${x.color}"></i>${UI.esc(x.label)}
+              ${UI.drillNumber((last.counts || {})[x.key] || 0,
+                { act: 'backlog', period: last.start, bucket: x.key })}</span>`).join('')}
           </div>
           <p class="muted" style="font-size:11.5px;margin:10px 0 0">
             ${UI.esc(b.basis)}
+            ${allNote(b)}
             Read from Jira's change history, so it only goes back as far as the last backfill reached.
             ${UI.int(b.withEvents)} of ${UI.int(b.epics)} ${UI.esc(b.scope || 'Epic')}s have ever been automated.
             ${b.components && b.components.length ? `Filtered to ${UI.esc(b.components.join(', '))}.` : 'Across every component.'}
@@ -717,7 +892,7 @@ const CoverageReport = (() => {
                 <tbody>${rows.map(r => `
                   <tr>
                     <td>${componentCell(d, r.component)}</td>
-                    <td data-sort-value="${r.priority == null ? 99 : r.priority}">${priorityTag(m, r.priority)}</td>
+                    <td data-sort-value="${r.priority == null ? UNSET_SORT : r.priority}">${priorityTag(m, r.priority)}</td>
                     <td class="muted">${UI.esc(r.family.split(' —')[0])}</td>
                     <td class="num muted">${UI.pct(r.from)}</td>
                     <td class="num pct ${tone(r.to)}">${UI.pct(r.to)}</td>
@@ -770,6 +945,49 @@ const CoverageReport = (() => {
    * between two readings without a single status change. Those are real gaps,
    * not rounding, and the reader is the one who can tell which.
    */
+  /**
+   * THE EPICS BEHIND ONE BAR SEGMENT.
+   *
+   * The window parameters go WITH the request — the same grain and period
+   * count the chart was drawn with. Without them the route would profile
+   * against its own default of twelve months, and a drawer opened from a
+   * weekly bar would answer for a month: a list that is longer than the number
+   * that opened it, which is the one thing a drill-in must never be.
+   *
+   * `shown` comes back from the route as what that bar actually says, and the
+   * two are compared here rather than trusted to agree. They always should —
+   * both sides run the same `profile` over the same epics — so a mismatch
+   * means something real has changed underneath, and saying so is better than
+   * quietly showing the other number.
+   */
+  async function openBacklogDrawer(ds) {
+    const period = ds && ds.period;
+    if (!period) return;
+    UI.drawer('<div class="empty">Reading the change history…</div>');
+    const qs = [
+      ...selected.map(c => `component=${encodeURIComponent(c)}`),
+      `grain=${encodeURIComponent(grain)}`,
+      ...(PERIODS[grain] ? [`periods=${PERIODS[grain]}`] : []),
+      `period=${encodeURIComponent(period)}`,
+      `bucket=${encodeURIComponent(ds.bucket || '')}`,
+    ].join('&');
+    try {
+      const r = await UI.api(`/api/reports/backlog/epics?${qs}`);
+      const off = r.shown != null && r.shown !== r.keys.length;
+      UI.drawer(UI.drillDrawer({
+        title: `${r.period.label} — ${r.label}`,
+        meaning: `${UI.esc(r.scope)}s whose Automation Status moved to Automated in ${r.period.label}`
+          + `${r.period.partial ? ' so far' : ''}, from Jira's change history.`
+          + (r.components && r.components.length ? ` Filtered to ${r.components.join(', ')}.` : '')
+          + (off ? ` The bar says ${r.shown} — it has been redrawn since this was opened.` : ''),
+        keys: r.keys,
+        catalogue: r.catalogue,
+      }));
+    } catch (err) {
+      UI.drawer(`<div class="empty">Could not read the change history — ${UI.esc(err.message)}</div>`);
+    }
+  }
+
   function movedDrawer(res, delta) {
     const group = (title, list, tone) => `
       <div class="eyebrow" style="margin-top:14px"><i></i>${UI.esc(title)} — ${UI.int(list.length)}</div>
@@ -836,10 +1054,15 @@ const CoverageReport = (() => {
           </div>
         </div>
         <div class="table-wrap">
-          <table>
+          <!-- OPENS ON PRIORITY, P1 FIRST. The grid's own order is biggest
+               suite first, which answers "where is the work" — but the column
+               he sets by hand is the one that says where the ATTENTION goes,
+               and a judgement nobody can see without clicking is one that does
+               not get used. Click the heading twice to get back to size order. -->
+          <table data-sort-default="1:asc">
             <thead><tr>
               <th>Component</th>
-              <th title="Your judgement of how much this suite matters — set it here, it is never touched by a sync">Priority</th>
+              <th title="Your judgement of how much this suite matters — set it here, it is never touched by a sync. The grid opens sorted by this, P1 first">Priority</th>
               <th>Family</th>
               <th class="num">${UI.esc(d.scope)}s</th>
               <th class="num">Automated</th><th class="num">Maint.</th>
@@ -934,6 +1157,18 @@ const CoverageReport = (() => {
       </div>`;
   }
 
+  /**
+   * How many columns the tool table has, for the expanded row's `colspan`.
+   *
+   * A constant rather than the literal 9 it used to be, because that number
+   * has to track the header and nothing made it. Get it wrong and the panel
+   * under a row stops short of the table's width — and worse, `UI.sortable`
+   * reads `colspan` to tell a note row from a data row, so an expander that
+   * spans the wrong number is also a sorting bug. `sort.test.js` pins the
+   * count against the actual `<th>`s.
+   */
+  const TOOL_COLS = 10;
+
   function toolSection(d, rows) {
     const tt = d.toolTotals.truetest, kse = d.toolTotals.kse;
     const whole = { ...d.toolTotals, total: d.total };
@@ -973,6 +1208,7 @@ const CoverageReport = (() => {
             <thead><tr>
               <th style="width:22px"></th>
               <th>Component</th>
+              <th title="Set on the component grid above — this column shows it, it does not own it">Priority</th>
               <th class="num">${UI.esc(d.scope)}s</th>
               <th class="num">TrueTest</th><th class="num">TT coverage</th>
               <th class="num">KSE</th><th class="num">KSE coverage</th>
@@ -986,6 +1222,7 @@ const CoverageReport = (() => {
                     aria-label="Show the status breakdown for ${UI.esc(r.component)}"
                     style="padding:0 6px">▸</button></td>
                 <td>${componentCell(d, r.component)}</td>
+                <td data-sort-value="${r.priority == null ? UNSET_SORT : r.priority}">${priorityTag(d, r.priority)}</td>
                 <td class="num">${r.total}</td>
                 <td class="num">${r.truetest.total || '—'}</td>
                 <td class="num ${r.truetest.automatable ? `pct ${tone(r.truetest.coveragePct)}` : 'muted'}">${r.truetest.automatable ? UI.pct(r.truetest.coveragePct) : '—'}</td>
@@ -1000,7 +1237,7 @@ const CoverageReport = (() => {
                 <td class="num muted" title="Carry neither component, counted as KSE">${r.untagged || '—'}</td>
               </tr>
               <tr class="detail-row" data-detail="${UI.esc(r.component)}" hidden>
-                <td colspan="9" style="padding:0">
+                <td colspan="${TOOL_COLS}" style="padding:0">
                   ${toolBreakdown(d, r, `${r.component} — automation status by tool`,
                     `${r.total} ${d.scope.toLowerCase()}s · ${r.truetest.total} on TrueTest, ${r.kse.total} on KSE`)}
                 </td>

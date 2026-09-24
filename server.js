@@ -28,6 +28,7 @@ const coverage = require('./lib/coverage');
 const backlogProfile = require('./lib/backlog-profile');
 const covHistory = require('./lib/coverage-history');
 const priority = require('./lib/priority');
+const keywords = require('./lib/keywords');
 const reset = require('./lib/reset');
 const provenance = require('./lib/provenance');
 const query = require('./lib/query');
@@ -453,19 +454,27 @@ async function handleApi(req, res, url) {
     // one adds the component filter, the Obsoleted bucket and the tool split.
     const snap = store.getSnapshot();
     const m = (cfg.metrics || {});
+    const plan = store.getPlan();
     const view = coverage.view(snap, {
       // getAll, so `?component=A&component=B` is a selection rather than a
       // last-one-wins. A comma-joined parameter would have been shorter and
       // wrong: component names are free text and may contain one.
       components: q.getAll('component').filter(Boolean),
       scope: m.coverageScope || 'Epic',
+      // His decision, out of the plan — so a sync never puts them back.
+      exclude: plan.excludedComponents || [],
+      teams: plan.coverageTeams || [],
     });
-    const plan = store.getPlan();
     return json(res, 200, {
       ...view,
       // His judgement, attached to the rows the screen already renders. Read
       // from the plan, so a sync never touches it.
       byComponent: priority.decorate(view.byComponent, plan),
+      // The tool split lists the SAME components as the grid above it, so it
+      // gets the same judgement. Decorated here rather than looked up in the
+      // browser from the other table: one row shape carrying its own priority
+      // is what stops two tables on one screen disagreeing about a component.
+      byTool: priority.decorate(view.byTool, plan),
       components: priority.decorate(view.components.map(c => ({ ...c, component: c.name })), plan)
         .map(({ component, ...c }) => c),
       priorityLevels: priority.LEVELS,
@@ -477,6 +486,55 @@ async function handleApi(req, res, url) {
       // same project, same issue type. The key lives in config, not the model.
       project: cfg.jira.projectKey || null,
     });
+  }
+
+  /* COMPONENTS THAT ARE NOT AUTOMATION SUITES.
+     Plan data, like the priorities below it: a decision, never touched by a
+     sync. Parsed through the same keyword rules, which matters for the same
+     reason — an empty entry here would exclude a component named '' and, worse,
+     read as a configured exclusion that does nothing. */
+  /* THE VALUES THAT ARE ACTUALLY IN THE DATA, for the two scope settings.
+     Its own small route rather than making the settings page load the whole
+     coverage report. It exists so nobody has to type a Jira team name from
+     memory — which is precisely how a setting meant to drop 835 epics ends up
+     dropping 2,993. Counts included, because "Katalon Automation — 0" is the
+     fastest way to see that a name is not the one the data uses. */
+  if (p === '/api/coverage/scope' && req.method === 'GET') {
+    const snap = store.getSnapshot();
+    const m = (cfg.metrics || {});
+    const plan = store.getPlan();
+    // Unfiltered on purpose — this is the menu, not the meal. It has to show
+    // the values a current setting is EXCLUDING, or they can never be undone.
+    const v = coverage.view(snap, { scope: m.coverageScope || 'Epic' });
+    return json(res, 200, {
+      scope: m.coverageScope || 'Epic',
+      components: v.components.map(c => ({ name: c.name, count: c.count })),
+      teamValues: v.teamValues,
+      excludedComponents: plan.excludedComponents || [],
+      coverageTeams: plan.coverageTeams || [],
+    });
+  }
+
+  /* WHOSE WORK COUNTS — an allow-list of Jira Team field values.
+     Same shape and same parser as the component exclusions beside it. */
+  if (p === '/api/coverage-teams' && req.method === 'PUT') {
+    const body = await readJsonBody(req);
+    const plan = store.getPlan();
+    const { list, errors } = keywords.validate(body.teams);
+    plan.coverageTeams = list;
+    store.savePlan(plan);
+    store.audit('coverageTeams.set', { teams: list });
+    return json(res, 200, { ok: true, coverageTeams: list, notes: errors });
+  }
+
+  if (p === '/api/excluded-components' && req.method === 'PUT') {
+    const body = await readJsonBody(req);
+    const plan = store.getPlan();
+    const { list, errors } = keywords.validate(body.components);
+    plan.excludedComponents = list;
+    store.savePlan(plan);
+    store.audit('excludedComponents.set', { components: list });
+    return json(res, 200, { ok: true, excludedComponents: list, notes: errors });
   }
 
   /* One component's priority. Its own route rather than PUT /api/plan, which
@@ -536,9 +594,80 @@ async function handleApi(req, res, url) {
       scope,
       components: picked,
       grains: backlogProfile.GRAINS,
+      // "All" is a window rather than a bar width, so it travels in its own
+      // list — a screen that built its chips from `grains` would never offer it.
+      windows: backlogProfile.WINDOWS,
       // Nothing to count until the changelog has been read once. The screen
       // needs to tell the difference between "a quiet year" and "never asked".
       backfilled: byKey.size > 0,
+    });
+  }
+
+  /* THE EPICS BEHIND ONE BAR SEGMENT.
+     Its own route rather than keys on every period of the chart payload: the
+     chart is redrawn on every component keystroke and every window change, and
+     shipping the key list for four buckets across up to 104 periods would make
+     the common case pay for the rare one. */
+  if (p === '/api/reports/backlog/epics' && req.method === 'GET') {
+    const snap = store.getSnapshot();
+    const scope = (cfg.metrics || {}).coverageScope || 'Epic';
+    const picked = q.getAll('component').filter(Boolean);
+    const want = new Set(picked);
+    const byKey = covHistory.transitionsByKey();
+    const issues = snap.issues || {};
+
+    // Built exactly as /api/reports/backlog builds it — same filter, same
+    // transitions — so the set being counted and the set being listed are one.
+    const epics = Object.values(issues)
+      .filter(i => String(i.issueType || '').trim().toLowerCase() === String(scope).toLowerCase())
+      .filter(i => !want.size || coverage.productComponents(i).some(c => want.has(c)))
+      .map(i => ({ key: i.key, components: i.components || [], transitions: byKey.get(i.key) || [] }));
+
+    /* The SAME profile call the chart made. The period boundaries therefore
+       come from the chart's own arithmetic rather than being recomputed here,
+       which is what guarantees the drawer cannot show a different window than
+       the bar that opened it — particularly for "all", whose grain depends on
+       the data and could otherwise be resolved two different ways. */
+    const prof = backlogProfile.profile(epics, {
+      grain: q.get('grain') || 'month',
+      periods: q.get('periods'),
+    });
+    const period = prof.periods.find(x => x.start === q.get('period'));
+    if (!period) {
+      return json(res, 409, { error: 'That bar is not in the current window any more — the chart has moved on. Reopen it.' });
+    }
+
+    // Compared as calendar DATES, not reconstructed timestamps: the periods are
+    // whole days, so this is exactly the window the profile counted, without a
+    // millisecond of boundary arithmetic to get wrong.
+    const bucket = q.get('bucket') || '';
+    const buckets = new Set(backlogProfile.BUCKETS.map(b => b.key));
+    if (bucket && !buckets.has(bucket)) return json(res, 400, { error: `Unknown column "${bucket}".` });
+    const day = (t) => new Date(t).toISOString().slice(0, 10);
+    const keys = backlogProfile.eventsOf(epics)
+      .filter(e => (!bucket || e.bucket === bucket))
+      .filter(e => day(e.t) >= period.start && day(e.t) <= period.end)
+      .map(e => e.key);
+
+    const catalogue = {};
+    for (const k of new Set(keys)) {
+      const i = issues[k];
+      catalogue[String(k).toUpperCase()] = i
+        ? { key: k, summary: i.summary || '', status: i.status || '', statusCategory: i.statusCategory || '',
+            automationStatus: i.automationStatus || '', components: coverage.productComponents(i) }
+        : { key: k, absent: true };
+    }
+
+    return json(res, 200, {
+      keys, catalogue, scope, components: picked,
+      period: { label: period.label, start: period.start, end: period.end, partial: period.partial },
+      bucket,
+      label: bucket ? (backlogProfile.BUCKETS.find(b => b.key === bucket) || {}).label : 'All columns',
+      grain: prof.grain,
+      window: prof.window,
+      // What the bar SAYS, so the screen can flag a disagreement rather than
+      // quietly showing a list of a different length.
+      shown: bucket ? (period.counts || {})[bucket] || 0 : period.total,
     });
   }
 
@@ -841,12 +970,25 @@ async function handleApi(req, res, url) {
     const plan = store.getPlan();
     const team = plan.teams.find(t => t.id === body.teamId);
     if (!team) return json(res, 404, { error: `No team "${body.teamId}"` });
-    for (const k of ['boardId', 'name', 'sprintKeywords', 'components', 'jiraTeams', 'testopsProjectIds']) {
+    /* THE KEYWORD LISTS ARE PARSED, NOT COPIED. They used to be assigned
+       straight through, which meant one stray comma in the box stored an empty
+       keyword — and an empty keyword makes `name.includes(k)` true for every
+       sprint in the instance. The field still reads "ruby", and the team
+       quietly claims the whole Jira estate. Parsing here rather than in the
+       browser because the browser is not the contract. */
+    const notes = [];
+    for (const k of ['sprintKeywords', 'jiraTeams']) {
+      if (body[k] === undefined) continue;
+      const { list, errors } = keywords.validate(body[k]);
+      team[k] = list;
+      notes.push(...errors);
+    }
+    for (const k of ['boardId', 'name', 'components', 'testopsProjectIds']) {
       if (body[k] !== undefined) team[k] = body[k];
     }
     store.savePlan(plan);
     store.audit('team.update', { teamId: team.id, keys: Object.keys(body).filter(k => k !== 'teamId') });
-    return json(res, 200, { ok: true, team });
+    return json(res, 200, { ok: true, team, notes });
   }
 
   if (p === '/api/team/member' && (req.method === 'POST' || req.method === 'PUT')) {
@@ -856,12 +998,22 @@ async function handleApi(req, res, url) {
       // Adding someone brings default availability with them, so this is always
       // a deliberate act — never something a sync does on its own.
       try {
-        // Someone picked off the discovered/historic list carries their accountId
-        // and is genuinely from Jira; a name typed into the box is not.
-        const added = reconcile.addMember(plan, body.teamId, { name: body.name, accountId: body.accountId, role: body.role });
+        /* Someone picked off the discovered list carries their accountId. A
+           name TYPED into the box does not — but the tool may already know it,
+           so the Jira directory goes in and an exact match is linked on the
+           spot. Without it, typing the name of someone Jira knows perfectly
+           well stored an unlinked row that no sync could later repair unless
+           they happened to have work in this team's own sprints. */
+        const directory = store.getSnapshot().people || [];
+        const added = reconcile.addMember(plan,
+          body.teamId, { name: body.name, accountId: body.accountId, role: body.role }, { directory });
         store.savePlan(plan);
-        store.audit('member.add', { teamId: body.teamId, name: body.name, from: body.accountId ? 'jira' : 'manual' });
-        return json(res, 200, { ok: true, memberId: added });
+        const member = (plan.teams.find(t => t.id === body.teamId).members || []).find(m => m.id === added);
+        store.audit('member.add', {
+          teamId: body.teamId, name: body.name,
+          from: member && member.jiraAccountId ? (body.accountId ? 'jira' : 'jira-by-name') : 'manual',
+        });
+        return json(res, 200, { ok: true, memberId: added, member });
       } catch (err) { return json(res, 400, { error: err.message }); }
     }
     const team = plan.teams.find(t => t.id === body.teamId);

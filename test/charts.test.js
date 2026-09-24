@@ -227,6 +227,110 @@ check('MALPHITE\'S REAL SHAPE SURVIVES THE WHOLE PATH, MODEL TO AXIS', () => {
   assert.deepStrictEqual(velocityTicks(svg), ['18May-24May', '14Sep']);
 });
 
+/* ── a stacked bar you can open ──────────────────────────────────────────
+   The numbers on this chart are a drill-in, which means the markup has to
+   carry enough to identify WHICH bar was pressed — and must carry none of it
+   when nobody is listening, because a bar that looks clickable and is not is
+   worse than one that plainly is not. */
+
+const SERIES = [
+  { key: 'ttBuild', label: 'New TT Build', color: '#123456', ink: '#fff' },
+  { key: 'kseBuild', label: 'New KSE Build', color: '#654321', ink: '#fff' },
+];
+const STACK = [
+  { label: 'Aug', start: '2026-08-01', end: '2026-08-31', partial: false, counts: { ttBuild: 12, kseBuild: 9 }, total: 21 },
+  { label: 'Sep', start: '2026-09-01', end: '2026-09-30', partial: true, counts: { ttBuild: 7, kseBuild: 4 }, total: 11 },
+];
+const hooks = (svg) => [...svg.matchAll(/data-period="([^"]*)" data-bucket="([^"]*)"/g)].map(m => `${m[1]}|${m[2]}`);
+
+check('A STACKED BAR IS INERT UNLESS THE CALLER ASKS FOR THE DRILL-IN', () => {
+  const svg = Charts.stacked(STACK, SERIES);
+  assert.doesNotMatch(svg, /data-act="backlog"/, 'no hooks');
+  assert.doesNotMatch(svg, /drillable/, 'and nothing that looks clickable');
+  assert.doesNotMatch(svg, /tabindex/, 'nor anything the keyboard stops on');
+});
+
+check('EVERY SEGMENT AND EVERY TOTAL CARRIES ITS OWN PERIOD AND COLUMN', () => {
+  const svg = Charts.stacked(STACK, SERIES, { drill: true });
+  assert.deepStrictEqual(hooks(svg).sort(), [
+    '2026-08-01|', '2026-08-01|kseBuild', '2026-08-01|ttBuild',
+    '2026-09-01|', '2026-09-01|kseBuild', '2026-09-01|ttBuild',
+  ], 'two segments and one total per bar, each naming itself');
+});
+
+check('the period is identified by its DATE, never by its label or index', () => {
+  // "Sep" is not unique across a window that spans years, and an index breaks
+  // the moment the window changes under an open drawer.
+  const svg = Charts.stacked(STACK, SERIES, { drill: true });
+  assert.doesNotMatch(svg, /data-period="Sep"/);
+  assert.doesNotMatch(svg, /data-period="[01]"/);
+});
+
+check('an empty segment is not a control — there is nothing behind it', () => {
+  const svg = Charts.stacked(
+    [{ label: 'Aug', start: '2026-08-01', end: '2026-08-31', counts: { ttBuild: 3, kseBuild: 0 }, total: 3 }],
+    SERIES, { drill: true });
+  assert.ok(hooks(svg).includes('2026-08-01|ttBuild'));
+  assert.ok(!hooks(svg).includes('2026-08-01|kseBuild'), 'a zero opens an empty drawer and teaches nothing');
+});
+
+check('and a period with no total has no total to press', () => {
+  const svg = Charts.stacked(
+    [{ label: 'Aug', start: '2026-08-01', end: '2026-08-31', counts: { ttBuild: 0, kseBuild: 0 }, total: 0 }],
+    SERIES, { drill: true });
+  assert.deepStrictEqual(hooks(svg), []);
+});
+
+check('a period with no date is left inert rather than hooked to nothing', () => {
+  // `start` is the identity. Without it the drawer would ask for `period=`
+  // and the route would answer 409 — a control that always fails.
+  const svg = Charts.stacked(
+    [{ label: 'Aug', counts: { ttBuild: 3 }, total: 3 }], SERIES, { drill: true });
+  assert.deepStrictEqual(hooks(svg), []);
+  assert.doesNotMatch(svg, /data-act="backlog"/);
+});
+
+check('THE WHOLE SEGMENT IS THE TARGET, not just the number drawn in it', () => {
+  // A value is only drawn where it fits; on a thin bar there is no number at
+  // all, and a drill-in hung on the text would be unhittable exactly there.
+  const thin = [{ label: 'Aug', start: '2026-08-01', end: '2026-08-31', counts: { ttBuild: 1, kseBuild: 400 }, total: 401 }];
+  const svg = Charts.stacked(thin, SERIES, { drill: true });
+  assert.ok(hooks(svg).includes('2026-08-01|ttBuild'), 'the sliver still opens');
+  // The <g> wraps the rect, so the hit area is the bar rather than the glyph.
+  assert.match(svg, /<g class="drillable"[^>]*data-bucket="ttBuild"[^>]*><rect/);
+});
+
+check('it is reachable and announced, not just clickable', () => {
+  const svg = Charts.stacked(STACK, SERIES, { drill: true, unit: 'automated' });
+  assert.match(svg, /role="button"/, 'a screen reader needs to know it is one');
+  assert.match(svg, /tabindex="0"/, 'and the keyboard needs to reach it');
+  assert.match(svg, /aria-label="Aug — New TT Build: 12 automated"/, 'with the value said out loud');
+  assert.match(svg, /aria-label="Aug: 21 automated across every column"/, 'the total says what it opens');
+});
+
+check('and it is VISIBLY focusable — the suppression must be paired', () => {
+  /* `.drillable:focus { outline: none }` on its own would leave a keyboard
+     user tabbing through sixty invisible stops. It is only safe because
+     `:focus-visible` puts a ring back, and the two rules have to travel
+     together — verified in a browser under real Tab navigation, where
+     `:focus-visible` matches and the 2px ring renders. */
+  const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'styles.css'), 'utf8');
+  assert.match(css, /\.drillable \{[^}]*cursor: pointer/, 'nothing says a segment can be clicked');
+  assert.ok(css.includes('.drillable:focus-visible'), 'the ring the suppression depends on is missing');
+  const off = css.indexOf('.drillable:focus {');
+  const on = css.indexOf('.drillable:focus-visible');
+  assert.ok(off === -1 || on > off,
+    'the outline is suppressed after it is restored, so the restore is overridden');
+  assert.match(css.slice(on, css.indexOf('}', on)), /outline: 2px solid/, 'and it draws nothing');
+});
+
+check('the hover title survives the wrapper', () => {
+  // The <title> is the mouse-over value and predates the drill-in; wrapping
+  // the rect in a <g> must not orphan it.
+  assert.match(Charts.stacked(STACK, SERIES, { drill: true, unit: 'automated' }),
+    /<title>Aug — New TT Build: 12 automated<\/title>/);
+});
+
 /* ── run ───────────────────────────────────────────────────────────── */
 
 (async () => {

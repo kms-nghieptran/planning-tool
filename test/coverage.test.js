@@ -559,6 +559,301 @@ check('the per-tool tables take their bucket order from the payload', () => {
   assert.match(VIEW, /BUCKET_META = Object\.fromEntries\(d\.buckets/);
 });
 
+/* ── components that are not automation suites ───────────────────────────
+   `Technical_Works` and `KAT_Common_Maintenance` are real Jira components
+   holding engineering work. They carry no automation status and never will, so
+   they sat in the picker and in the untriaged pile looking like suites nobody
+   had got to. Excluding them is a decision, kept in the plan.
+
+   The rule has three outcomes and the third is the whole design: an epic whose
+   components are ALL excluded leaves the view entirely. Folding it into
+   "— no component —" instead would move the work rather than remove it, and
+   leave it in the untriaged count that is the reason for excluding it. */
+
+const TW = 'Technical_Works';
+const excl = (list, exclude) => cov.view(snapshot(list), { exclude });
+
+check('AN EXCLUDED COMPONENT LEAVES THE PICKER', () => {
+  const v = excl([epic('Automated', [NLG]), epic(null, [TW])], [TW]);
+  assert.deepStrictEqual(v.components.map(c => c.name), [NLG]);
+  assert.deepStrictEqual(v.excludedComponents, [TW], 'and the payload says which');
+});
+
+check('AND THE EPIC BEHIND IT LEAVES THE COUNT — it is not moved, it is removed', () => {
+  // The failure this prevents: three "In Dev" engineering epics sitting in the
+  // untriaged number under a different label, which is exactly where they were.
+  const v = excl([epic('Automated', [NLG]), epic(null, [TW]), epic(null, [TW])], [TW]);
+  assert.strictEqual(v.total, 1, 'two epics were excluded, not relabelled');
+  assert.strictEqual(v.untriaged, 0, 'and they are out of the untriaged pile');
+  assert.strictEqual(v.excludedEpics, 2, 'with the number said out loud');
+  assert.ok(!v.byComponent.some(r => r.component === '— no component —'),
+    'they must not reappear under "no component"');
+});
+
+check('BUT AN EPIC THAT ALSO CARRIES A REAL SUITE KEEPS COUNTING UNDER IT', () => {
+  // Excluding a component removes the component, not the work.
+  const v = excl([epic('Automated', [NLG, TW])], [TW]);
+  assert.strictEqual(v.total, 1);
+  assert.strictEqual(v.excludedEpics, 0);
+  assert.strictEqual(v.coveragePct, 100, 'and still counts toward its suite');
+  /* EVERY per-component list, not just the grid. A MIXED epic is the only
+     thing that can catch a section reading the raw components: an epic whose
+     components are all excluded has already left the pool, so a section that
+     forgot to exclude still never sees it. This one is in scope and carries an
+     excluded name, so any list built from the unfiltered components grows a
+     `Technical_Works` row the headline knows nothing about. */
+  for (const [name, rows] of [['grid', v.byComponent], ['tool split', v.byTool]]) {
+    assert.deepStrictEqual(rows.map(r => r.component), [NLG], name);
+  }
+  assert.deepStrictEqual(v.components.map(c => c.name), [NLG], 'picker');
+});
+
+check('AN EPIC WITH NO COMPONENTS AT ALL IS UNTOUCHED', () => {
+  /* The one that must NOT be swept up. Nobody tagged it — that is a real
+     signal and it belongs in the untriaged number. It looks superficially like
+     the excluded case (no component survives) and is the opposite of it. */
+  const v = excl([epic('Automated', [NLG]), epic(null, [])], [TW]);
+  assert.strictEqual(v.total, 2, 'an untagged epic is still in scope');
+  assert.strictEqual(v.untriaged, 1);
+  assert.ok(v.byComponent.some(r => r.component === '— no component —'));
+  assert.strictEqual(v.excludedEpics, 0);
+});
+
+check('and neither is one carrying only a TOOL marker', () => {
+  // Tool components were never product areas, so such an epic already read as
+  // "— no component —" and has to keep doing so.
+  const v = excl([epic('Automated', ['TrueTest'])], [TW]);
+  assert.strictEqual(v.total, 1);
+  assert.deepStrictEqual(v.byComponent.map(r => r.component), ['— no component —']);
+});
+
+check('THE EXCLUSION REACHES EVERY SECTION, not just the picker', () => {
+  // Five places ask an epic for its components. An exclusion applied in four
+  // is a screen whose headline and grid disagree.
+  const v = excl([epic('Automated', [NLG]), epic('Ready for Automation', [TW]), epic(null, [TW])], [TW]);
+  assert.deepStrictEqual(v.components.map(c => c.name), [NLG], 'picker');
+  assert.deepStrictEqual(v.byComponent.map(r => r.component), [NLG], 'the grid');
+  assert.deepStrictEqual(v.byTool.map(r => r.component), [NLG], 'the tool split');
+  assert.deepStrictEqual(v.byFamily.map(r => r.family), ['PS — client delivery'], 'the family rollup');
+  assert.strictEqual(v.total, 1, 'the headline');
+  // The excluded Ready epic would have been in the denominator.
+  assert.strictEqual(v.coveragePct, 100, 'and the ratio it would have dragged down');
+});
+
+check('excluding a component NOTHING is tagged with changes nothing', () => {
+  const plain = cov.view(snapshot([epic('Automated', [NLG])]), {});
+  const same = excl([epic('Automated', [NLG])], ['Nonexistent_Component']);
+  assert.strictEqual(same.total, plain.total);
+  assert.strictEqual(same.coveragePct, plain.coveragePct);
+  assert.strictEqual(same.excludedEpics, 0, 'and says so, rather than implying a silent cut');
+});
+
+check('the match ignores case and surrounding space, as Jira names do', () => {
+  const v = excl([epic('Automated', [NLG]), epic(null, [TW])], ['  technical_works  ']);
+  assert.strictEqual(v.total, 1);
+  assert.deepStrictEqual(v.components.map(c => c.name), [NLG]);
+});
+
+check('NO EXCLUSIONS IS THE OLD BEHAVIOUR, BYTE FOR BYTE', () => {
+  // The setting is opt-in; an empty list must not change a single number.
+  const list = [epic('Automated', [NLG, 'TrueTest']), epic(null, [TW]), epic('Blocked', [SIG]), epic(null, [])];
+  const before = cov.view(snapshot(list), {});
+  for (const empty of [null, [], undefined, ['']]) {
+    const after = cov.view(snapshot(list), { exclude: empty });
+    assert.strictEqual(after.total, before.total, JSON.stringify(empty));
+    assert.strictEqual(after.coveragePct, before.coveragePct, JSON.stringify(empty));
+    assert.deepStrictEqual(after.components.map(c => c.name), before.components.map(c => c.name));
+    assert.strictEqual(after.excludedEpics, 0);
+  }
+});
+
+check('productComponents keeps its old contract when asked nothing', () => {
+  // It is exported and called from three routes that pass no exclusions.
+  assert.deepStrictEqual(cov.productComponents({ components: [NLG, 'TrueTest'] }), [NLG]);
+  assert.deepStrictEqual(cov.productComponents({ components: ['TrueTest'] }), ['— no component —']);
+  assert.deepStrictEqual(cov.productComponents({ components: [] }), ['— no component —']);
+  assert.deepStrictEqual(cov.productComponents({}), ['— no component —']);
+});
+
+check('and with exclusions it reports "not in scope" as an empty list', () => {
+  const ex = cov.excludeSet([TW]);
+  assert.deepStrictEqual(cov.productComponents({ components: [TW] }, ex), [],
+    'empty means DROP THE EPIC — the caller has to be able to tell');
+  assert.deepStrictEqual(cov.productComponents({ components: [TW, NLG] }, ex), [NLG]);
+  assert.deepStrictEqual(cov.productComponents({ components: [] }, ex), ['— no component —']);
+});
+
+check('THE ROUTE READS THE LIST FROM THE PLAN, so a sync never puts them back', () => {
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const route = server.slice(server.indexOf("p === '/api/reports/coverage'"));
+  const body = route.slice(0, route.indexOf('\n  if (p ==='));
+  assert.match(body, /exclude: plan\.excludedComponents \|\| \[\]/, 'the view is given the plan\'s list');
+  assert.match(server, /p === '\/api\/excluded-components'/, 'and there is a route to change it');
+  assert.match(server, /plan\.excludedComponents = list;/, 'which writes it to the plan');
+});
+
+/* ── whose work counts ───────────────────────────────────────────────────
+   An ALLOW-list of Jira Team field values. Empty counts everything; non-empty
+   means an epic counts only if its Team is one of them, and an epic with no
+   team fails like any other.
+
+   THE TRAP THIS IS BUILT AROUND. His boards are "Katalon Auto Titan" and
+   "Katalon Auto Ruby". The Team FIELD on those same epics reads "Katalon PSA
+   (Titan)" and "Katalon RDA (Ruby)". An allow-list typed from the board names
+   looks completely reasonable and silently drops 2,158 epics — more than half
+   his project — out of the ratio. So the values travel with their counts and
+   the screen offers them; these checks pin that they are the field's own
+   strings and that nothing is matched loosely. */
+
+const withTeam = (status, components, team) => ({ ...epic(status, components), team });
+const byTeam = (list, teams) => cov.view(snapshot(list), { teams });
+
+check('AN ALLOW-LIST COUNTS ONLY THE TEAMS ON IT', () => {
+  const v = byTeam([
+    withTeam('Automated', [NLG], 'Katalon PSA (Titan)'),
+    withTeam('Ready for Automation', [SIG], 'Lambda Legion'),
+  ], ['Katalon PSA (Titan)']);
+  assert.strictEqual(v.total, 1);
+  assert.strictEqual(v.excludedByTeam, 1);
+  assert.strictEqual(v.coveragePct, 100, 'the other squad\'s work is out of the ratio, not just the list');
+});
+
+check('AN EPIC WITH NO TEAM IS EXCLUDED BY ANY ALLOW-LIST', () => {
+  // His words: unassigned, or a team not on the list. One rule covers both —
+  // an empty team is not on any list.
+  const v = byTeam([
+    withTeam('Automated', [NLG], 'Katalon PSA (Titan)'),
+    withTeam('Ready for Automation', [SIG], ''),
+    withTeam('Ready for Automation', [SIG], null),
+    epic('Ready for Automation', [SIG]),                 // no team field at all
+  ], ['Katalon PSA (Titan)']);
+  assert.strictEqual(v.total, 1);
+  assert.strictEqual(v.excludedByTeam, 3);
+});
+
+check('AN EMPTY LIST COUNTS EVERYTHING — including the unassigned', () => {
+  // The setting is opt-in. Off, it must not remove a single epic.
+  const list = [
+    withTeam('Automated', [NLG], 'Katalon PSA (Titan)'),
+    withTeam('Ready for Automation', [SIG], 'Lambda Legion'),
+    withTeam('Blocked', [SIG], ''),
+  ];
+  const before = cov.view(snapshot(list), {});
+  for (const empty of [null, [], undefined, ['']]) {
+    const after = cov.view(snapshot(list), { teams: empty });
+    assert.strictEqual(after.total, before.total, JSON.stringify(empty));
+    assert.strictEqual(after.coveragePct, before.coveragePct, JSON.stringify(empty));
+    assert.strictEqual(after.excludedByTeam, 0);
+  }
+});
+
+check('THE MATCH IS THE TEAM FIELD\'S OWN STRING, never the board name', () => {
+  /* The near-miss, as a check. "Katalon Auto Titan" is the BOARD; the epics
+     say "Katalon PSA (Titan)". Matching loosely — on a shared word, or by
+     containment — would make the wrong list appear to work and hide the
+     mismatch until someone reconciled the totals by hand. */
+  const list = [withTeam('Automated', [NLG], 'Katalon PSA (Titan)')];
+  assert.strictEqual(byTeam(list, ['Katalon Auto Titan']).total, 0,
+    'the board name must NOT match the team value');
+  assert.strictEqual(byTeam(list, ['Titan']).total, 0, 'nor a word inside it');
+  assert.strictEqual(byTeam(list, ['Katalon PSA (Titan)']).total, 1, 'only the real value');
+});
+
+check('but case and surrounding space are forgiven, as they are everywhere else', () => {
+  const list = [withTeam('Automated', [NLG], 'Katalon Auto Moonstone')];
+  assert.strictEqual(byTeam(list, ['  katalon auto MOONSTONE  ']).total, 1);
+});
+
+check('EVERY TEAM VALUE IS REPORTED WITH ITS COUNT, so the list can be chosen not typed', () => {
+  const v = byTeam([
+    withTeam('Automated', [NLG], 'Katalon PSA (Titan)'),
+    withTeam('Automated', [NLG], 'Katalon PSA (Titan)'),
+    withTeam('Ready for Automation', [SIG], 'Lambda Legion'),
+    withTeam('Ready for Automation', [SIG], ''),
+  ], ['Katalon PSA (Titan)']);
+  const by = Object.fromEntries(v.teamValues.map(t => [t.name, t]));
+  assert.strictEqual(by['Katalon PSA (Titan)'].count, 2);
+  assert.strictEqual(by['Lambda Legion'].count, 1);
+  assert.ok(by['— no team —'], 'the unassigned pile has to be visible and countable');
+  assert.strictEqual(by['— no team —'].unassigned, true);
+  assert.strictEqual(by['Katalon PSA (Titan)'].allowed, true, 'and each says whether it currently counts');
+  assert.strictEqual(by['Lambda Legion'].allowed, false);
+});
+
+check('the menu shows values the CURRENT setting excludes, or they could never be undone', () => {
+  // Built before the allow-list is applied, on purpose.
+  const v = byTeam([
+    withTeam('Automated', [NLG], 'Katalon PSA (Titan)'),
+    withTeam('Ready for Automation', [SIG], 'Lambda Legion'),
+  ], ['Katalon PSA (Titan)']);
+  assert.ok(v.teamValues.some(t => t.name === 'Lambda Legion'),
+    'an excluded team vanishing from the menu is a setting with no way back');
+});
+
+check('with no allow-list every value reads as allowed', () => {
+  const v = cov.view(snapshot([withTeam('Automated', [NLG], 'Lambda Legion')]), {});
+  assert.strictEqual(v.teamValues[0].allowed, true);
+});
+
+/* ── the two cuts together ───────────────────────────────────────────── */
+
+check('COMPONENT AND TEAM EXCLUSIONS ARE COUNTED SEPARATELY', () => {
+  /* One number covering both would leave a reader unable to tell "three
+     engineering epics" from "eight hundred other squads'", which are very
+     different facts about the same shrunken total. */
+  const v = cov.view(snapshot([
+    withTeam('Automated', [NLG], 'Katalon PSA (Titan)'),
+    withTeam(null, [TW], 'Katalon PSA (Titan)'),          // dropped by component
+    withTeam('Ready for Automation', [SIG], 'Lambda Legion'),  // dropped by team
+  ]), { exclude: [TW], teams: ['Katalon PSA (Titan)'] });
+  assert.strictEqual(v.total, 1);
+  assert.strictEqual(v.excludedEpics, 1, 'the component cut');
+  assert.strictEqual(v.excludedByTeam, 1, 'the team cut');
+});
+
+check('an epic failing BOTH is counted once, against the component cut', () => {
+  // Components are applied first, so an epic that would fail either is
+  // attributed there. What must never happen is counting it twice.
+  const v = cov.view(snapshot([
+    withTeam('Automated', [NLG], 'Katalon PSA (Titan)'),
+    withTeam(null, [TW], 'Lambda Legion'),
+  ]), { exclude: [TW], teams: ['Katalon PSA (Titan)'] });
+  assert.strictEqual(v.total, 1);
+  assert.strictEqual(v.excludedEpics + v.excludedByTeam, 1, 'one epic left, not two');
+});
+
+check('the team menu honours the component exclusions above it', () => {
+  // Built from the component-filtered pool, so a team whose only epics were
+  // engineering buckets does not appear as a squad worth allowing.
+  const v = cov.view(snapshot([
+    withTeam('Automated', [NLG], 'Katalon PSA (Titan)'),
+    withTeam(null, [TW], 'Ghost Squad'),
+  ]), { exclude: [TW] });
+  assert.ok(!v.teamValues.some(t => t.name === 'Ghost Squad'),
+    'its only epic is already out of scope');
+});
+
+check('THE ROUTE READS THE ALLOW-LIST FROM THE PLAN, and offers the real values', () => {
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const route = server.slice(server.indexOf("p === '/api/reports/coverage'"));
+  const body = route.slice(0, route.indexOf('\n  if (p ==='));
+  assert.match(body, /teams: plan\.coverageTeams \|\| \[\]/, 'the view is given the plan\'s allow-list');
+  assert.match(server, /p === '\/api\/coverage-teams'/, 'and there is a route to change it');
+  assert.match(server, /plan\.coverageTeams = list;/, 'which writes it to the plan');
+  assert.match(server, /p === '\/api\/coverage\/scope'/, 'and one that offers the values in the data');
+  /* That menu must NOT be filtered by the very setting it configures, or a
+     team once excluded vanishes from the list and can never be re-added.
+     Asserted on the view CALL, not on a loose shape: passing `teams:` into it
+     is exactly the mistake, and a pattern that tolerates extra properties
+     tolerates that one. */
+  const menuAt = server.indexOf("p === '/api/coverage/scope'");
+  const menu = server.slice(menuAt, server.indexOf('\n  if (p ===', menuAt));
+  const call = menu.slice(menu.indexOf('coverage.view('));
+  assert.ok(!/teams:/.test(call.slice(0, call.indexOf(');'))),
+    'the menu route must build an UNFILTERED view — it is the way back');
+  assert.match(menu, /teamValues: v\.teamValues/, 'and hand over every value it found');
+});
+
 /* ── the screen itself ────────────────────────────────────────────────── */
 
 const VIEW = fs.readFileSync(path.join(__dirname, '..', 'public', 'views', 'report-coverage.js'), 'utf8');
@@ -575,6 +870,35 @@ check('the component grid is hidden when one component is selected', () => {
   // It would be a one-row table restating the cards above it.
   assert.match(VIEW, /\$\{d\.selected\.length === 1 \? '' : componentSection\(d, rows\)\}/,
     'one component hides it; two or three are exactly the comparison it exists for');
+});
+
+check('THE ROUTE DECORATES THE TOOL ROWS, or the column is empty on every row', () => {
+  // `byComponent` was decorated and `byTool` was not, so the new column would
+  // have rendered a dash for all 125 components with nothing to say why.
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const route = server.slice(server.indexOf("p === '/api/reports/coverage'"));
+  const body = route.slice(0, route.indexOf('\n  if (p ==='));
+  assert.match(body, /byTool: priority\.decorate\(view\.byTool, plan\)/,
+    'the tool split has to read its priority off its own rows');
+  assert.match(body, /byComponent: priority\.decorate\(view\.byComponent, plan\)/,
+    'and from the SAME plan as the grid, so the two cannot disagree');
+});
+
+check('THE EXPANDED ROW SPANS EXACTLY THE COLUMNS THERE ARE', () => {
+  /* `colspan` on the detail row has to track the header, and nothing makes it.
+     Adding the Priority column took the tool table from nine columns to ten,
+     and a stale colspan is worse than it sounds twice over: the panel under a
+     row stops short of the table's width, AND `UI.sortable` reads `colspan` to
+     tell a note row from a data row — so the wrong number is a sorting bug
+     wearing a layout bug's clothes. */
+  const body = VIEW.slice(VIEW.indexOf('function toolSection'), VIEW.indexOf('4. major risks'));
+  const head = body.slice(body.indexOf('<thead>'), body.indexOf('</tr>', body.indexOf('<thead>')));
+  const columns = [...head.matchAll(/<th(?:\s[^>]*)?>/g)].length;
+  assert.ok(columns > 1, 'the header did not parse');
+  const declared = Number((VIEW.match(/const TOOL_COLS = (\d+);/) || [])[1]);
+  assert.strictEqual(declared, columns,
+    `TOOL_COLS is ${declared} but the table has ${columns} columns`);
+  assert.match(body, /colspan="\$\{TOOL_COLS\}"/, 'the detail row must use the constant, not a literal');
 });
 
 check('A TOOL WITH NOTHING AUTOMATABLE RENDERS A DASH, NOT 0%', () => {
@@ -1080,15 +1404,21 @@ check('AND THE ROUTE IS WHAT PUTS THE PRIORITY ON THEM', () => {
   assert.match(body, /store\.getPlan\(\)/, 'the levels come from the plan he edits');
 });
 
-check('the priority column sorts unset last, not first', async () => {
-  // A blank cell sorts before everything as an empty string, which would put
-  // the components nobody has ranked at the top of a list about what to do next.
+check('the priority column sorts unset last, in BOTH directions', async () => {
+  /* A blank cell sorts before everything as an empty string, which would put
+     the components nobody has ranked at the top of a list about what to do next.
+     This used to be solved with 99 — which fixes the ascending case and breaks
+     the descending one, because 99 is then the largest number in the column and
+     the unjudged rows rise above the P1s. The em-dash is what `UI.sortable`
+     treats as "nothing here", and that is pinned last whichever way the column
+     points; sort.test.js proves the resulting order both ways. */
   const payload = payloadFor({});
   const moved = MOVED([MOVER(NLG, null), MOVER(SIG, 1)], [{ value: 1, key: 'p1', label: 'P1', name: 'Critical' }]);
   const section = await renderCoverage(payload, moved);
   const start = section.indexOf('Which components moved');
   const table = section.slice(start, section.indexOf('</table>', start));
-  assert.match(table, /data-sort-value="99"/, 'unset carries a high sort key so it lands last');
+  assert.match(table, /data-sort-value="—"/, 'unset must be a blank to the sorter, not a big number');
+  assert.doesNotMatch(table, /data-sort-value="99"/, 'a number puts unset first on a descending sort');
   assert.match(table, /data-sort-value="1"/, 'and a set one carries its level');
 });
 

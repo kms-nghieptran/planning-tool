@@ -1,6 +1,12 @@
 /* Active sprint view — is this sprint going to land, and what is in the way. */
 
 const SprintView = (() => {
+  /* An unset priority sorts as "nothing here", which `UI.sortable` pins to the
+     bottom in BOTH directions — not as 99, which is the largest number in the
+     column and floated every unjudged component above the P1s on a descending
+     sort. Same constant, same reason, as the Coverage grid that owns the value. */
+  const UNSET_SORT = '—';
+
   async function render(state, mount) {
     const d = await UI.api(`/api/sprint?team=${encodeURIComponent(state.teamId)}&sprint=${encodeURIComponent(state.sprintId)}`);
     const p = d.progress, w = d.window, h = d.health, t = d.totals || {};
@@ -196,25 +202,11 @@ const SprintView = (() => {
     }));
   }
 
-  /**
-   * The browser names the file after the document title, so the title is set
-   * for the duration of the print and put back afterwards — otherwise every
-   * sprint report saves as "Planning Tool.pdf" and a folder of them is
-   * unreadable.
-   */
+  /** The filename this report saves as. `UI.exportPdf` does the rest. */
   function exportPdf(d, state) {
     const sp = d.sprint || {};
     const team = (state.teams || []).find(t => t.id === state.teamId) || {};
-    const was = document.title;
-    const slug = (v) => String(v || '').trim().replace(/[\\/:*?"<>|]+/g, '-');
-    document.title = `${slug(team.jiraName || team.name || state.teamId)} — ${slug(sp.name || state.sprintId)} — sprint report`;
-    // Restoring on the `afterprint` event rather than straight after the call:
-    // in some browsers `print()` returns before the dialogue is done with the
-    // title, and the file ends up named after the app instead of the sprint.
-    const restore = () => { document.title = was; window.removeEventListener('afterprint', restore); };
-    window.addEventListener('afterprint', restore);
-    window.print();
-    setTimeout(restore, 60000);   // a dialogue left open all day still ends tidy
+    UI.exportPdf([team.jiraName || team.name || state.teamId, sp.name || state.sprintId, 'sprint report']);
   }
 
 
@@ -315,7 +307,7 @@ const SprintView = (() => {
             <tbody>${c.rows.map(r => `
               <tr>
                 <td>${UI.esc(r.component)}</td>
-                <td data-sort-value="${r.priority == null ? 99 : r.priority}">${prio(d, r)}</td>
+                <td data-sort-value="${r.priority == null ? UNSET_SORT : r.priority}">${prio(d, r)}</td>
                 <td class="num">${r.count}</td>
                 <td class="num">${UI.num(r.points)}</td>
                 <td class="num">${UI.num(r.done)}</td>

@@ -234,6 +234,202 @@ check('an empty store profiles to a row of zeroes, not to an error', () => {
   assert.strictEqual(bp.profile(null, { asOf: '2026-09-16' }).periods.length, bp.DEFAULT_PERIODS.month);
 });
 
+/* ── "all": every period there has ever been ─────────────────────────────
+   The other three windows say how WIDE a bar is and are fixed in length. All
+   says how far BACK the chart goes — to the first event — and then has to pick
+   a bar width for a span nobody knew in advance. These checks pin both halves:
+   where the window starts, and what it decides the bars should be. */
+
+const TODAY = '2026-09-16';
+const first = (at) => epic(`E-${at}`, [move(at, 'Ready for Automation', 'Automated')]);
+const all = (epics, asOf = TODAY) => bp.profile(epics, { grain: 'all', asOf });
+
+check('ALL REACHES BACK TO THE FIRST EVENT, not to a fixed number of periods', () => {
+  const p = all([first('2026-03-04'), first('2026-08-20')]);
+  assert.strictEqual(p.window, 'all', 'the window it answers for');
+  assert.strictEqual(p.periods[0].start, '2026-03-01', 'the first bar is the period the oldest event lands in');
+  assert.strictEqual(p.periods[p.periods.length - 1].end, '2026-09-30', 'and the last is the one we are in');
+  assert.strictEqual(p.periods.reduce((n, x) => n + x.total, 0), 2, 'with every event inside the window');
+});
+
+check('and it does NOT run off to the epoch when there are no events', () => {
+  // `new Date(null)` is the epoch, and an "all" with no floor would ask for
+  // fifty-six years of empty bars. It falls back to the default month view.
+  const p = all([]);
+  assert.strictEqual(p.periods.length, bp.DEFAULT_PERIODS.month);
+  assert.strictEqual(p.grain, 'month');
+  assert.strictEqual(p.clamped, false);
+});
+
+check('THE BAR WIDTH IS CHOSEN FROM THE SPAN, so All is never 150 slivers', () => {
+  // Weeks while it is short, months once it is a year, years once it is many.
+  assert.strictEqual(all([first('2026-06-01')]).grain, 'week', 'three months of history reads as weeks');
+  assert.strictEqual(all([first('2025-11-01')]).grain, 'month', 'ten months is months');
+  assert.strictEqual(all([first('2019-01-01')]).grain, 'year', 'seven years is years');
+});
+
+check('the boundaries land where grainForSpan says, not a day either side', () => {
+  const to = new Date('2026-09-16T00:00:00Z');
+  const back = (days) => new Date(to.getTime() - days * 864e5);
+  assert.strictEqual(bp.grainForSpan(back(26 * 7), to), 'week', '26 weeks is still weekly');
+  assert.strictEqual(bp.grainForSpan(back(26 * 7 + 1), to), 'month', 'one day more is not');
+  assert.strictEqual(bp.grainForSpan(back(36 * 31), to), 'month', 'the top of the monthly range');
+  assert.strictEqual(bp.grainForSpan(back(36 * 31 + 1), to), 'year', 'and one day past it');
+});
+
+check('a span longer than the cap SAYS SO rather than looking like the whole story', () => {
+  // Beyond MAX_PERIODS the oldest bars are off the left edge. A chart that
+  // quietly starts in 2017 reads as "nothing happened before 2017".
+  const p = all([first('1995-01-01')]);
+  assert.strictEqual(p.grain, 'year');
+  assert.strictEqual(p.periods.length, bp.MAX_PERIODS.year);
+  assert.strictEqual(p.clamped, true, 'the screen has to be able to say the window is truncated');
+});
+
+check('and a span that fits exactly is NOT reported as truncated', () => {
+  // The off-by-one that would make every "all" claim hidden history.
+  const p = all([first('2026-08-01')]);
+  assert.ok(p.periods.length < bp.MAX_PERIODS[p.grain]);
+  assert.strictEqual(p.clamped, false);
+});
+
+check('periodsBetween counts real months, not a span divided by 30', () => {
+  // February is why this walks the periods instead of dividing.
+  const feb = new Date('2026-02-03T00:00:00Z');
+  assert.strictEqual(bp.periodsBetween(feb, new Date('2026-04-15T00:00:00Z'), 'month', 99), 3,
+    'Feb, Mar, Apr');
+  assert.strictEqual(bp.periodsBetween(feb, feb, 'month', 99), 1, 'the same month is one period');
+  assert.strictEqual(bp.periodsBetween(feb, new Date('2026-04-15T00:00:00Z'), 'month', 2), 2, 'and the cap holds');
+});
+
+check('a fixed window still ignores the event floor entirely', () => {
+  // All is the ONLY window that looks at the data to decide its length. Month
+  // must still be twelve months whether the history is a week or a decade.
+  const p = bp.profile([first('1999-01-01')], { grain: 'month', asOf: TODAY });
+  assert.strictEqual(p.periods.length, bp.DEFAULT_PERIODS.month);
+  assert.strictEqual(p.window, 'month');
+  assert.strictEqual(p.clamped, false);
+});
+
+check('"all" is offered as a window but is not a grain', () => {
+  // The distinction the screen depends on: chips are built from WINDOWS, and
+  // anything reading GRAINS as bar widths must not be handed "all".
+  assert.ok(bp.WINDOWS.includes('all'), 'the chip has to have something to be built from');
+  assert.ok(!bp.GRAINS.includes('all'), '"all" is not a bar width');
+  assert.deepStrictEqual(bp.WINDOWS.slice(0, 3), bp.GRAINS, 'and the fixed three keep their order');
+  // Every window a chip can send must come back with a real grain.
+  for (const w of bp.WINDOWS) {
+    assert.ok(bp.GRAINS.includes(bp.profile([first('2026-05-01')], { grain: w, asOf: TODAY }).grain), w);
+  }
+});
+
+/* ── the drill-in behind a bar ───────────────────────────────────────────
+   A bar says five and the drawer lists five. That is the whole contract, and
+   it holds only because both sides run `eventsOf` over the same epics — so
+   these check the equivalence directly rather than checking one side twice. */
+
+const spread = () => {
+  const out = [];
+  let k = 0;
+  const add = (at, from, tt) => {
+    k++;
+    out.push({ key: `K${k}`, components: tt ? ['TrueTest', 'PS_A'] : ['PS_A'],
+      transitions: [move(at, from, 'Automated')] });
+  };
+  for (const m of ['05', '06', '07', '08']) {
+    add(`2026-${m}-03`, 'Ready for Automation', true);
+    add(`2026-${m}-14`, 'Ready for Automation', false);
+    add(`2026-${m}-21`, 'Ready for Automation', false);
+  }
+  // Two epics that arrive, leave and come back — the later arrivals are
+  // maintenance, and they must land in the period they happened in.
+  out.push({ key: 'KM1', components: ['PS_A'], transitions: [
+    move('2026-05-02', 'Ready for Automation', 'Automated'),
+    move('2026-07-09', 'Maintenance', 'Automated'),
+  ] });
+  out.push({ key: 'KM2', components: ['TrueTest', 'PS_A'], transitions: [
+    move('2026-05-02', 'Ready for Automation', 'Automated'),
+    move('2026-08-09', 'Maintenance', 'Automated'),
+  ] });
+  return out;
+};
+
+/** What the route does: the events inside one drawn period, by bucket. */
+const inPeriod = (epics, period, bucket) => {
+  const day = (t) => new Date(t).toISOString().slice(0, 10);
+  return bp.eventsOf(epics)
+    .filter(e => !bucket || e.bucket === bucket)
+    .filter(e => day(e.t) >= period.start && day(e.t) <= period.end)
+    .map(e => e.key);
+};
+
+check('EVERY BAR SEGMENT LISTS EXACTLY AS MANY EPICS AS IT DRAWS', () => {
+  const epics = spread();
+  const p = bp.profile(epics, { grain: 'month', periods: 6, asOf: '2026-09-16' });
+  let checked = 0;
+  for (const period of p.periods) {
+    for (const b of bp.BUCKETS) {
+      const drawn = (period.counts || {})[b.key] || 0;
+      assert.strictEqual(inPeriod(epics, period, b.key).length, drawn,
+        `${period.label} / ${b.key}: the drawer and the bar disagree`);
+      if (drawn) checked++;
+    }
+  }
+  assert.ok(checked >= 6, `only ${checked} non-empty segments exercised — the fixture proves nothing`);
+});
+
+check('and the period total lists the whole bar, every column at once', () => {
+  const epics = spread();
+  const p = bp.profile(epics, { grain: 'month', periods: 6, asOf: '2026-09-16' });
+  for (const period of p.periods) {
+    assert.strictEqual(inPeriod(epics, period, '').length, period.total, period.label);
+  }
+});
+
+check('the same holds at every grain, including the one "all" picks', () => {
+  // The window is what decides period boundaries, and "all" decides its own —
+  // so a drawer that reconstructed boundaries instead of reading them back
+  // would break here first.
+  const epics = spread();
+  for (const grain of ['week', 'month', 'year', 'all']) {
+    const p = bp.profile(epics, { grain, asOf: '2026-09-16' });
+    const listed = p.periods.reduce((n, period) => n + inPeriod(epics, period, '').length, 0);
+    const drawn = p.periods.reduce((n, period) => n + period.total, 0);
+    assert.strictEqual(listed, drawn, `${grain}: ${listed} listed against ${drawn} drawn`);
+  }
+});
+
+check('AN EPIC AUTOMATED TWICE APPEARS IN BOTH PERIODS, under different columns', () => {
+  // KM1 builds in May and is maintained in July. Both are real events and the
+  // drawer must show it in both — deduplicating by epic would make the list
+  // shorter than the bar.
+  const epics = spread();
+  const p = bp.profile(epics, { grain: 'month', periods: 6, asOf: '2026-09-16' });
+  const may = p.periods.find(x => x.start === '2026-05-01');
+  const jul = p.periods.find(x => x.start === '2026-07-01');
+  assert.ok(inPeriod(epics, may, 'kseBuild').includes('KM1'), 'the build, in May');
+  assert.ok(inPeriod(epics, jul, 'kseMaint').includes('KM1'), 'the maintenance, in July');
+  assert.ok(!inPeriod(epics, jul, 'kseBuild').includes('KM1'), 'and not as a build twice');
+});
+
+check('eventsOf carries the epic KEY, or the drawer has nothing to list', () => {
+  const evs = bp.eventsOf([epic('E9', [move('2026-05-05', 'Ready for Automation', 'Automated')])]);
+  assert.strictEqual(evs.length, 1);
+  assert.strictEqual(evs[0].key, 'E9');
+  assert.strictEqual(evs[0].bucket, 'kseBuild');
+  assert.strictEqual(evs[0].epic, 0, 'and its position, which is what counts distinct epics');
+});
+
+check('an epic with no key still counts, rather than collapsing the total', () => {
+  // `withEvents` counts by position for exactly this reason.
+  const p = bp.profile([
+    { components: ['PS_A'], transitions: [move('2026-05-05', 'Ready for Automation', 'Automated')] },
+    { components: ['PS_A'], transitions: [move('2026-05-06', 'Ready for Automation', 'Automated')] },
+  ], { grain: 'month', periods: 2, asOf: '2026-05-20' });
+  assert.strictEqual(p.withEvents, 2, 'two epics, not one');
+  assert.strictEqual(p.events, 2);
+});
+
 /* ── run ───────────────────────────────────────────────────────────── */
 
 (async () => {

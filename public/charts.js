@@ -294,7 +294,25 @@ const Charts = (() => {
    * the hover regardless, and the period total sits above the bar where there
    * is always room for it.
    */
-  function stacked(periods, series, { height = 300, unit = 'items' } = {}) {
+  /**
+   * `drill` makes every segment and every period total a control.
+   *
+   * Off by default, because a chart whose bars look clickable and are not is
+   * worse than one that plainly is not — and only the caller knows whether
+   * anything is listening.
+   *
+   * The whole SEGMENT carries the affordance, not just the number printed in
+   * it. The number is a 9.5px glyph and, per the note above, is not drawn at
+   * all on a thin bar — so a drill-in hung on the text alone would be
+   * unhittable in exactly the places the bars are smallest, which are the
+   * places worth asking about.
+   *
+   * Each one is `role="button"` and focusable, which on a twelve-month chart is
+   * up to sixty tab stops. A real cost, accepted because the alternative —
+   * mouse-only numbers — makes the data unreachable rather than merely tedious,
+   * and a chart is a region a keyboard user can tab past in one go.
+   */
+  function stacked(periods, series, { height = 300, unit = 'items', drill = false } = {}) {
     const data = (periods || []).filter(Boolean);
     const keys = (series || []).filter(s => s && s.key);
     if (!data.length || !keys.length) return '';
@@ -317,11 +335,21 @@ const Charts = (() => {
       const cx = padL + step * i + step / 2;
       const x = cx - bw / 2;
       let acc = 0;
+      // `p.start` identifies the period to a drill-in: the label ("Sep") is not
+      // unique across a window that spans years, and the index would break the
+      // moment the window changed under an open drawer.
+      const hook = (bucketKey, name) => (drill && p.start
+        ? ` class="drillable" role="button" tabindex="0" data-act="backlog"`
+          + ` data-period="${esc(p.start)}" data-bucket="${esc(bucketKey)}"`
+          + ` aria-label="${esc(name)}"`
+        : '');
+
       for (const s of keys) {
         const v = (p.counts || {})[s.key] || 0;
         if (v <= 0) continue;
         const top = y(acc + v), h = Math.max(0.5, y(acc) - top);
-        body += `<rect x="${x}" y="${top}" width="${bw}" height="${h}" fill="${s.color}">`
+        body += `<g${hook(s.key, `${p.label} — ${s.label}: ${v} ${unit}`)}>`
+          + `<rect x="${x}" y="${top}" width="${bw}" height="${h}" fill="${s.color}">`
           + `<title>${esc(p.label)} — ${esc(s.label)}: ${v} ${esc(unit)}</title></rect>`;
         // 13px of bar and 15px of bar width is the floor for a legible 9.5px
         // number with air around it; below that the hover is the only sane
@@ -333,11 +361,16 @@ const Charts = (() => {
           body += `<text x="${cx}" y="${top + h / 2 + 3.4}" text-anchor="middle" font-size="9.5"`
             + ` font-weight="600" fill="${s.ink || '#FFFFFF'}" style="pointer-events:none">${v}</text>`;
         }
+        body += '</g>';
         acc += v;
       }
       if (acc > 0) {
-        body += `<text x="${cx}" y="${y(acc) - 5}" text-anchor="middle" font-size="9.5" font-weight="700"`
-          + ` fill="${AXIS}">${acc}</text>`;
+        // The total opens the whole period — every column at once — which is
+        // the question "what happened in August" rather than "what did we
+        // build in August". An empty bucket says so.
+        body += `<g${hook('', `${p.label}: ${acc} ${unit} across every column`)}>`
+          + `<text x="${cx}" y="${y(acc) - 5}" text-anchor="middle" font-size="9.5" font-weight="700"`
+          + ` fill="${AXIS}">${acc}</text></g>`;
       }
       // Every other label once the bars get tight, so they never overlap.
       const skip = step < 34 && i % 2 === 1;

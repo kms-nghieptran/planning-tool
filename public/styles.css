@@ -252,6 +252,46 @@ select, input[type="text"], input[type="number"], input[type="password"], input[
 select:focus, input:focus, textarea:focus { outline: 2px solid var(--brand-blue); outline-offset: -1px; }
 textarea { width: 100%; resize: vertical; font-size: 13px; }
 
+/* A LIST OF VALUES, WEARING A TEXT FIELD'S CLOTHES.
+   It borrows the input chrome above — same border, radius and background — so
+   a row of three controls does not have one that looks like a different kind
+   of thing. What it adds is that the contents are visibly separate items.
+
+   The box grows with its contents rather than scrolling: a team with six
+   keywords has six keywords, and hiding four behind a scrollbar in a settings
+   page is how someone concludes only two are set. */
+.taglist {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 5px;
+  background: var(--app-bg); border: 1px solid var(--app-line);
+  border-radius: var(--radius-sm); padding: 4px 6px; min-height: 32px;
+}
+.taglist:focus-within { outline: 2px solid var(--brand-blue); outline-offset: -1px; }
+
+.tagval {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 12px; line-height: 1.5; padding: 2px 4px 2px 8px;
+  border-radius: var(--pill); background: var(--app-subtle);
+  border: 1px solid var(--app-line-soft); color: var(--app-fg);
+  max-width: 100%; overflow-wrap: anywhere;
+}
+.tagval-x {
+  font: inherit; font-size: 14px; line-height: 1; padding: 0 3px;
+  border: none; background: none; color: var(--app-fg-3); cursor: pointer;
+  border-radius: var(--pill);
+}
+.tagval-x:hover { color: var(--risk); background: var(--app-line-soft); }
+.tagval-x:focus-visible { outline: 2px solid var(--brand-blue); outline-offset: 1px; }
+
+/* The add-box is the rest of the row. `flex: 1` with a small basis keeps it
+   usable when chips have taken most of the width, and drops it onto its own
+   line rather than squeezing it to nothing. */
+.taglist-in {
+  flex: 1 1 90px; min-width: 90px;
+  border: none; background: none; padding: 3px 2px; font-size: 13px;
+}
+.taglist-in:focus { outline: none; }
+@media print { .tagval-x { display: none; } }
+
 .btn {
   font: inherit; font-size: 13px; font-weight: var(--font-weight-medium, 500);
   border-radius: var(--pill); padding: 7px 16px; cursor: pointer;
@@ -551,8 +591,29 @@ a.issue-key:focus-visible { outline: 2px solid var(--brand-blue); outline-offset
 
 /* flags / reasons */
 .reasons { list-style: none; padding: 0; margin: 10px 0 0; display: grid; gap: 8px; }
-.reasons li { display: flex; gap: 9px; font-size: 12.5px; line-height: 1.45; align-items: flex-start; }
-.reasons li::before { content: ''; width: 6px; height: 6px; border-radius: 50%; margin-top: 6px; flex: none; background: var(--app-fg-3); }
+/* THE ITEM IS NOT A FLEX ROW, and that is the whole point of this rule.
+   It was, with the dot as the first flex child — which made every `<strong>`,
+   every `<code>` and each run of text between them its OWN flex item. A
+   sentence containing two of those laid out as three columns: the bold part in
+   one, the middle in another, the tail in a third, each wrapping inside its own
+   column. On a wide card that passed for a line of text. In the PDF, where the
+   column is half the width, "Obsoleted — no Automation Status and labelled
+   `obsolete`. Retired, not waiting on anyone." came out with the code box
+   sitting to the RIGHT of the clause it belongs to and the sentence read in the
+   wrong order.
+
+   An absolutely-positioned marker keeps the dot and leaves the content as one
+   ordinary inline flow, which is what a sentence has to be. Ten lists across
+   seven views use this class, and every one of them was splitting its
+   `<strong>` off into a column of its own. */
+.reasons li {
+  position: relative; padding-left: 15px;
+  font-size: 12.5px; line-height: 1.45;
+}
+.reasons li::before {
+  content: ''; position: absolute; left: 0; top: 6px;
+  width: 6px; height: 6px; border-radius: 50%; background: var(--app-fg-3);
+}
 .reasons li.risk::before { background: var(--risk); }
 .reasons li.warn::before { background: var(--warn); }
 .reasons li.ok::before   { background: var(--ok); }
@@ -658,6 +719,21 @@ select.prio option[value="4"] { color: var(--app-fg-3); }
 .tag.tag-btn:hover { border-color: currentColor; }
 .tag.tag-btn:focus-visible { outline: 2px solid var(--brand-blue); outline-offset: 2px; }
 @media print { .tag.tag-btn { cursor: auto; } }
+
+/* A BAR SEGMENT YOU CAN OPEN.
+   The hover is a lift in opacity rather than a border or a colour change: the
+   fill IS the series, and anything that alters the hue makes the bar briefly
+   report a different column. Fading the segment keeps the colour and still
+   says "this one".
+
+   `outline-offset` is zero on purpose. There is no box to offset from on an
+   SVG child, and a 2px gap around a 6px-wide sliver puts the focus ring over
+   its neighbours instead of around itself. */
+.drillable { cursor: pointer; }
+.drillable:hover rect, .drillable:hover text { opacity: 0.78; }
+.drillable:focus { outline: none; }
+.drillable:focus-visible { outline: 2px solid var(--brand-blue); outline-offset: 0; }
+@media print { .drillable { cursor: auto; } }
 
 /* A NUMBER YOU CAN OPEN.
    It is a <button> so the keyboard and a screen reader get it for free, and
@@ -1025,11 +1101,51 @@ svg text { font-family: var(--font-family-sans, Poppins, system-ui, sans-serif);
   table { font-size: 10.5px; }
   .section { margin-bottom: 14px; }
 
-  /* The page's own title block — see `printHeader` in the sprint view. It is
-     the only thing that exists solely for print, because a PDF that does not
-     say which team, which sprint and when it was taken is a page of numbers
-     nobody can file. */
+  /* The page's own title block — see `printHeader` in the sprint and coverage
+     views. It is the only thing that exists solely for print, because a PDF
+     that does not say what it covers and when it was taken is a page of
+     numbers nobody can file. */
   .print-only { display: block !important; }
+
+  /* ── CONTROLS ARE NOT CONTENT ──────────────────────────────────────────
+     Every one of these sets what the page shows and shows nothing itself. On
+     paper a chip cannot be pressed, so it is a coloured word that looks like
+     data and is not — and the active one looks like an answer. What each was
+     saying is restated in words by `printHeader`, which is the condition for
+     hiding them rather than a consolation for it. */
+  .chip, .combo, .combo-list, .picker-card, .comp-filter, .taglist-in, .tagval-x { display: none !important; }
+  /* NOTE that this takes the selection chips with it — they are `.chip`s
+     inside `.picker-card`, so "which components am I looking at" leaves the
+     page here. That fact is restated by `printHeader`, in the title, where a
+     reader looks for it. Hiding the picker without restating the scope would
+     produce a report of a filtered subset with nothing saying so. */
+
+  /* A DROPDOWN PRINTS AS A DROPDOWN — a sunken box with an arrow, and on some
+     engines a blank one. The priority column is the only form control left in
+     a table by the time the furniture is hidden, and it has to read as the
+     value it holds, like every other cell. */
+  select.prio {
+    appearance: none; -webkit-appearance: none;
+    border: none !important; background: none !important;
+    padding: 0 !important; font-weight: 600;
+  }
+
+  /* A drill-in is a control too, but its LABEL is the number — so these lose
+     the affordance and keep the value, rather than being hidden. */
+  .numlink { border: none !important; background: none !important; padding: 0 !important; font: inherit; }
+  .tag.tag-btn { border-style: solid; }
+  .drillable { cursor: auto; }
+
+  /* A chart is the widest thing on the page and the one that suffers most from
+     being split across a page break. */
+  svg { break-inside: avoid; }
+  .mixkey { break-inside: avoid; font-size: 10px; }
+
+  /* The coverage grid is the long one — 125 rows and thirteen columns — and it
+     is the reason this report runs to several pages. Nothing here makes it
+     shorter; it makes each page of it readable. */
+  .comp-cell { display: block; }
+  .prio-tag { font-size: 9px; }
 }
 
 /* Off-screen until the page is printed. */

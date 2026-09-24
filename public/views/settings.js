@@ -6,6 +6,9 @@ const SettingsView = (() => {
     const s = await UI.api('/api/state');
     const cfg = s.config;
     const audit = await UI.api('/api/audit?limit=40');
+    // The component and team values actually present, so the two scope
+    // settings below can be chosen from the data rather than typed.
+    const scope = await UI.api('/api/coverage/scope').catch(() => null);
     const team = s.plan.teams.find(t => t.id === state.teamId) || s.plan.teams[0];
 
     mount.innerHTML = `
@@ -61,6 +64,44 @@ const SettingsView = (() => {
             <a class="btn ghost sm" href="/api/backup">Back up plan</a>
             <button class="btn ghost sm" data-act="restore">Restore plan</button>
             <input type="file" id="restoreFile" accept=".json" hidden>
+          </div>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="card wide">
+          <div class="section-head" style="margin-bottom:6px">
+            <h3>Coverage scope</h3>
+          </div>
+          <div class="sub">
+            What <strong>Overall Coverage</strong> counts. Both settings are yours and survive every sync.
+          </div>
+
+          <div class="setting-row" style="border:none;padding-top:10px">
+            <label>Excluded components</label>
+            ${UI.tagList({
+              name: 'excl', values: s.plan.excludedComponents || [], placeholder: 'Technical_Works',
+              label: 'Add a component to exclude from coverage',
+            })}
+            <div class="hint">
+              Components that are not automation suites. An ${UI.esc(scopeNoun(s).toLowerCase())} that also
+              carries a real suite keeps counting under that suite — this removes the component, not the work.
+              One whose <em>only</em> components are excluded leaves the count entirely.
+            </div>
+          </div>
+
+          <div class="setting-row" style="border:none;padding-top:14px">
+            <label>Teams that count</label>
+            ${UI.tagList({
+              name: 'cvteams', values: s.plan.coverageTeams || [], placeholder: 'every team counts',
+              label: 'Add a Jira Team value that counts toward coverage',
+            })}
+            <div class="hint">
+              Jira <strong>Team</strong> field values. Leave it empty and every team counts. Add any and it
+              becomes an allow-list: an ${UI.esc(scopeNoun(s).toLowerCase())} on another team — or on
+              <em>no</em> team — stops counting.
+            </div>
+            ${teamMenu(scope, s)}
           </div>
         </div>
       </section>
@@ -249,13 +290,22 @@ const SettingsView = (() => {
           </div>
           <div class="setting-row" style="border:none;padding-top:0">
             <label>Sprint name keywords</label>
-            <input type="text" data-keywords="${t.id}" value="${UI.esc((t.sprintKeywords || []).join(', '))}" placeholder="ruby">
-            <div class="hint">Fallback matching when a board is not mapped</div>
+            ${UI.tagList({
+              name: `kw:${t.id}`, values: t.sprintKeywords || [], placeholder: 'ruby',
+              label: `Add a sprint name keyword for ${t.jiraName || t.name}`,
+            })}
+            <div class="hint">
+              Add as many as you need — a sprint matches if its name contains <em>any</em> of them.
+              Fallback matching when a board is not mapped.
+            </div>
           </div>
           <div class="setting-row" style="border:none;padding-top:0">
             <label>Jira Team field values</label>
-            <input type="text" data-jirateams="${t.id}" value="${UI.esc((t.jiraTeams || []).join(', '))}" placeholder="Katalon Auto Ruby">
-            <div class="hint">Used to claim backlog items</div>
+            ${UI.tagList({
+              name: `jt:${t.id}`, values: t.jiraTeams || [], placeholder: 'Katalon Auto Ruby',
+              label: `Add a Jira Team field value for ${t.jiraName || t.name}`,
+            })}
+            <div class="hint">Used to claim backlog items — any of them counts</div>
           </div>
         </div>
 
@@ -273,10 +323,81 @@ const SettingsView = (() => {
             </div>
           </div>` : ''}
 
-        ${dormant.length ? `
-          <div class="muted" style="font-size:12px;margin-top:10px">
-            No Jira activity found for: ${dormant.map(d => UI.esc(d.name)).join(', ')} — usually a display-name mismatch. Add the Jira spelling to that member's aliases in <code>plan.json</code>.
-          </div>` : ''}
+        ${dormantNote(dormant)}
+      </div>`;
+  }
+
+  /**
+   * Roster members with no work in this team's sprints — and WHY.
+   *
+   * These were one line that always blamed a display-name mismatch and told
+   * the reader to add a Jira alias. For someone already linked by accountId
+   * that is advice to fix something that is not broken: Jira knows exactly who
+   * they are, they just have no work on this board. On his own data that is
+   * Diep Tu on Titan — 108 issues, every one of them on the TrueTest board.
+   *
+   * So the two are split. The unlinked group keeps the alias advice, which is
+   * right for them; the linked group is stated as the fact it is, with no
+   * action attached, because there is nothing to do about it.
+   */
+  /** What coverage counts — "Epic" unless the config says otherwise. */
+  const scopeNoun = (s) => ((s.config && s.config.metrics && s.config.metrics.coverageScope) || 'Epic');
+
+  /**
+   * EVERY TEAM VALUE IN THE DATA, WITH ITS COUNT — click one to add it.
+   *
+   * This is the part that makes the setting safe, and it exists because of a
+   * specific near-miss. The boards are called "Katalon Auto Titan" and
+   * "Katalon Auto Ruby"; the Team FIELD on those same epics reads "Katalon PSA
+   * (Titan)" and "Katalon RDA (Ruby)". An allow-list typed from the board
+   * names would have looked entirely reasonable and quietly dropped 2,158
+   * epics — more than half the project — out of the coverage ratio.
+   *
+   * A blank text box invites exactly that mistake. A list of the real values
+   * with their epic counts makes it almost impossible: a name that is not in
+   * the data is not in the list, and a count of 0 is visible at a glance.
+   *
+   * Already-chosen values are shown too, marked, rather than hidden — the
+   * point of the list is to show what the setting is doing, and a chosen
+   * value disappearing from it is how you lose track of why a team is missing.
+   */
+  function teamMenu(scope, s) {
+    const values = (scope && scope.teamValues) || [];
+    if (!values.length) return '';
+    const chosen = new Set((s.plan.coverageTeams || []).map(v => String(v).trim().toLowerCase()));
+    const on = (name) => chosen.has(String(name).trim().toLowerCase());
+    return `
+      <div style="margin-top:10px;padding:10px 12px;border-radius:var(--radius-sm);background:var(--app-subtle)">
+        <div class="eyebrow"><i></i>Team values in your data</div>
+        <div class="muted" style="font-size:11.5px;margin:6px 0 9px">
+          As Jira spells them, with ${UI.esc(scopeNoun(s).toLowerCase())} counts. Click to add —
+          these are the exact strings, which are often not the board names.
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          ${values.map(v => `
+            <button class="chip${on(v.name) ? ' active' : ''}" data-add-team="${UI.esc(v.name)}"
+              ${v.unassigned ? 'disabled title="Epics with no Team field — they cannot be allowed by name. An allow-list always excludes them."' : `title="${on(v.name) ? 'Already counted' : `Add ${UI.esc(v.name)}`}"`}>
+              ${UI.esc(v.name)} <span class="muted">${UI.int(v.count)}</span>
+            </button>`).join('')}
+        </div>
+      </div>`;
+  }
+
+  function dormantNote(dormant) {
+    if (!dormant.length) return '';
+    const linked = dormant.filter(d => d.linked);
+    const unlinked = dormant.filter(d => !d.linked);
+    const names = (list) => list.map(d => UI.esc(d.name)).join(', ');
+    return `
+      <div class="muted" style="font-size:12px;margin-top:10px">
+        ${unlinked.length ? `<div>
+          Not matched to anyone in Jira: ${names(unlinked)} — usually a display-name mismatch.
+          Add the Jira spelling to that member's aliases in <code>plan.json</code>.
+        </div>` : ''}
+        ${linked.length ? `<div${unlinked.length ? ' style="margin-top:5px"' : ''}>
+          On the roster but with no work in this team's sprints: ${names(linked)}.
+          Matched to Jira by account, so this is what they are doing, not a naming problem.
+        </div>` : ''}
       </div>`;
   }
 
@@ -361,14 +482,49 @@ const SettingsView = (() => {
 
     drawRules();
 
+    /* The server PARSES the lists it is sent and returns what it stored, so a
+       dropped empty or a deduplicated repeat is reported rather than left to
+       be noticed. `notes` is empty on the ordinary save and says nothing. */
     const saveTeam = async (teamId, patch) => {
-      await UI.jsonPut('/api/team', { teamId, ...patch });
-      UI.toast('Team updated — run a sync to pull its sprints');
+      const r = await UI.jsonPut('/api/team', { teamId, ...patch });
+      const notes = (r && r.notes) || [];
+      UI.toast(notes.length
+        ? `Team updated — ${notes.join(' · ')}`
+        : 'Team updated — run a sync to pull its sprints');
       App.refresh();
     };
     UI.$$('[data-board]', mount).forEach(el => el.addEventListener('change', () => saveTeam(el.dataset.board, { boardId: el.value || null })));
-    UI.$$('[data-keywords]', mount).forEach(el => el.addEventListener('change', () => saveTeam(el.dataset.keywords, { sprintKeywords: el.value.split(',').map(x => x.trim()).filter(Boolean) })));
-    UI.$$('[data-jirateams]', mount).forEach(el => el.addEventListener('change', () => saveTeam(el.dataset.jirateams, { jiraTeams: el.value.split(',').map(x => x.trim()).filter(Boolean) })));
+    for (const t of (s.plan.teams || [])) {
+      UI.wireTagList(mount, `kw:${t.id}`, (sprintKeywords) => saveTeam(t.id, { sprintKeywords }));
+      UI.wireTagList(mount, `jt:${t.id}`, (jiraTeams) => saveTeam(t.id, { jiraTeams }));
+    }
+
+    const saveTeams = async (teams) => {
+      const r = await UI.jsonPut('/api/coverage-teams', { teams });
+      const notes = (r && r.notes) || [];
+      UI.toast(teams.length
+        ? `Coverage counts ${teams.length} team${teams.length === 1 ? '' : 's'}${notes.length ? ` — ${notes.join(' · ')}` : ''}`
+        : 'Coverage counts every team again');
+      App.refresh();
+    };
+    UI.wireTagList(mount, 'cvteams', saveTeams);
+    // Clicking a value in the menu adds it; clicking a chosen one removes it,
+    // so the list is a toggle rather than a one-way door.
+    UI.$$('[data-add-team]', mount).forEach(btn => btn.addEventListener('click', () => {
+      const name = btn.dataset.addTeam;
+      const now = s.plan.coverageTeams || [];
+      const has = now.some(v => String(v).trim().toLowerCase() === name.trim().toLowerCase());
+      saveTeams(has ? now.filter(v => String(v).trim().toLowerCase() !== name.trim().toLowerCase()) : [...now, name]);
+    }));
+
+    UI.wireTagList(mount, 'excl', async (components) => {
+      const r = await UI.jsonPut('/api/excluded-components', { components });
+      const notes = (r && r.notes) || [];
+      UI.toast(components.length
+        ? `${components.length} component${components.length === 1 ? '' : 's'} excluded from coverage${notes.length ? ` — ${notes.join(' · ')}` : ''}`
+        : 'Coverage counts every component again');
+      App.refresh();
+    });
 
     UI.$$('[data-remove-team]', mount).forEach(btn => btn.addEventListener('click', async () => {
       const name = btn.dataset.tname;

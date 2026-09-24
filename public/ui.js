@@ -781,6 +781,23 @@ const UI = (() => {
         th.dataset.sortCol = String(i);
         th.setAttribute('aria-sort', 'none');
       });
+
+      /* A GRID CAN CHOOSE THE COLUMN IT OPENS ON: `data-sort-default="1:asc"`.
+         Done here rather than by the view sorting its own rows, because going
+         through the same `sortTable` is what makes the rest behave: the heading
+         gets its arrow, the first click flips to descending instead of
+         re-applying what is already on screen, and the third click still
+         returns to the order the VIEW chose — `sortAt` is stamped from the DOM
+         on this first call, while that order is still what is in the DOM. A
+         view that pre-sorted its own rows would lose that original order for
+         good, and the third state would restore this sort instead of undoing
+         it. */
+      const def = table.dataset && table.dataset.sortDefault;
+      if (def) {
+        const [col, dir] = String(def).split(':');
+        const i = Number(col);
+        if (Number.isInteger(i) && i >= 0) sortTable(table, i, dir === 'desc' ? 'desc' : 'asc');
+      }
     }
     root.addEventListener('click', (e) => {
       const th = e.target && e.target.closest && e.target.closest('th.sortable');
@@ -795,6 +812,158 @@ const UI = (() => {
     });
   }
 
+  /**
+   * SAVE THE PAGE AS A PDF.
+   *
+   * `window.print()` is the whole export. The browser's own renderer produces
+   * exactly what is on screen — real charts, real fonts, real colours — and its
+   * dialogue offers "Save as PDF" on every platform this runs on. A generated
+   * PDF would mean a dependency, a second renderer to keep in step with the
+   * screen, and a stylesheet that is nobody's job to update.
+   *
+   * THE TITLE IS THE FILENAME. Browsers name the saved file after
+   * `document.title`, so it is set for the duration of the print and put back
+   * after — otherwise every report saves as "Planning Tool.pdf" and a folder of
+   * them is unreadable.
+   *
+   * Restored on `afterprint` rather than straight after the call: in some
+   * browsers `print()` returns before the dialogue has read the title, and the
+   * file ends up named after the app instead of the report. The timeout is the
+   * backstop for a dialogue left open all day.
+   *
+   * One definition rather than one per view. The restore is three subtle
+   * mechanisms — the event, the listener removal, the timeout — and a second
+   * hand-rolled copy is how one screen quietly goes back to naming every file
+   * after the app.
+   */
+  function exportPdf(title) {
+    const was = document.title;
+    const slug = (v) => String(v == null ? '' : v).trim().replace(/[\\/:*?"<>|]+/g, '-');
+    const name = (Array.isArray(title) ? title : [title]).map(slug).filter(Boolean).join(' — ');
+    if (name) document.title = name;
+    let done = false;
+    const restore = () => {
+      if (done) return;
+      done = true;
+      document.title = was;
+      window.removeEventListener('afterprint', restore);
+    };
+    window.addEventListener('afterprint', restore);
+    window.print();
+    setTimeout(restore, 60000);
+    return name;
+  }
+
+  /* ── a list of values, not a line of text ──────────────────────────────
+     WHY THIS EXISTS RATHER THAN A TEXT BOX.
+
+     Sprint keywords and Jira Team values are LISTS, and they were edited as a
+     comma-joined string. Three things go wrong with that and all three are
+     silent:
+
+       · Nothing says more than one is allowed. The box showed `ruby` and a
+         reader concludes it takes one word.
+       · The separator is a guess. `ruby; titan` and `ruby titan` were each
+         stored as one keyword that can never match anything, with no error.
+       · A stray trailing comma stored an EMPTY keyword, and an empty keyword
+         matches every sprint in the instance.
+
+     Chips fix all three by construction: the list is visibly a list, each
+     entry is visibly its own thing, and there is no separator to get wrong
+     because the control does the splitting.
+
+     The values are still parsed on the server, which is the actual contract —
+     this is the affordance, not the guarantee. */
+  const KEYWORD_SPLIT = /[,;\n\r\t]+/;
+
+  /** Split typed text the way the server does. Space is NOT a separator: "TT Week" is one keyword. */
+  const splitKeywords = (text) => String(text == null ? '' : text)
+    .split(KEYWORD_SPLIT).map(s => s.trim()).filter(Boolean);
+
+  /**
+   * @param {object} o
+   * @param {string} o.name        identifies this list to `wireTagList`
+   * @param {string[]} o.values    what it currently holds
+   * @param {string} o.placeholder shown in the empty add-box
+   * @param {string} o.label       for the screen reader on the add-box
+   */
+  function tagList({ name, values = [], placeholder = '', label = '' }) {
+    const vals = (values || []).map(v => String(v)).filter(Boolean);
+    return `
+      <div class="taglist" data-taglist="${esc(name)}">
+        ${vals.map(v => `
+          <span class="tagval">${esc(v)}<button type="button" class="tagval-x" data-drop="${esc(v)}"
+            aria-label="Remove ${esc(v)}" title="Remove ${esc(v)}">×</button></span>`).join('')}
+        <input type="text" class="taglist-in" data-taginput="${esc(name)}"
+          placeholder="${esc(vals.length ? 'add another…' : placeholder)}"
+          aria-label="${esc(label || 'Add a value')}">
+      </div>`;
+  }
+
+  /**
+   * Wire one tag list. `onChange(nextValues)` is called with the WHOLE list.
+   *
+   * The whole list rather than a delta, because the caller saves the field
+   * wholesale — and a delta would make the caller reconstruct the list it is
+   * about to send, which is the same array built twice in two places.
+   *
+   * Commits on Enter AND on blur. Blur matters more than it looks: typing a
+   * keyword and clicking Save elsewhere on the page is the obvious way to use
+   * this, and a control that silently drops what is in the box when it loses
+   * focus is one that quietly loses work.
+   */
+  function wireTagList(root, name, onChange) {
+    const box = $(`[data-taglist="${name}"]`, root);
+    if (!box) return;
+    const input = $(`[data-taginput="${name}"]`, box);
+    const current = () => $$('.tagval-x', box).map(b => b.dataset.drop);
+
+    const commit = (next) => {
+      // Deduplicated case-insensitively here as well as on the server, so the
+      // chip does not appear twice for the moment before the save comes back.
+      const seen = new Set();
+      const list = next.filter((v) => {
+        const k = String(v).toLowerCase();
+        if (seen.has(k)) return false;
+        seen.add(k);
+        return true;
+      });
+      onChange(list);
+    };
+
+    const add = () => {
+      const typed = splitKeywords(input.value);
+      input.value = '';
+      if (!typed.length) return false;
+      commit([...current(), ...typed]);
+      return true;
+    };
+
+    if (input) {
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); add(); return; }
+        // Backspace in an EMPTY box removes the last chip — the convention
+        // every tag field has, and the fastest way to undo a typo.
+        if (e.key === 'Backspace' && !input.value && current().length) {
+          e.preventDefault();
+          commit(current().slice(0, -1));
+        }
+      });
+      input.addEventListener('blur', () => { add(); });
+      // A paste of "a, b, c" becomes three chips rather than one, on the next
+      // tick — the value is not in the box yet when `paste` fires.
+      input.addEventListener('paste', () => { setTimeout(add, 0); });
+    }
+
+    box.addEventListener('click', (e) => {
+      const x = e.target.closest && e.target.closest('[data-drop]');
+      if (!x) return;
+      e.preventDefault();
+      commit(current().filter(v => v !== x.dataset.drop));
+    });
+  }
+
   return { esc, el, $, $$, num, pct, int, date, dateTime, ago, initials, avatar, personColor, workloadClass, toast, drawer, closeDrawer, api, jsonPut, jsonPost, jsonDelete, kpi, bar, mixBar, pointsFieldNote, CATEGORY_COLORS, setJiraBase, issueUrl, issueKey, issueKeys, jiraSearch, componentSearchUrl, combo, wireCombo, matchText, fitChars, sortable, sortTable, sortableTable, sortNumber,
-    itemsTable, epicCell, byStatusThenPoints, statusText, statusStage, drillNumber, drillDrawer };
+    itemsTable, epicCell, byStatusThenPoints, statusText, statusStage, drillNumber, drillDrawer,
+    tagList, wireTagList, splitKeywords, exportPdf };
 })();

@@ -345,7 +345,7 @@ const VIEW = fs.readFileSync(path.join(__dirname, '..', 'public', 'views', 'repo
     `backlog` defaults to null — the same thing the route's `.catch(() => null)`
     hands the view when it has nothing, so every caller written before the
     Backlog section existed keeps rendering exactly what it used to. */
-async function renderCoverage(payload, moved, backlog = null) {
+async function renderCoverage(payload, moved, backlog = null, drill = null) {
   let html = '';
   const el = () => ({
     addEventListener() {}, value: '', hidden: false, dataset: {}, style: {}, disabled: false,
@@ -356,6 +356,7 @@ async function renderCoverage(payload, moved, backlog = null) {
     querySelector: () => el(), querySelectorAll: () => [], closest: () => null,
   });
   const asked = [];
+  const printed = [];
   let rerender = () => {};
   const ctx = {
     console, Promise, setTimeout, clearTimeout, encodeURIComponent, CSS: { escape: String },
@@ -363,7 +364,20 @@ async function renderCoverage(payload, moved, backlog = null) {
     // state and re-rendering, so a stub that does nothing would make them
     // untestable and any of them could be dead.
     App: { refresh() { rerender(); } },
-    document: { createElement: () => el(), querySelector: () => el(), querySelectorAll: () => [] },
+    document: {
+      // Writable, because the PDF export sets it: the browser names the saved
+      // file after the title, and putting it back afterwards is the half of
+      // that which is easy to get wrong.
+      title: 'Planning Tool',
+      createElement: () => el(), querySelector: () => el(), querySelectorAll: () => [],
+    },
+    window: {
+      _on: {},
+      addEventListener(t, fn) { this._on[t] = fn; },
+      removeEventListener(t) { delete this._on[t]; },
+      // Records the title AT PRINT TIME, which is the only moment it matters.
+      print() { printed.push(ctx.document.title); },
+    },
   };
   vm.createContext(ctx);
   const read = (f) => fs.readFileSync(path.join(__dirname, '..', 'public', f), 'utf8');
@@ -372,9 +386,18 @@ async function renderCoverage(payload, moved, backlog = null) {
   ctx.UI.api = async (p) => {
     asked.push(p);
     if (p.includes('/movement')) return moved;
+    // Longest path first: '/backlog/epics' also contains '/backlog'.
+    if (p.includes('/backlog/epics')) {
+      if (drill instanceof Error) throw drill;
+      return drill;
+    }
     if (p.includes('/backlog')) return backlog;
     return payload;
   };
+  // The drawer renders outside the view's mount, so it is captured here rather
+  // than read back out of the page.
+  let drawn = '';
+  ctx.UI.drawer = (html) => { drawn = html; };
   vm.runInContext(`${VIEW}\n;globalThis.__v = CoverageReport;`, ctx);
   const clicks = [];
   const sent = [];
@@ -391,7 +414,10 @@ async function renderCoverage(payload, moved, backlog = null) {
     for (const fn of clicks.slice()) await fn({ target: t, preventDefault() {} });
     await new Promise(r => setTimeout(r, 5));
   };
-  return { get html() { return html; }, click, sent, asked, toString: () => html };
+  return {
+    get html() { return html; }, get drawer() { return drawn; },
+    click, sent, asked, printed, ctx, toString: () => html,
+  };
 }
 
 function payloadFor() {
@@ -403,6 +429,19 @@ function payloadFor() {
   ]);
   const v = cov.view(snap, {});
   return { ...v, attention: cov.assess(v), project: 'AUTOKAT' };
+}
+
+/** The same payload with his judgement on it, exactly as the route decorates it. */
+const priorityLib = require('../lib/priority');
+function payloadWithPriority(map = { PS_A: 1, PS_B: 3 }) {
+  const v = payloadFor();
+  const plan = { componentPriority: map };
+  return {
+    ...v,
+    byComponent: priorityLib.decorate(v.byComponent, plan),
+    byTool: priorityLib.decorate(v.byTool, plan),
+    priorityLevels: priorityLib.LEVELS,
+  };
 }
 
 const movedFixture = () => {
@@ -422,10 +461,15 @@ check('THE SECTION SITS DIRECTLY BELOW OVERALL AUTOMATION STATUS', async () => {
   // coverage is, so the next question is which way it is going.
   const r_ = await renderCoverage(payloadFor(), movedFixture());
   const html = r_.html;
-  const at = html.indexOf('Coverage movement');
+  /* Anchored to the HEADINGS, not to the words. This searched for the bare
+     phrase "Coverage movement" and started failing the moment the print header
+     mentioned the movement window in its summary line — the section had not
+     moved at all. A position check that any prose on the page can satisfy is
+     not checking position. */
+  const at = html.indexOf('<h3>Coverage movement</h3>');
   assert.ok(at > 0, 'the section has to render');
-  assert.ok(at > html.indexOf('Overall automation status'), 'below the breakdown');
-  assert.ok(at < html.indexOf('Coverage by component'), 'and above the component grid');
+  assert.ok(at > html.indexOf('<h3>Overall automation status</h3>'), 'below the breakdown');
+  assert.ok(at < html.indexOf('<h2>Coverage by component</h2>'), 'and above the component grid');
 });
 
 check('it shows the delta in points, both endpoints, and a chart', async () => {
@@ -609,6 +653,19 @@ check('and the routes are registered', () => {
   assert.match(server, /p === '\/api\/reports\/coverage\/backfill'/);
   assert.match(server, /searchWithHistory/, 'the backfill needs Jira\'s transition history to read');
   assert.match(server, /p === '\/api\/reports\/coverage\/moved'/, 'and the drill-in behind a driver tag');
+  assert.match(server, /p === '\/api\/reports\/backlog\/epics'/, 'and the drill-in behind a bar segment');
+
+  /* THE ROUTE MUST NOT DERIVE THE PERIOD ITSELF. It reads the boundaries back
+     off the profile the chart drew — which is the only reason the drawer and
+     the bar cannot disagree, and the only reason "all" resolves its grain the
+     same way on both sides. Asserted on the source because proving it for real
+     needs a populated snapshot and transition table, which is another suite. */
+  const route = server.slice(server.indexOf("p === '/api/reports/backlog/epics'"));
+  const body = route.slice(0, route.indexOf('\n  if (p ==='));
+  assert.match(body, /backlogProfile\.profile\(/, 'the route has to run the same profile');
+  assert.match(body, /prof\.periods\.find\(/, 'and take the window from it, not recompute one');
+  assert.match(body, /backlogProfile\.eventsOf\(/, 'and bucket with the shared classifier');
+  assert.match(body, /shown:/, 'and report what the bar says, so a drift is visible');
 });
 
 /* ── the backfill control is reachable from every state ────────────────
@@ -682,11 +739,449 @@ check('EACH SECTION OFFERS ITS OWN, rather than one button somewhere on the page
   }
 });
 
+/* ── the Backlog window chips, "All" included ────────────────────────── */
+
+/** A drawn backlog chart, so the chips and the foot note are on screen. */
+const backlogDrawn = (over = {}) => ({
+  grain: 'month', window: 'month', clamped: false, scope: 'Epic', backfilled: true,
+  epics: 5, withEvents: 3, events: 7, components: [],
+  basis: 'Epics whose Automation Status moved to Automated in the period.',
+  buckets: [{ key: 'ttBuild', label: 'New TT Build' }, { key: 'kseBuild', label: 'New KSE Build' }],
+  periods: [
+    { label: 'Aug', start: '2026-08-01', end: '2026-08-31', partial: false, counts: { ttBuild: 2, kseBuild: 1 }, total: 3 },
+    { label: 'Sep', start: '2026-09-01', end: '2026-09-30', partial: true, counts: { ttBuild: 3, kseBuild: 1 }, total: 4 },
+  ],
+  ...over,
+});
+
+check('ALL IS OFFERED ALONGSIDE WEEK, MONTH AND YEAR', async () => {
+  const html = (await renderCoverage(payloadFor(), movedFixture(), backlogDrawn())).html;
+  for (const w of ['week', 'month', 'year', 'all']) {
+    assert.match(html, new RegExp(`data-grain="${w}"`), `no ${w} chip`);
+  }
+  assert.match(html, /data-grain="all">All</, 'and it is labelled All');
+});
+
+check('pressing All asks for the whole history — and sends NO period count', async () => {
+  // "All" is not a number of periods; only the server knows when the first
+  // event was. Sending `periods=12` with it would silently cap it at a year.
+  const r_ = await renderCoverage(payloadFor(), movedFixture(), backlogDrawn());
+  await r_.click('[data-grain]', { grain: 'all' });
+  const asked = r_.asked.filter(p => p.includes('/backlog')).pop();
+  assert.match(asked, /grain=all/, 'the window never reached the route');
+  assert.doesNotMatch(asked, /periods=/, 'a period count would override the whole-history window');
+});
+
+check('and a fixed window still sends its count', async () => {
+  const r_ = await renderCoverage(payloadFor(), movedFixture(), backlogDrawn());
+  await r_.click('[data-grain]', { grain: 'week' });
+  const asked = r_.asked.filter(p => p.includes('/backlog')).pop();
+  assert.match(asked, /grain=week&periods=13/, 'the fixed windows are still fixed');
+});
+
+check('ALL SAYS WHAT IT CHOSE, because the bars change width underneath you', async () => {
+  const html = (await renderCoverage(payloadFor(), movedFixture(),
+    backlogDrawn({ window: 'all', grain: 'year' }))).html;
+  assert.match(html, /All time, in yearly bars from Aug\./, 'the reader cannot see the grain any other way');
+});
+
+check('and a truncated history is admitted, not presented as the whole story', async () => {
+  const html = (await renderCoverage(payloadFor(), movedFixture(),
+    backlogDrawn({ window: 'all', grain: 'year', clamped: true }))).html;
+  assert.match(html, /oldest is off the left edge/);
+});
+
+check('a fixed window says nothing — the chip is already the answer', async () => {
+  const html = (await renderCoverage(payloadFor(), movedFixture(), backlogDrawn())).html;
+  assert.doesNotMatch(html, /All time, in/, 'a note on every window is noise on three of them');
+  assert.doesNotMatch(html, /off the left edge/);
+});
+
+/* ── opening a bar ───────────────────────────────────────────────────── */
+
+const BACKLOG_EPICS = {
+  keys: ['AUTOKAT-1', 'AUTOKAT-2', 'AUTOKAT-3'],
+  catalogue: {
+    'AUTOKAT-1': { key: 'AUTOKAT-1', summary: 'Login suite', status: 'Done', components: ['PS_A'] },
+    'AUTOKAT-2': { key: 'AUTOKAT-2', summary: 'Billing suite', status: 'Done', components: ['PS_A'] },
+    'AUTOKAT-3': { key: 'AUTOKAT-3', absent: true },
+  },
+  scope: 'Epic', components: [], bucket: 'ttBuild', label: 'New TT Build',
+  period: { label: 'Aug', start: '2026-08-01', end: '2026-08-31', partial: false },
+  grain: 'month', window: 'month', shown: 3,
+};
+
+check('THE CHART IS RENDERED WITH THE DRILL-IN TURNED ON', async () => {
+  /* The click checks below drive a synthetic target, so they pass whether or
+     not anything on screen is actually clickable — they prove the HANDLER,
+     not the affordance. This proves the markup: drop `drill: true` from the
+     Charts.stacked call and every hook disappears while those still pass. */
+  const html = (await renderCoverage(payloadFor(), movedFixture(), backlogDrawn())).html;
+  const svg = html.slice(html.indexOf('<svg', html.indexOf('Backlog')));
+  assert.match(svg, /<g class="drillable"[^>]*data-act="backlog"/, 'no segment is a control');
+  assert.match(svg, /data-period="2026-08-01"[^>]*data-bucket="ttBuild"/, 'and none names its bar');
+  assert.match(svg, /data-period="2026-09-01" data-bucket=""/, 'nor is the total openable');
+  assert.match(svg, /tabindex="0"/, 'and the keyboard cannot reach any of it');
+});
+
+check('CLICKING A BAR SEGMENT OPENS THE EPICS BEHIND IT', async () => {
+  const r_ = await renderCoverage(payloadFor(), movedFixture(), backlogDrawn(), BACKLOG_EPICS);
+  await r_.click('[data-act="backlog"]', { act: 'backlog', period: '2026-08-01', bucket: 'ttBuild' });
+  assert.match(r_.drawer, /AUTOKAT-1/, 'the drawer has to list the epics');
+  assert.match(r_.drawer, /Login suite/, 'with what they are');
+  assert.match(r_.drawer, /Aug — New TT Build/, 'and say which bar it came from');
+  assert.match(r_.drawer, /3 items/, 'as many as the bar drew');
+});
+
+check('AND IT ASKS FOR THE WINDOW ON SCREEN, not the route\'s default', async () => {
+  // A drawer opened from a weekly bar that asked without `grain` would get a
+  // month back — a list longer than the number that opened it.
+  const r_ = await renderCoverage(payloadFor(), movedFixture(), backlogDrawn(), BACKLOG_EPICS);
+  await r_.click('[data-grain]', { grain: 'week' });
+  await r_.click('[data-act="backlog"]', { act: 'backlog', period: '2026-08-24', bucket: 'ttBuild' });
+  const asked = r_.asked.filter(p => p.includes('/backlog/epics')).pop();
+  assert.match(asked, /grain=week/, 'the window never reached the route');
+  assert.match(asked, /periods=13/, 'nor did its length');
+  assert.match(asked, /period=2026-08-24/, 'and the bar identifies itself by date');
+  assert.match(asked, /bucket=ttBuild/);
+});
+
+check('the total opens every column, by sending no bucket at all', async () => {
+  const r_ = await renderCoverage(payloadFor(), movedFixture(), backlogDrawn(), BACKLOG_EPICS);
+  await r_.click('[data-act="backlog"]', { act: 'backlog', period: '2026-08-01', bucket: '' });
+  const asked = r_.asked.filter(p => p.includes('/backlog/epics')).pop();
+  assert.match(asked, /bucket=$|bucket=&/, 'an empty bucket is what means "all of them"');
+});
+
+check('and "all" sends its window with no period count', async () => {
+  const r_ = await renderCoverage(payloadFor(), movedFixture(), backlogDrawn(), BACKLOG_EPICS);
+  await r_.click('[data-grain]', { grain: 'all' });
+  await r_.click('[data-act="backlog"]', { act: 'backlog', period: '2023-01-01', bucket: 'kseBuild' });
+  const asked = r_.asked.filter(p => p.includes('/backlog/epics')).pop();
+  assert.match(asked, /grain=all/);
+  assert.doesNotMatch(asked, /periods=/, 'a count would cap the whole-history window');
+});
+
+check('A DISAGREEMENT WITH THE BAR IS SAID OUT LOUD, not silently shown', async () => {
+  // Both sides run the same profile, so this should never happen — which is
+  // exactly why it must be reported rather than smoothed over if it does.
+  const r_ = await renderCoverage(payloadFor(), movedFixture(), backlogDrawn(),
+    { ...BACKLOG_EPICS, shown: 7 });
+  await r_.click('[data-act="backlog"]', { act: 'backlog', period: '2026-08-01', bucket: 'ttBuild' });
+  assert.match(r_.drawer, /The bar says 7/, 'a list of three under a bar of seven has to explain itself');
+});
+
+check('and agreement says nothing at all', async () => {
+  const r_ = await renderCoverage(payloadFor(), movedFixture(), backlogDrawn(), BACKLOG_EPICS);
+  await r_.click('[data-act="backlog"]', { act: 'backlog', period: '2026-08-01', bucket: 'ttBuild' });
+  assert.doesNotMatch(r_.drawer, /The bar says/);
+});
+
+check('a bar that has scrolled out of the window explains itself', async () => {
+  const r_ = await renderCoverage(payloadFor(), movedFixture(), backlogDrawn(), new Error('That bar is not in the current window any more'));
+  await r_.click('[data-act="backlog"]', { act: 'backlog', period: '1999-01-01', bucket: 'ttBuild' });
+  assert.match(r_.drawer, /Could not read the change history/);
+  assert.match(r_.drawer, /not in the current window/);
+});
+
+check('a segment with no period is ignored rather than asking for nothing', async () => {
+  const r_ = await renderCoverage(payloadFor(), movedFixture(), backlogDrawn(), BACKLOG_EPICS);
+  await r_.click('[data-act="backlog"]', { act: 'backlog', bucket: 'ttBuild' });
+  assert.strictEqual(r_.asked.filter(p => p.includes('/backlog/epics')).length, 0);
+});
+
+check('THE MIXKEY NUMBERS OPEN THE SAME DRAWER as the bars above them', async () => {
+  // They are counts for the last period, sitting under the chart. A number
+  // that reads like the ones in the bars and does not open is a dead end.
+  const html = (await renderCoverage(payloadFor(), movedFixture(), backlogDrawn())).html;
+  const at = html.indexOf('mixkey');
+  const key = html.slice(at, html.indexOf('</div>', at));
+  assert.match(key, /class="numlink"[^>]*data-act="backlog"/, 'the legend counts are inert');
+  assert.match(key, /data-period="2026-09-01"/, 'and they answer for the last period drawn');
+});
+
 check('pressing it posts the backfill — the control is wired, not just printed', async () => {
   const r_ = await renderCoverage(payloadFor(), movedFixture());
   await r_.click('[data-act="backfill"]', { act: 'backfill' });
   assert.deepStrictEqual(r_.sent.map(s => [s[0], s[1]]), [['POST', '/api/reports/coverage/backfill']],
     'a button that renders but sends nothing is the same dead end in a different shape');
+});
+
+/* ── priority in the tool split ──────────────────────────────────────────
+   The same components, listed twice on one screen. The grid above decides
+   which suites matter; this table decides where their work runs. Showing the
+   judgement in only one of them means scrolling back up to answer "is this
+   TrueTest gap on something we care about". */
+
+/**
+ * The rows of one table, as `component -> priority label` (or '—').
+ *
+ * `marker` picks the right TABLE, not merely the right section. The tool split
+ * renders a status-breakdown table between its heading and its component list,
+ * so taking the first `<tbody>` after the heading reads the wrong one — which
+ * it did, and the three checks below this one all passed over an empty object
+ * until the first one asked whether any rows had been found at all.
+ */
+const prioIn = (html, heading, marker) => {
+  const at = html.indexOf(heading);
+  assert.ok(at > 0, `no "${heading}" section`);
+  assert.ok(html.indexOf(marker, at) > 0, `no "${marker}" under "${heading}" — wrong table`);
+  /* The SECTION, split on rows — not a `<tbody>` slice. An expanded row in the
+     tool split holds a whole nested breakdown table, so the first `</tbody>`
+     after the opening tag closes the NESTED one and every component after the
+     first falls outside the slice. Rows of the inner table carry no
+     `data-component`, so scanning the section skips them on their own. */
+  const next = html.indexOf('<h2', at + heading.length);
+  const section = html.slice(at, next > at ? next : html.length);
+  const out = {};
+  for (const row of section.split('<tr').slice(1)) {
+    const name = (row.match(/data-component="([^"]*)"/) || [])[1];
+    if (!name) continue;
+    // FIRST mention wins. A component's data row comes before its expanded
+    // detail row, and the trailing fragment of a section can name it again
+    // with no priority cell in it — last-wins read that as "unset" and
+    // reported a bug in rendering that was correct.
+    if (name in out) continue;
+    const tag = (row.match(/class="tag prio-tag[^"]*"[^>]*>([^<]*)</) || [])[1];
+    const sel = /<select class="prio/.test(row);
+    out[name] = tag ? tag.trim() : sel ? 'select' : '—';
+  }
+  return out;
+};
+
+check('THE TOOL SPLIT SHOWS EACH COMPONENT\'S PRIORITY', async () => {
+  const html = (await renderCoverage(payloadWithPriority(), movedFixture(), backlogDrawn())).html;
+  const tool = prioIn(html, '<h2>TrueTest vs KSE</h2>', 'data-expand=');
+  assert.ok(Object.keys(tool).length, 'the tool table rendered no component rows at all');
+  assert.strictEqual(tool.PS_A, 'P1');
+  assert.strictEqual(tool.PS_B, 'P3');
+});
+
+check('and it AGREES with the grid above it, component for component', async () => {
+  // Two tables on one screen disagreeing about a component is the failure this
+  // is really guarding: both read the row's own `priority`, decorated once by
+  // the route from the one plan.
+  const html = (await renderCoverage(payloadWithPriority(), movedFixture(), backlogDrawn())).html;
+  const grid = prioIn(html, '<h2>Coverage by component</h2>', 'data-priority=');
+  const tool = prioIn(html, '<h2>TrueTest vs KSE</h2>', 'data-expand=');
+  assert.ok(Object.keys(tool).length && Object.keys(grid).length, 'both tables have to have rows');
+  for (const [name, level] of Object.entries(tool)) {
+    if (!(name in grid)) continue;
+    // The grid holds a <select>; compare against what it has selected.
+    const at = html.indexOf(`data-priority="${name}"`);
+    const sel = html.slice(at, html.indexOf('</select>', at));
+    const chosen = (sel.match(/<option value="(\d*)"[^>]*selected/) || [])[1] || '';
+    const expected = chosen ? `P${chosen}` : '—';
+    assert.strictEqual(level, expected, `${name}: grid says ${expected}, tool split says ${level}`);
+  }
+});
+
+check('an unset component reads as a dash in both, not P-nothing', async () => {
+  const html = (await renderCoverage(payloadWithPriority({}), movedFixture(), backlogDrawn())).html;
+  const tool = prioIn(html, '<h2>TrueTest vs KSE</h2>', 'data-expand=');
+  assert.ok(Object.keys(tool).length, 'no rows to check');
+  for (const [name, level] of Object.entries(tool)) assert.strictEqual(level, '—', name);
+});
+
+check('IT IS READ-ONLY THERE — the grid above owns the value', async () => {
+  // A value with two editors is a value with two answers the first time both
+  // are on screen, and no way to tell which write landed last.
+  const html = (await renderCoverage(payloadWithPriority(), movedFixture(), backlogDrawn())).html;
+  const at = html.indexOf('<h2>TrueTest vs KSE</h2>');
+  const section = html.slice(at, html.indexOf('<h2', at + 10) > 0 ? html.indexOf('<h2', at + 10) : html.length);
+  assert.ok(!/data-priority="/.test(section), 'the tool split must not offer to change the priority');
+  assert.match(section, /class="tag prio-tag/, 'but it does have to show it');
+});
+
+check('the column sorts by RANK, not by the text in the tag', async () => {
+  // "P1" and "P10" sort the wrong way as text, and an unset cell has to sit at
+  // the bottom whichever way the column points.
+  const html = (await renderCoverage(payloadWithPriority({ PS_A: 1 }), movedFixture(), backlogDrawn())).html;
+  const at = html.indexOf('<h2>TrueTest vs KSE</h2>');
+  const next = html.indexOf('<h2', at + 10);
+  const body = html.slice(at, next > at ? next : html.length);
+  assert.match(body, /data-sort-value="1"/, 'a set level carries its rank');
+  assert.match(body, /data-sort-value="—"/, 'and an unset one carries the blank that pins it last');
+});
+
+/* ── export to PDF ───────────────────────────────────────────────────────
+   The export IS a print: the browser's own renderer, driven by the print
+   stylesheet. Which makes the risk a specific one, and not "does it look
+   nice". Print hides every control on this page, and every control was
+   carrying a fact — which components, over what window, filtered to which
+   family. A report of a filtered subset with nothing saying so is worse than
+   no report, because it is quotable and wrong.
+
+   So these checks are mostly about one thing: what a hidden control was
+   saying has to survive it being hidden. */
+
+const PRINT_CSS = (() => {
+  const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'styles.css'), 'utf8');
+  /* Anchored on `@page`, NOT on the first `@media print`. There are several
+     one-line print rules earlier in the file — `.tagval-x`, `.tag-btn` — so
+     slicing from the first match hands back six hundred lines of screen CSS
+     with the print block on the end, and a search for `.numlink` in it finds
+     the SCREEN rule and passes on it. Which is what this helper did first. */
+  const at = css.indexOf('@media print {\n  @page');
+  assert.ok(at > 0, 'the main print block has moved — this helper is anchored to it');
+  return { all: css, print: css.slice(at) };
+})();
+
+const headOf = (html) => {
+  const at = html.indexOf('print-only');
+  assert.ok(at > 0, 'there is no print-only title block at all');
+  // To the end of that block — everything before the first section.
+  const end = html.indexOf('<section', at);
+  return html.slice(at, end > at ? end : at + 1200);
+};
+
+check('THE SCREEN OFFERS AN EXPORT, and the export is a print', async () => {
+  const html = (await renderCoverage(payloadFor(), movedFixture(), backlogDrawn())).html;
+  assert.match(html, /data-act="export-pdf"/, 'no Export PDF control');
+  assert.match(html, /Export PDF/, 'the control is not labelled');
+  assert.match(html, /class="section print-hide"/, 'the button would print as a dead control');
+});
+
+check('CLICKING IT PRINTS', async () => {
+  const r_ = await renderCoverage(payloadFor(), movedFixture(), backlogDrawn());
+  await r_.click('[data-act="export-pdf"]', { act: 'export-pdf' });
+  assert.strictEqual(r_.printed.length, 1, 'the browser was never asked to print');
+});
+
+check('and the file is named after the REPORT, not after the app', async () => {
+  // Left alone, every export in a folder is called "Planning Tool.pdf".
+  const r_ = await renderCoverage({ ...payloadFor(), selected: ['PS_A'] }, movedFixture(), backlogDrawn());
+  await r_.click('[data-act="export-pdf"]', { act: 'export-pdf' });
+  assert.match(r_.printed[0], /Overall Coverage/, `title at print time was "${r_.printed[0]}"`);
+  assert.match(r_.printed[0], /PS_A/, 'and which components it covers');
+  assert.match(r_.printed[0], /\d{4}-\d{2}-\d{2}/, 'and when — a folder of them sorts by date');
+  assert.ok(!/[\\/:*?"<>|]/.test(r_.printed[0]), 'a filename cannot carry path characters');
+});
+
+check('the title goes back afterwards', async () => {
+  const r_ = await renderCoverage(payloadFor(), movedFixture(), backlogDrawn());
+  await r_.click('[data-act="export-pdf"]', { act: 'export-pdf' });
+  assert.notStrictEqual(r_.ctx.document.title, 'Planning Tool', 'it was never set');
+  r_.ctx.window._on.afterprint();
+  assert.strictEqual(r_.ctx.document.title, 'Planning Tool', 'the app is left renamed');
+});
+
+check('an unfiltered export still names itself', async () => {
+  const r_ = await renderCoverage(payloadFor(), movedFixture(), backlogDrawn());
+  await r_.click('[data-act="export-pdf"]', { act: 'export-pdf' });
+  assert.match(r_.printed[0], /all components/, 'the scope has to be stated either way');
+});
+
+check('THE PDF SAYS WHAT IT COVERS AND HOW OLD IT IS', async () => {
+  // Both timestamps, and they answer different questions: how old the FACTS
+  // are, and when this page was taken. A PDF mailed Friday from Monday's sync
+  // quietly ages into being wrong, and only the pair makes that visible.
+  const html = (await renderCoverage(payloadFor(), movedFixture(), backlogDrawn())).html;
+  const head = headOf(html);
+  assert.match(head, /Overall Coverage/, 'the report does not name itself');
+  assert.match(head, /All components/, 'nothing says what it covers');
+  assert.match(head, /synced/, 'nothing says how fresh the Jira data is');
+  assert.match(head, /report taken/, 'nothing dates the report itself');
+});
+
+check('A FILTERED EXPORT SAYS SO — the picker is not on the page any more', async () => {
+  // The failure this prevents: a page headed "Coverage 62%" over eleven rows,
+  // with nothing saying it was narrowed to two components.
+  const html = (await renderCoverage(
+    { ...payloadFor(), selected: ['PS_A', 'PS_B'] }, movedFixture(), backlogDrawn())).html;
+  const head = headOf(html);
+  assert.match(head, /PS_A \+ PS_B/, 'the selection left the page with the picker');
+});
+
+check('and so does a family filter, which is a chip nobody can see on paper', async () => {
+  const r_ = await renderCoverage(payloadFor(), movedFixture(), backlogDrawn());
+  await r_.click('[data-family]', { family: 'PS — client delivery' });
+  assert.match(headOf(r_.html), /Family: PS/, 'the grid is filtered and the page does not say so');
+});
+
+check('THE WINDOW CHIPS ARE RESTATED IN WORDS, having been hidden', async () => {
+  // "180d" and "Month" are the state of a control. On paper the control is
+  // gone and the chart is left standing on its own.
+  const r_ = await renderCoverage(payloadFor(), movedFixture(), backlogDrawn());
+  assert.match(headOf(r_.html), /Coverage movement over 180 days/);
+  await r_.click('[data-days]', { days: '30' });
+  assert.match(headOf(r_.html), /over 30 days/, 'the header has to follow the control');
+});
+
+check('and "all" says what it RESOLVED to, since it chooses its own bar width', async () => {
+  const r_ = await renderCoverage(payloadFor(), movedFixture(),
+    backlogDrawn({ window: 'all', grain: 'year' }));
+  assert.match(headOf(r_.html), /Backlog: all time, yearly bars/);
+});
+
+check('a fixed backlog window says its own length', async () => {
+  const html = (await renderCoverage(payloadFor(), movedFixture(), backlogDrawn())).html;
+  assert.match(headOf(html), /Backlog: 2 months/);
+});
+
+check('THE TITLE BLOCK IS PRINT-ONLY, and the button is screen-only', async () => {
+  const html = (await renderCoverage(payloadFor(), movedFixture(), backlogDrawn())).html;
+  assert.match(PRINT_CSS.all, /^\.print-only \{ display: none; \}/m, 'the title block would show on screen');
+  assert.match(PRINT_CSS.print, /\.print-only \{ display: block !important/, 'and never show in print');
+  assert.match(html, /class="section print-hide"/);
+  assert.match(PRINT_CSS.print, /\.print-hide \{ display: none !important/);
+});
+
+check('PRINT HIDES EVERY CONTROL ON THIS PAGE', async () => {
+  // Each one sets what is shown and shows nothing itself. On paper a chip is a
+  // coloured word that looks like data, and the active one looks like an answer.
+  for (const sel of ['.chip', '.picker-card', '.comp-filter', '.combo-list']) {
+    const at = PRINT_CSS.print.indexOf(sel);
+    assert.ok(at > 0, `${sel} is not hidden in print`);
+    assert.match(PRINT_CSS.print.slice(at, PRINT_CSS.print.indexOf('}', at)), /display: none/, sel);
+  }
+});
+
+check('A DROPDOWN DOES NOT PRINT AS A DROPDOWN', async () => {
+  // The priority column is the last form control left once the furniture is
+  // gone. Unstyled it prints as a sunken box with an arrow — and blank on some
+  // engines — where every other cell is its value.
+  const at = PRINT_CSS.print.indexOf('select.prio');
+  assert.ok(at > 0, 'the priority dropdown prints as a form control');
+  const rule = PRINT_CSS.print.slice(at, PRINT_CSS.print.indexOf('}', at));
+  assert.match(rule, /appearance: none/, 'the arrow stays');
+  assert.match(rule, /border: none/, 'the box stays');
+});
+
+check('but a drill-in keeps its NUMBER — it is the value, not the affordance', async () => {
+  // `.numlink` and the driver tags are controls whose label is the datum.
+  // Hiding them would take counts off the page; they lose the chrome instead.
+  const at = PRINT_CSS.print.indexOf('.numlink {');
+  assert.ok(at > 0, 'the drill-in numbers have no print rule');
+  assert.match(PRINT_CSS.print.slice(at, PRINT_CSS.print.indexOf('}', at)), /border: none/);
+  assert.ok(!/\.numlink[^{]*\{[^}]*display:\s*none/.test(PRINT_CSS.print),
+    'hiding them would delete the counts from the report');
+});
+
+check('a chart is never split across a page break', async () => {
+  const at = PRINT_CSS.print.indexOf('svg { break-inside');
+  assert.ok(at > 0, 'half a chart on each of two pages is not a chart');
+});
+
+check('A SENTENCE IN A REASONS LIST IS ONE INLINE FLOW, not a row of columns', () => {
+  /* `.reasons li` was `display: flex`, which makes every `<strong>`, every
+     `<code>` and each run of text between them its own flex ITEM. "Obsoleted —
+     no Automation Status and labelled `obsolete`. Retired, not waiting on
+     anyone." printed with the code box to the right of the clause it belongs
+     to, and the sentence read in the wrong order.
+
+     Found by reading the PDF — on a wide screen card the columns are roomy
+     enough to pass for a line of text, which is why it survived. Ten lists in
+     seven views use this class. */
+  const at = PRINT_CSS.all.indexOf('.reasons li {');
+  assert.ok(at > 0, 'the rule has gone');
+  const rule = PRINT_CSS.all.slice(at, PRINT_CSS.all.indexOf('}', at));
+  assert.ok(!/display:\s*flex/.test(rule),
+    'a flex item splits the sentence at every <strong> and <code> in it');
+  assert.match(rule, /position: relative/, 'the marker needs something to be positioned against');
+  const dot = PRINT_CSS.all.indexOf('.reasons li::before {');
+  assert.match(PRINT_CSS.all.slice(dot, PRINT_CSS.all.indexOf('}', dot)), /position: absolute/,
+    'a marker in the flow is a flex/inline item and takes the first word with it');
 });
 
 /* ── run ───────────────────────────────────────────────────────────── */

@@ -175,6 +175,14 @@ const PLAN = () => ({
   // is nothing in Jira to rederive it from, so losing it in a migration loses
   // it for good.
   componentPriority: { 'R&D_Sig_Regression': 1, 'KAT_Common_Maintenance': 3 },
+  // Components that are not automation suites. Plan data for the same reason
+  // as the priorities above: a decision, with nothing in Jira to rederive it
+  // from, so a migration that drops it drops it for good.
+  excludedComponents: ['Technical_Works', 'KAT_Common_Maintenance'],
+  // The allow-list of Jira Team field values. Note the SPELLINGS: these are
+  // the Team field's own strings, which on his instance are not the board
+  // names — a distinction a migration must carry through untouched.
+  coverageTeams: ['Katalon PSA (Titan)', 'Katalon RDA (Ruby)'],
   notes: { 'ruby|S39': 'Focus on Sig regression' },
   excluded: { ruby: ['acc-zzz', 'acc-aaa', 'An Nguyen'] },
   // Roster decisions: one person put on a sprint, one taken off. These are the

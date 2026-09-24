@@ -473,6 +473,89 @@ check('and the indicator reserves its space, so clicking does not shift the row'
     'the resting indicator must take up room while staying invisible');
 });
 
+/* ── a grid that opens on a column of its own choosing ──────────────────
+   `data-sort-default="<col>:<dir>"`. The point of routing it through the same
+   `sortTable` the click path uses is that everything downstream keeps working:
+   the heading shows its arrow, the first click flips rather than re-applying,
+   and the third click still restores the order the VIEW chose. A view that
+   pre-sorted its own rows would lose that original order permanently. */
+
+const PRIOS = [
+  { c: 'PS_Big', p: '3' },
+  { c: 'PS_None', p: '—' },
+  { c: 'PS_Top', p: '1' },
+  { c: 'PS_Mid', p: '2' },
+];
+const prioGrid = (attr = ' data-sort-default="1:asc"') => grid(`
+  <table${attr}>
+    <thead><tr><th>Component</th><th>Priority</th></tr></thead>
+    <tbody>${PRIOS.map(r => `<tr><td>${r.c}</td><td data-sort-value="${r.p}">${r.p}</td></tr>`).join('')}</tbody>
+  </table>`);
+
+check('A GRID CAN OPEN ALREADY SORTED, without anyone clicking', () => {
+  assert.deepStrictEqual(prioGrid().col(0), ['PS_Top', 'PS_Mid', 'PS_Big', 'PS_None'],
+    'P1 first, running down to P4, with the unjudged component last');
+});
+
+check('and without the attribute it stays in the order the view chose', () => {
+  assert.deepStrictEqual(prioGrid('').col(0), ['PS_Big', 'PS_None', 'PS_Top', 'PS_Mid'],
+    'a default sort must be opted into, not applied to every grid in the app');
+});
+
+check('the heading shows it is sorted, rather than sorting silently', () => {
+  const g = prioGrid();
+  assert.ok(g.th('Priority').className.includes('sort-asc'), 'no arrow on the column doing the sorting');
+  assert.strictEqual(g.th('Priority').getAttribute('aria-sort'), 'ascending');
+});
+
+check('THE FIRST CLICK FLIPS IT, rather than re-applying what is on screen', () => {
+  // The trap in pre-sorting rows in the view: `nextDir` would see an unsorted
+  // table, answer 'asc', and the first click would appear to do nothing.
+  const g = prioGrid().click('Priority');
+  assert.deepStrictEqual(g.col(0).slice(0, 3), ['PS_Big', 'PS_Mid', 'PS_Top'],
+    'one click should reverse the default, not repeat it');
+});
+
+check('and a third state still returns the VIEW\'S order, not the default sort', () => {
+  // `sortAt` is stamped on the first sortTable call, which for a defaulted grid
+  // is the default sort itself — at that moment the DOM still holds the view's
+  // own order, so "none" has something true to go back to.
+  const g = prioGrid().click('Priority', 2);
+  assert.deepStrictEqual(g.col(0), ['PS_Big', 'PS_None', 'PS_Top', 'PS_Mid'],
+    'the order the view chose has to survive being sorted away from');
+});
+
+check('AN UNSET PRIORITY SORTS LAST IN BOTH DIRECTIONS', () => {
+  // It used to carry 99, the largest number in the column — so descending put
+  // every component nobody had judged above the P1s. "Nobody decided" is not
+  // the bottom of the scale and not the top of it; it is not on the scale.
+  assert.strictEqual(prioGrid().col(0).pop(), 'PS_None', 'ascending');
+  assert.strictEqual(prioGrid().click('Priority').col(0).pop(), 'PS_None', 'descending');
+});
+
+check('a nonsense default is ignored rather than throwing the grid away', () => {
+  for (const bad of [' data-sort-default="nope"', ' data-sort-default="-1:asc"', ' data-sort-default=""']) {
+    assert.deepStrictEqual(prioGrid(bad).col(0), ['PS_Big', 'PS_None', 'PS_Top', 'PS_Mid'], bad);
+  }
+});
+
+check('the Coverage grid opens on Priority, and no view carries a stale 99', () => {
+  const view = fs.readFileSync(path.join(__dirname, '..', 'public', 'views', 'report-coverage.js'), 'utf8');
+  const sprint = fs.readFileSync(path.join(__dirname, '..', 'public', 'views', 'sprint.js'), 'utf8');
+  assert.match(view, /<table data-sort-default="1:asc">/, 'the component grid does not open on Priority');
+  // Column 1 has to BE Priority, or the grid opens sorted by the wrong column.
+  const head = view.slice(view.indexOf('data-sort-default="1:asc"'));
+  // `<th(\s…)?>` rather than `<th[^>]*>`, or `<thead>` matches as a heading
+  // and every column shifts by one — which is exactly how this check first
+  // reported the grid opening on the wrong column when it was opening on the
+  // right one.
+  const ths = [...head.slice(0, head.indexOf('</tr>')).matchAll(/<th(?:\s[^>]*)?>([^<]*)/g)].map(m => m[1].trim());
+  assert.strictEqual(ths[1], 'Priority', `column 1 is "${ths[1]}", not Priority`);
+  for (const [name, src] of [['report-coverage.js', view], ['sprint.js', sprint]]) {
+    assert.ok(!/priority == null \? 99/.test(src), `${name} still sorts an unset priority as 99`);
+  }
+});
+
 /* ── run ──────────────────────────────────────────────────────────────── */
 
 (async () => {
