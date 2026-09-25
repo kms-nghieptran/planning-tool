@@ -104,10 +104,10 @@ const CoverageReport = (() => {
       <section class="section">
         <div class="kpis">
           ${UI.kpi({ label: 'Coverage', value: UI.pct(d.coveragePct), foot: UI.esc(scopeFoot(d)), tone: 'brand', featured: true })}
-          ${UI.kpi({ label: 'Automated', value: UI.int(bucket('automated').count), foot: `${UI.pct(bucket('automated').share)} of all ${UI.esc(d.scope.toLowerCase())}s`, tone: 'ok' })}
-          ${UI.kpi({ label: 'Maintenance', value: UI.int(bucket('maintenance').count), foot: 'Automated, being kept working' })}
-          ${UI.kpi({ label: 'Still to automate', value: UI.int(bucket('ready').count + bucket('blocked').count), foot: `${bucket('ready').count} ready · ${bucket('blocked').count} blocked`, tone: bucket('blocked').count ? 'risk' : '' })}
-          ${UI.kpi({ label: 'On TrueTest', value: UI.pct(share(d)), foot: `${UI.int(d.toolTotals.truetest.total)} of ${UI.int(d.total)} ${UI.esc(d.scope.toLowerCase())}s` })}
+          ${UI.kpi({ label: 'Automated', value: drill(bucket('automated').count, { buckets: ['automated'] }), foot: `${UI.pct(bucket('automated').share)} of all ${UI.esc(d.scope.toLowerCase())}s`, tone: 'ok' })}
+          ${UI.kpi({ label: 'Maintenance', value: drill(bucket('maintenance').count, { buckets: ['maintenance'] }), foot: 'Automated, being kept working' })}
+          ${UI.kpi({ label: 'Still to automate', value: drill(bucket('ready').count + bucket('blocked').count, { buckets: ['ready', 'blocked'] }), foot: `${drill(bucket('ready').count, { buckets: ['ready'] }, { zero: '0' })} ready · ${drill(bucket('blocked').count, { buckets: ['blocked'] }, { zero: '0' })} blocked ${blockers(bucket('blocked').count)}`, tone: bucket('blocked').count ? 'risk' : '' })}
+          ${UI.kpi({ label: 'On TrueTest', value: UI.pct(share(d)), foot: `${drill(d.toolTotals.truetest.total, { tool: 'truetest' })} of ${drill(d.total, {})} ${UI.esc(d.scope.toLowerCase())}s` })}
         </div>
       </section>
 
@@ -136,6 +136,18 @@ const CoverageReport = (() => {
 
       const bl = e.target.closest('[data-act="backlog"]');
       if (bl) { e.preventDefault(); await openBacklogDrawer(bl.dataset); return; }
+
+      const bk = e.target.closest('[data-act="cov-blockers"]');
+      if (bk) { e.preventDefault(); await openBlockersDrawer(d, bk.dataset); return; }
+
+      const ce = e.target.closest('[data-act="cov-epics"]');
+      if (ce) {
+        e.preventDefault();
+        // The number the button itself shows, so the drawer can say when the
+        // two disagree rather than quietly showing the shorter list.
+        await openEpicsDrawer(d, ce.dataset, Number(String(ce.textContent).replace(/[^0-9]/g, '')) || 0);
+        return;
+      }
 
       const mv = e.target.closest('[data-act="moved"]');
       if (mv) {
@@ -533,8 +545,8 @@ const CoverageReport = (() => {
               <thead><tr><th>Status</th><th class="num">${UI.esc(d.scope)}s</th><th class="num">Share</th><th>In the ratio</th></tr></thead>
               <tbody>${d.buckets.map(b => `
                 <tr${b.count ? '' : ' class="muted"'}>
-                  <td><span class="tag"><i class="dot" style="background:${BUCKET_COLOR[b.key]}"></i>${UI.esc(b.label)}</span></td>
-                  <td class="num"><strong>${UI.int(b.count)}</strong></td>
+                  <td><span class="tag"><i class="dot" style="background:${BUCKET_COLOR[b.key]}"></i>${UI.esc(b.label)}</span>${b.key === 'blocked' ? blockers(b.count) : ''}</td>
+                  <td class="num"><strong>${drill(b.count, { buckets: [b.key] })}</strong></td>
                   <td class="num muted">${UI.pct(b.share)}</td>
                   <td class="muted" style="font-size:12px">${b.inRatio
                     ? (b.covered ? 'Counts as covered' : 'In the denominator')
@@ -950,6 +962,135 @@ const CoverageReport = (() => {
    * not rounding, and the reader is the one who can tell which.
    */
   /**
+   * WHAT IS BLOCKING THE BLOCKED WORK.
+   *
+   * Grouped BY BLOCKER rather than listed by epic, because the question this
+   * answers is "what do I chase", and one ticket holding eleven epics is one
+   * conversation, not eleven. On his data CLICMNTIGO-11567 alone holds several.
+   *
+   * The epics with NO link are counted and said out loud rather than dropped.
+   * They are the majority — 140 of 166 — and a drawer that quietly showed 26
+   * under a column saying 166 would be the exact failure every other drill-in
+   * on this screen is built to avoid. They are not an error either: nobody
+   * recorded a blocker, which is a real and actionable finding of its own.
+   */
+  async function openBlockersDrawer(d, ds) {
+    const qs = [
+      ...(d.selected || []).map(c => `component=${encodeURIComponent(c)}`),
+      'bucket=blocked',
+      ds.row ? `row=${encodeURIComponent(ds.row)}` : '',
+      ds.tool ? `tool=${encodeURIComponent(ds.tool)}` : '',
+    ].filter(Boolean).join('&');
+
+    UI.drawer('<div class="empty">Reading…</div>');
+    try {
+      const r = await UI.api(`/api/reports/coverage/epics?${qs}`);
+      const noun = r.scope.toLowerCase();
+      const byBlocker = new Map();
+      const unlinked = [];
+      for (const e of r.epics) {
+        const links = (e.blockedBy || []).filter(Boolean);
+        if (!links.length) { unlinked.push(e); continue; }
+        for (const b of links) {
+          if (!byBlocker.has(b)) byBlocker.set(b, []);
+          byBlocker.get(b).push(e);
+        }
+      }
+      // Biggest blocker first: the one ticket worth chasing today.
+      const groups = [...byBlocker.entries()].sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]));
+      const linked = r.epics.length - unlinked.length;
+
+      UI.drawer(`
+        <div class="drawer-head">
+          <h3 style="margin:0">Blocked by${ds.row ? ` — ${UI.esc(ds.row)}` : ''}</h3>
+          <div class="muted" style="font-size:12px;margin-top:4px">
+            ${UI.int(r.count)} blocked ${UI.esc(noun)}${r.count === 1 ? '' : 's'}${ds.row ? ` in ${UI.esc(ds.row)}` : ''}${ds.tool ? ` on ${UI.esc(ds.tool === 'truetest' ? 'TrueTest' : 'KSE')}` : ''}
+            · <strong>${UI.int(linked)}</strong> name what is blocking them, across
+            ${UI.int(groups.length)} ${groups.length === 1 ? 'blocker' : 'blockers'}.
+          </div>
+          <div class="muted" style="font-size:11.5px;margin-top:6px">
+            The column counts the <strong>Automation Status</strong> field. This is Jira's
+            <strong>is blocked by</strong> link — a different fact, and the only one with something to chase.
+          </div>
+        </div>
+        ${groups.map(([key, list]) => `
+          <div style="margin-top:14px">
+            <div class="eyebrow"><i></i>${UI.issueKey(key)} — blocks ${UI.int(list.length)} ${UI.esc(noun)}${list.length === 1 ? '' : 's'}</div>
+            ${list.map(e => `
+              <div style="padding:9px 0;border-bottom:1px solid var(--app-line-soft)">
+                <div style="display:flex;gap:8px;align-items:center">
+                  ${UI.issueKey(e.key)}
+                  <span class="spacer"></span>
+                  <span class="muted" style="font-size:11.5px">${UI.esc((e.components || []).join(', '))}</span>
+                </div>
+                <div style="font-size:13px;margin-top:3px">${UI.esc(e.summary)}</div>
+              </div>`).join('')}
+          </div>`).join('')}
+        ${unlinked.length ? `
+          <div style="margin-top:18px">
+            <div class="eyebrow"><i style="background:var(--warn)"></i>No blocker recorded — ${UI.int(unlinked.length)} ${UI.esc(noun)}${unlinked.length === 1 ? '' : 's'}</div>
+            <div class="muted" style="font-size:11.5px;margin:5px 0 8px">
+              Marked Blocked, with no <em>is blocked by</em> link saying what by. Nothing here can be chased until somebody adds one.
+            </div>
+            ${unlinked.map(e => `
+              <div style="padding:9px 0;border-bottom:1px solid var(--app-line-soft)">
+                <div style="display:flex;gap:8px;align-items:center">
+                  ${UI.issueKey(e.key)}
+                  <span class="spacer"></span>
+                  <span class="muted" style="font-size:11.5px">${UI.esc((e.components || []).join(', '))}</span>
+                </div>
+                <div style="font-size:13px;margin-top:3px">${UI.esc(e.summary)}</div>
+              </div>`).join('')}
+          </div>` : ''}
+        ${r.count ? '' : '<div class="empty">Nothing is blocked here.</div>'}
+      `);
+    } catch (err) {
+      UI.drawer(`<div class="empty">Could not read the blockers — ${UI.esc(err.message)}</div>`);
+    }
+  }
+
+  /**
+   * THE EPICS BEHIND ONE NUMBER ON THIS SCREEN.
+   *
+   * The component SELECTION travels with the request — it narrows the grid,
+   * the tool split and the headline, so a drawer that ignored it would answer
+   * for the portfolio under a number that answers for two suites. The
+   * exclusions and the team allow-list do not need sending: they live in the
+   * plan and the route applies them, exactly as it does for the numbers.
+   *
+   * `shown` is what the button said. Both sides slice the same classification,
+   * so they should always agree; a mismatch means the screen was rendered
+   * before a sync and is worth saying rather than quietly resolving.
+   */
+  async function openEpicsDrawer(d, ds, shown) {
+    const qs = [
+      ...(d.selected || []).map(c => `component=${encodeURIComponent(c)}`),
+      ...(ds.buckets ? ds.buckets.split(',').filter(Boolean).map(b => `bucket=${encodeURIComponent(b)}`) : []),
+      ds.row ? `row=${encodeURIComponent(ds.row)}` : '',
+      ds.tool ? `tool=${encodeURIComponent(ds.tool)}` : '',
+    ].filter(Boolean).join('&');
+
+    UI.drawer('<div class="empty">Reading…</div>');
+    try {
+      const r = await UI.api(`/api/reports/coverage/epics?${qs}`);
+      const where = [ds.row, r.label].filter(Boolean).join(' — ');
+      const off = shown && shown !== r.count;
+      UI.drawer(UI.drillDrawer({
+        title: where || `All ${r.scope.toLowerCase()}s`,
+        meaning: `${UI.int(r.count)} ${UI.esc(r.scope.toLowerCase())}${r.count === 1 ? '' : 's'}`
+          + (ds.row ? ` in ${UI.esc(ds.row)}` : '')
+          + ((d.selected || []).length ? ` · selection: ${d.selected.map(UI.esc).join(', ')}` : '')
+          + '. Excluded components and the team allow-list are already applied.'
+          + (off ? ` The screen says ${UI.int(shown)} — it has been redrawn since this was opened.` : ''),
+        keys: r.epics.map(e => e.key),
+        catalogue: Object.fromEntries(r.epics.map(e => [String(e.key).toUpperCase(), e])),
+      }));
+    } catch (err) {
+      UI.drawer(`<div class="empty">Could not read the ${UI.esc(d.scope.toLowerCase())}s — ${UI.esc(err.message)}</div>`);
+    }
+  }
+
+  /**
    * THE EPICS BEHIND ONE BAR SEGMENT.
    *
    * The window parameters go WITH the request — the same grain and period
@@ -1079,14 +1220,14 @@ const CoverageReport = (() => {
                 <td>${componentCell(d, r.component)}</td>
                 ${priorityCell(d, r)}
                 <td class="muted">${UI.esc(r.family.split(' —')[0])}</td>
-                <td class="num">${r.total}</td>
-                <td class="num">${r.automated}</td>
-                <td class="num">${r.maintenance}</td>
-                <td class="num">${r.ready}</td>
-                <td class="num ${r.blocked ? 'pct over' : ''}">${r.blocked}</td>
-                <td class="num muted">${r.na || '—'}</td>
-                <td class="num muted">${r.obsoleted || '—'}</td>
-                <td class="num ${r.none ? 'pct under' : 'muted'}">${r.none || '—'}</td>
+                <td class="num" data-sort-value="${r.total}">${drill(r.total, { row: r.component })}</td>
+                <td class="num" data-sort-value="${r.automated}">${drill(r.automated, { row: r.component, buckets: ['automated'] })}</td>
+                <td class="num" data-sort-value="${r.maintenance}">${drill(r.maintenance, { row: r.component, buckets: ['maintenance'] })}</td>
+                <td class="num" data-sort-value="${r.ready}">${drill(r.ready, { row: r.component, buckets: ['ready'] })}</td>
+                <td class="num ${r.blocked ? 'pct over' : ''}" data-sort-value="${r.blocked}">${drill(r.blocked, { row: r.component, buckets: ['blocked'] })}${blockers(r.blocked, { row: r.component })}</td>
+                <td class="num muted" data-sort-value="${r.na}">${drill(r.na, { row: r.component, buckets: ['na'] })}</td>
+                <td class="num muted" data-sort-value="${r.obsoleted}">${drill(r.obsoleted, { row: r.component, buckets: ['obsoleted'] })}</td>
+                <td class="num ${r.none ? 'pct under' : 'muted'}" data-sort-value="${r.none}">${drill(r.none, { row: r.component, buckets: ['none'] })}</td>
                 <td class="num pct ${tone(r.coveragePct)}">${UI.pct(r.coveragePct)}</td>
                 <td>${UI.bar(r.covered, r.automatable || 1, r.coveragePct < 50 ? 'under' : '')}</td>
               </tr>`).join('')}
@@ -1113,12 +1254,18 @@ const CoverageReport = (() => {
    * the difference between "queue some work" and "go and triage". Same seven
    * buckets as the headline, so the two read the same way.
    */
-  function toolColumn(t, row, total) {
+  function toolColumn(t, row, total, component = null) {
+    // `component` is null for the portfolio-wide breakdown and the component's
+    // own name inside an expanded grid row — the drill-in has to narrow to the
+    // same thing the column is counting, or the panel under one row would open
+    // every component's epics.
+    const at = (buckets) => drill(buckets ? row[buckets[0]] : row.total,
+      { row: component, buckets, tool: t.key });
     return `
       <div class="tool-col">
         <div class="eyebrow"><i style="background:${TOOL_COLOR[t.key]}"></i>${UI.esc(t.label)}</div>
         <div style="display:flex;align-items:baseline;gap:8px;margin:6px 0 10px">
-          <span style="font-size:26px;font-weight:800;line-height:1">${UI.int(row.total)}</span>
+          <span style="font-size:26px;font-weight:800;line-height:1">${at(null)}</span>
           <span class="muted" style="font-size:12px">
             ${UI.pct(total ? Math.round((row.total / total) * 1000) / 10 : 0)} of the component ·
             ${row.automatable ? `${UI.pct(row.coveragePct)} covered` : 'nothing automatable'}
@@ -1129,15 +1276,15 @@ const CoverageReport = (() => {
             const b = bucketMeta(k);
             return `
             <tr${row[k] ? '' : ' class="muted"'}>
-              <td><span class="tag"><i class="dot" style="background:${BUCKET_COLOR[k]}"></i>${UI.esc(b.label)}</span></td>
-              <td class="num"><strong>${UI.int(row[k])}</strong></td>
+              <td><span class="tag"><i class="dot" style="background:${BUCKET_COLOR[k]}"></i>${UI.esc(b.label)}</span>${k === 'blocked' ? blockers(row[k], { row: component, tool: t.key }) : ''}</td>
+              <td class="num"><strong>${at([k])}</strong></td>
               <td class="num muted">${UI.pct(row.total ? Math.round((row[k] / row.total) * 1000) / 10 : 0)}</td>
             </tr>`;
           }).join('')}
           </tbody>
           <tfoot><tr>
             <td><strong>Total</strong></td>
-            <td class="num"><strong>${UI.int(row.total)}</strong></td>
+            <td class="num"><strong>${at(null)}</strong></td>
             <td></td>
           </tr></tfoot>
         </table>
@@ -1150,13 +1297,13 @@ const CoverageReport = (() => {
   const bucketMeta = (k) => BUCKET_META[k] || { label: k };
 
   /** The two tools side by side, for whatever scope is in view. */
-  function toolBreakdown(d, row, heading, sub) {
+  function toolBreakdown(d, row, heading, sub, component = null) {
     return `
       <div class="card" style="margin-bottom:16px">
         <h3>${UI.esc(heading)}</h3>
         <div class="sub">${UI.esc(sub)}</div>
         <div style="display:flex;gap:26px;flex-wrap:wrap;margin-top:12px">
-          ${d.tools.map(t => toolColumn(t, row[t.key], row.total)).join('')}
+          ${d.tools.map(t => toolColumn(t, row[t.key], row.total, component)).join('')}
         </div>
       </div>`;
   }
@@ -1172,6 +1319,56 @@ const CoverageReport = (() => {
    * count against the actual `<th>`s.
    */
   const TOOL_COLS = 10;
+
+  /**
+   * A COUNT YOU CAN OPEN.
+   *
+   * Every epic number on this screen is an assertion about a set, and until
+   * now the only way to check one was to rebuild the filter in Jira by hand —
+   * which is exactly the moment a reader stops checking and starts trusting.
+   *
+   * `row` is a component (one line of the grid), `buckets` the columns it
+   * covers — a list, because "Still to automate" is Ready plus Blocked — and
+   * `tool` one half of the TrueTest/KSE split. Anything left out does not
+   * narrow, so the KPI strip's own numbers open the whole population.
+   *
+   * A zero renders as a dash and is NOT a button: an empty drawer teaches the
+   * reader that the drill-in is broken rather than that the set is empty.
+   */
+  function drill(n, { row = null, buckets = null, tool = null } = {}, o = {}) {
+    return UI.drillNumber(n, {
+      act: 'cov-epics',
+      row: row || '',
+      buckets: (buckets || []).join(','),
+      tool: tool || '',
+    }, o);
+  }
+
+  /**
+   * WHAT IS BLOCKING IT — the icon beside a Blocked count.
+   *
+   * BLOCKED IS TWO DIFFERENT FACTS, AND THIS IS THE ONE ANYONE CAN ACT ON.
+   * The Blocked bucket is the Automation Status FIELD reading "Blocked" —
+   * somebody set a dropdown. "Is blocked by" is a Jira LINK — somebody named
+   * the thing in the way. On his data 166 epics sit in the bucket and 26 of
+   * them carry a link, so the number says how much is stuck and this says how
+   * much of it there is anything to chase.
+   *
+   * Its own control rather than more behaviour on the number, because the two
+   * answer different questions — the number opens the blocked epics, the icon
+   * opens what blocks them — and one button doing both would have to pick.
+   *
+   * No count, no icon. An icon that opens "nothing is linked" on every row is
+   * one nobody reads after the second time.
+   */
+  function blockers(n, { row = null, tool = null } = {}) {
+    if (!n) return '';
+    const where = row ? ` in ${row}` : '';
+    return `<button type="button" class="blockicon" data-act="cov-blockers"
+      data-row="${UI.esc(row || '')}" data-tool="${UI.esc(tool || '')}"
+      title="What is blocking the ${UI.int(n)} blocked ${n === 1 ? 'epic' : 'epics'}${UI.esc(where)} — from Jira's &quot;is blocked by&quot; links"
+      aria-label="Show what is blocking the blocked epics${UI.esc(where)}">!</button>`;
+  }
 
   function toolSection(d, rows) {
     const tt = d.toolTotals.truetest, kse = d.toolTotals.kse;
@@ -1227,10 +1424,10 @@ const CoverageReport = (() => {
                     style="padding:0 6px">▸</button></td>
                 <td>${componentCell(d, r.component)}</td>
                 <td data-sort-value="${r.priority == null ? UNSET_SORT : r.priority}">${priorityTag(d, r.priority)}</td>
-                <td class="num">${r.total}</td>
-                <td class="num">${r.truetest.total || '—'}</td>
+                <td class="num" data-sort-value="${r.total}">${drill(r.total, { row: r.component })}</td>
+                <td class="num" data-sort-value="${r.truetest.total}">${drill(r.truetest.total, { row: r.component, tool: 'truetest' })}</td>
                 <td class="num ${r.truetest.automatable ? `pct ${tone(r.truetest.coveragePct)}` : 'muted'}">${r.truetest.automatable ? UI.pct(r.truetest.coveragePct) : '—'}</td>
-                <td class="num">${r.kse.total || '—'}</td>
+                <td class="num" data-sort-value="${r.kse.total}">${drill(r.kse.total, { row: r.component, tool: 'kse' })}</td>
                 <td class="num ${r.kse.automatable ? `pct ${tone(r.kse.coveragePct)}` : 'muted'}">${r.kse.automatable ? UI.pct(r.kse.coveragePct) : '—'}</td>
                 <td>
                   <div class="mixbar" style="height:8px" data-sort-value="${r.truetestShare}">
@@ -1243,7 +1440,8 @@ const CoverageReport = (() => {
               <tr class="detail-row" data-detail="${UI.esc(r.component)}" hidden>
                 <td colspan="${TOOL_COLS}" style="padding:0">
                   ${toolBreakdown(d, r, `${r.component} — automation status by tool`,
-                    `${r.total} ${d.scope.toLowerCase()}s · ${r.truetest.total} on TrueTest, ${r.kse.total} on KSE`)}
+                    `${r.total} ${d.scope.toLowerCase()}s · ${r.truetest.total} on TrueTest, ${r.kse.total} on KSE`,
+                    r.component)}
                 </td>
               </tr>`).join('')}
             </tbody>

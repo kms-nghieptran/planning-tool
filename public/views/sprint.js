@@ -153,6 +153,8 @@ const SprintView = (() => {
       ${testCaseSection(d)}
 
       ${UI.itemsTable(d.items, state)}
+
+      ${riskSection(d, state)}
     `;
 
     /* One delegated listener on the render container — the property
@@ -209,6 +211,102 @@ const SprintView = (() => {
     UI.exportPdf([team.jiraName || team.name || state.teamId, sp.name || state.sprintId, 'sprint report']);
   }
 
+
+  /**
+   * WHAT IS IN THE WAY — this sprint's risks, on the page that is about this
+   * sprint.
+   *
+   * The Risks screen already holds all of this, sprint-scoped, with filters
+   * and the register's editing controls. This is not that screen shrunk down;
+   * it answers a narrower question. Sprint health above says "at risk" and
+   * gives reasons; the reasons say what is true. A risk says what to DO about
+   * it, and that is the thing a lead came to this page for.
+   *
+   * WHAT IS LEFT OUT, and why:
+   *   · LOW signals. "Keep an eye on it" is not a thing to do today, and eight
+   *     of them under a sprint that is on track is how a section teaches you
+   *     to scroll past it. They are counted, and the count is a link.
+   *   · CLOSED register entries — history, and the Risks page has them.
+   *   · The add / edit / promote controls. Two places to edit one register is
+   *     two places for it to disagree; this section reads, and links.
+   *
+   * The cap is on the section, not on each list: six cards is roughly one
+   * screen, and past that the Risks page is the better tool and is one click
+   * away. High always outranks medium for those six, and the register is shown
+   * first — a risk somebody typed is one no detector could have found.
+   */
+  const RISK_CARDS = 6;
+
+  function riskSection(d, state) {
+    const r = d.risks || { signals: [], manual: [] };
+    const signals = r.signals || [];
+    const manual = r.manual || [];
+    const acting = signals.filter(s => s.severity === 'high' || s.severity === 'medium');
+    const low = signals.length - acting.length;
+    // The app routes on a bare hash (`#risks`) and picks the change up through
+    // its own `hashchange` listener, so this needs no handler of its own.
+    const href = '#risks';
+
+    // The register first, then the highest signals, into one budget.
+    const shown = [...manual.map(m => ({ ...m, kind: 'register' })), ...acting.map(s => ({ ...s, kind: 'signal' }))]
+      .slice(0, RISK_CARDS);
+    const more = (manual.length + acting.length) - shown.length;
+
+    /* The strip counts EVERYTHING the section is about — register entries as
+       well as detected signals. Counting only the signals put "1 high" beside
+       two cards with a high tag on them, because his own register entry is one
+       of them, and a header that disagrees with the cards under it is worse
+       than no header. "From the register" stays as provenance, not as a
+       separate population. */
+    const all = [...manual, ...signals];
+    const n = (sev) => all.filter(x => (x.severity || 'low') === sev).length;
+    const counts = [
+      n('high') && `<span class="tag risk">${n('high')} high</span>`,
+      n('medium') && `<span class="tag warn">${n('medium')} medium</span>`,
+      n('low') && `<span class="tag">${n('low')} low</span>`,
+      manual.length && `<span class="tag">${manual.length} from the register</span>`,
+    ].filter(Boolean).join(' ');
+
+    return `
+      <section class="section">
+        <div class="section-head">
+          <h2>Risks</h2>
+          <span class="muted">What is in the way, and what to do about it</span>
+          <div class="spacer"></div>
+          ${counts}
+          <a class="btn ghost sm print-hide" href="${href}">All risks</a>
+        </div>
+        ${shown.length ? `<div class="grid-2">${shown.map(riskCard).join('')}</div>` : `
+          <div class="card"><div class="empty">
+            Nothing to act on in this sprint.
+            ${low ? `${low} low signal${low === 1 ? '' : 's'} on the Risks page.` : 'All eleven checks ran and found nothing.'}
+          </div></div>`}
+        ${more > 0 ? `<div class="muted" style="font-size:11.5px;margin-top:9px">
+          ${more} more — see <a href="${href}">Risks</a>.
+        </div>` : ''}
+      </section>`;
+  }
+
+  function riskCard(x) {
+    const sev = x.severity || 'low';
+    const detail = x.detail || '';
+    // A register entry calls its response a mitigation; a signal calls it an
+    // action. Same line on the card, because to the reader they are one thing.
+    const action = x.kind === 'register' ? x.mitigation : x.action;
+    return `
+      <div class="risk-card ${UI.esc(sev)}">
+        <div class="meta">
+          <span class="tag ${sev === 'high' ? 'risk' : sev === 'medium' ? 'warn' : ''}">${UI.esc(sev)}</span>
+          ${x.category ? `<span class="tag">${UI.esc(x.category)}</span>` : ''}
+          ${x.kind === 'register'
+            ? `<span class="muted" style="font-size:11.5px">register${x.owner ? ` · ${UI.esc(x.owner)}` : ''}</span>`
+            : ''}
+        </div>
+        <div class="title">${UI.esc(x.title || '')}</div>
+        ${detail ? `<div class="detail">${UI.esc(detail)}</div>` : ''}
+        ${action ? `<div class="action">${UI.esc(action)}</div>` : ''}
+      </div>`;
+  }
 
   function card(title, sub, items, state) {
     return `

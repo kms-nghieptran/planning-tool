@@ -130,7 +130,18 @@ const VIEW = fs.readFileSync(path.join(__dirname, '..', 'public', 'views', 'spri
  * rather than against numbers typed into this file.
  */
 async function renderHtml(snap = SNAP, plan = PLAN) {
-  const payload = insights.activeSprintView(plan, snap, TEAM, SPRINT, { today: MID_SPRINT });
+  const view = insights.activeSprintView(plan, snap, TEAM, SPRINT, { today: MID_SPRINT });
+  /* Assembled the way `/api/sprint` assembles it, risks included — the bare
+     view is no longer what the page receives, and a harness that renders a
+     payload the server never sends is checking a screen nobody sees. That the
+     ROUTE really sends this is checked over HTTP, in sprint-api.test.js. */
+  const payload = {
+    ...view,
+    risks: {
+      signals: insights.signalsFor(TEAM, SPRINT, view, snap),
+      manual: (plan.risks || []).filter(r => String(r.status || '').toLowerCase() !== 'closed'),
+    },
+  };
   let html = '';
   const el = () => ({
     addEventListener() {}, value: '', hidden: false, dataset: {}, setAttribute() {},
@@ -685,6 +696,180 @@ check('AN ISSUE KEY IS NEVER BROKEN ACROSS LINES', async () => {
 check('a card is not split across a page break', async () => {
   assert.match(printRules, /break-inside: avoid/);
   assert.match(printRules, /break-after: avoid/, 'a heading must not be orphaned from its table');
+});
+
+/* ── THE RISK SECTION ─────────────────────────────────────────────────
+   Sprint health, at the top of this page, says what is TRUE — a score and
+   the reasons behind it. This section says what to DO, which is the thing a
+   lead opened the page for. It is deliberately not the Risks screen shrunk
+   down: no low signals, no closed register entries, no editing. */
+
+/* `UI.esc` as the view applies it, so a title containing an apostrophe or an
+   ampersand — "R&D_iGO_E2E depends on …" — is looked for in the form the page
+   actually wrote, not the form the model holds. */
+const UIesc = (s) => String(s)
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+
+/** The risk section's markup, cut out by its heading. */
+const riskBlock = (html) => {
+  const at = html.indexOf('<h2>Risks</h2>');
+  assert.ok(at > 0, 'there is no Risks section on the Active sprint page');
+  const start = html.lastIndexOf('<section', at);
+  const end = html.indexOf('</section>', at);
+  return html.slice(start, end);
+};
+const riskCards = (block) => [...block.matchAll(/<div class="risk-card ([a-z]+)">([\s\S]*?)<\/div>\s*<\/div>/g)]
+  .map(m => ({ severity: m[1], html: m[2] }));
+
+/* A sprint in trouble, because the base fixture is a healthy one and fires no
+   detectors at all. Three separate faults, so the section is checked against
+   more than one kind of risk: work nobody can move, a commitment nobody
+   estimated, and one person carrying a sprint's worth of points on their own. */
+const TROUBLED = {
+  ...SNAP,
+  issues: Object.fromEntries([
+    ...Object.entries(SNAP.issues),
+    ...[
+      { ...issue({ key: 'A-30', assignee: 'Hien Phan', points: 5 }), blockedBy: ['A-99'] },
+      issue({ key: 'A-31', assignee: 'Hien Phan', points: null }),
+      issue({ key: 'A-32', assignee: 'Hien Phan', points: 21 }),
+      issue({ key: 'A-33', assignee: 'Hien Phan', points: 13 }),
+    ].map(i => [i.key, i]),
+  ]),
+};
+
+check('THE RISKS SIT UNDER ALL SPRINT ITEMS, where he asked for them', async () => {
+  // Last on the page, after the list of work it is about. Pinned because it
+  // has moved once already — it first went above the burndown.
+  const { html } = await renderHtml(TROUBLED);
+  const items = html.indexOf('All sprint items');
+  const risks = html.indexOf('<h2>Risks</h2>');
+  assert.ok(items > 0 && risks > 0, 'both sections must be on the page');
+  assert.ok(risks > items, 'Risks reads after the item table, not before it');
+  assert.strictEqual(html.indexOf('<section', risks), -1,
+    'and no section opens after it — Risks is the end of the report');
+});
+
+check('THE ACTIVE SPRINT PAGE CARRIES ITS OWN RISKS', async () => {
+  const { html, payload } = await renderHtml(TROUBLED);
+  const block = riskBlock(html);
+  const acting = payload.risks.signals.filter(s => s.severity !== 'low');
+  assert.ok(acting.length >= 2, `the fixture has to produce trouble, got ${acting.length}`);
+  // Every high and medium signal the model found is on the page, by title.
+  for (const s of acting.slice(0, 6)) {
+    assert.ok(block.includes(UIesc(s.title)), `"${s.title}" was detected and is not on the page`);
+  }
+  // And it is the SAME detector the Risks screen runs, not a second opinion
+  // written into the view — that is the whole reason `signalsFor` was split out.
+  const fromRiskView = insights.riskView(
+    { ...PLAN, teams: [TEAM] }, TROUBLED, { teamId: 'titan', sprintId: 'S40', today: MID_SPRINT },
+  ).signals.map(s => s.id).sort();
+  assert.deepStrictEqual(payload.risks.signals.map(s => s.id).sort(), fromRiskView,
+    'the two screens must detect the same risks, or one of them is lying about this sprint');
+});
+
+check('and each card says what to DO, not just what is wrong', async () => {
+  // A risk you cannot act on is a number. The Risks screen holds itself to
+  // this and so does the page that now borrows from it.
+  const block = riskBlock((await renderHtml(TROUBLED)).html);
+  const cards = riskCards(block);
+  assert.ok(cards.length, 'no cards rendered');
+  for (const c of cards) assert.match(c.html, /class="action"/, `a card has no action: ${c.html.slice(0, 80)}`);
+});
+
+check('and it never runs past its budget, however bad the sprint is', async () => {
+  // Past about a screenful the Risks page is the better tool, and it is one
+  // click away. The overflow has to be stated rather than silently dropped.
+  const many = { ...PLAN, risks: new Array(9).fill(0).map((_, i) => ({
+    id: `r${i}`, title: `Register risk ${i}`, severity: 'high', mitigation: 'Do the thing',
+  })) };
+  const { html } = await renderHtml(TROUBLED, many);
+  const block = riskBlock(html);
+  assert.ok(riskCards(block).length <= 6, 'the section has a budget');
+  assert.match(block, /\d+ more/, 'and says how many it did not draw');
+});
+
+check('LOW SIGNALS ARE COUNTED, NOT LISTED', async () => {
+  /* "Keep an eye on it" is not a thing to do today, and a column of them under
+     a sprint that is on track is how a section teaches you to scroll past it.
+     They stay on the Risks page; here they are a number.
+
+     Work-mix drift is the reliable low one: a target this sprint misses, on a
+     category that is not maintenance — maintenance running over is the one
+     mix result the detector rates higher than low. */
+  const drifted = { ...PLAN, mixTargets: { titan: { technical: [40, 60] } } };
+  const { html, payload } = await renderHtml(TROUBLED, drifted);
+  const block = riskBlock(html);
+  const low = payload.risks.signals.filter(s => s.severity === 'low');
+  assert.ok(low.length, 'this fixture has to produce a low signal, or the check proves nothing');
+  for (const s of low) {
+    assert.ok(!block.includes(UIesc(s.title)), `low signal "${s.title}" is taking a card`);
+  }
+  assert.match(block, new RegExp(`${low.length} low`), 'and the count has to be stated');
+});
+
+check('THE COUNTS AGREE WITH THE CARDS UNDER THEM', async () => {
+  /* The first version counted only the detected signals, so his own register
+     entry — a high one — made the header read "1 high" above two cards
+     tagged high. A header that disagrees with what is under it is worse than
+     no header. */
+  const plan = {
+    ...PLAN,
+    risks: [
+      { id: 'r1', title: 'RCA ownership is unclear', severity: 'high', category: 'Process', owner: 'Nghiep', mitigation: 'Agree an owner' },
+      { id: 'r2', title: 'A risk that was dealt with', severity: 'high', status: 'Closed', mitigation: 'Done' },
+    ],
+  };
+  const { html } = await renderHtml(SNAP, plan);
+  const block = riskBlock(html);
+  const shownHigh = riskCards(block).filter(c => c.severity === 'high').length;
+  const stated = Number((block.match(/(\d+) high/) || [])[1]);
+  assert.ok(shownHigh > 0 && stated > 0, 'the fixture must produce a high risk');
+  assert.ok(stated >= shownHigh,
+    `the header says ${stated} high and ${shownHigh} high cards are drawn under it`);
+  assert.match(block, /RCA ownership is unclear/, 'a risk he typed himself belongs on his sprint page');
+  assert.match(block, /1 from the register/, 'and it is marked as coming from the register');
+});
+
+check('a CLOSED register entry is history, and stays on the Risks page', async () => {
+  const plan = {
+    ...PLAN,
+    risks: [{ id: 'r2', title: 'A risk that was dealt with', severity: 'high', status: 'Closed', mitigation: 'Done' }],
+  };
+  const { html, payload } = await renderHtml(SNAP, plan);
+  assert.strictEqual(payload.risks.manual.length, 0, 'a closed entry must not reach the page at all');
+  assert.ok(!riskBlock(html).includes('A risk that was dealt with'));
+});
+
+check('and the section links to the full register rather than editing it here', async () => {
+  // Two places to edit one register is two places for it to disagree.
+  const block = riskBlock((await renderHtml()).html);
+  assert.match(block, /href="#risks"/, 'no way through to the Risks page');
+  assert.ok(!/data-edit=|data-delete=|id="addRisk"/.test(block),
+    'the register is edited in one place, and this is not it');
+});
+
+check('A SPRINT WITH NOTHING TO ACT ON SAYS THE CHECKS RAN', async () => {
+  /* Silence here reads as "this feature is broken" or "nobody looked". It has
+     to read as a result. */
+  // The base fixture is a healthy two-person sprint and fires no detector at
+  // all — which is exactly the case that has to read as a result.
+  const { html, payload } = await renderHtml(SNAP, { ...PLAN, risks: [] });
+  const block = riskBlock(html);
+  assert.ok(!payload.risks.signals.some(s => s.severity !== 'low') && !payload.risks.manual.length,
+    'this fixture has to be quiet, or the check proves nothing');
+  assert.match(block, /Nothing to act on/);
+  assert.ok(!/<div class="risk-card/.test(block), 'and draws no cards');
+});
+
+check('the risks print, because a sprint report without them is the good news only', async () => {
+  const { html } = await renderHtml();
+  const block = riskBlock(html);
+  assert.ok(!/class="section[^"]*print-hide/.test(block.slice(0, block.indexOf('>') + 1)),
+    'the section itself must not be print-hidden');
+  // The link out is screen furniture and does not belong on paper.
+  assert.match(block, /class="btn ghost sm print-hide"/, 'the "All risks" link should not print');
 });
 
 /* ── run ──────────────────────────────────────────────────────────────── */

@@ -797,6 +797,25 @@ select.prio option[value="4"] { color: var(--app-fg-3); }
 /* Printing a report, every dotted hint is noise — nothing is clickable on paper. */
 @media print { .numlink { border-bottom-color: transparent !important; } }
 
+/* THE "WHAT IS BLOCKING IT" ICON, beside a Blocked count.
+   Deliberately small and quiet: it sits in a table cell next to a number and
+   must not out-shout the number, which is the thing being read. It carries the
+   risk colour because it only ever appears where something is blocked, and a
+   round outline so it reads as a control rather than as punctuation that
+   wandered into the data. */
+.blockicon {
+  font: inherit; font-size: 10px; font-weight: 700; line-height: 1;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 15px; height: 15px; margin-left: 6px; vertical-align: middle;
+  border: 1px solid var(--risk); border-radius: 50%;
+  background: none; color: var(--risk); cursor: pointer; padding: 0;
+}
+.blockicon:hover { background: var(--risk); color: #fff; }
+.blockicon:focus-visible { outline: 2px solid var(--brand-blue); outline-offset: 2px; }
+/* On paper it is a control that cannot be pressed, and an exclamation mark
+   sitting beside a number reads as data. The count it belongs to still prints. */
+@media print { .blockicon { display: none !important; } }
+
 /* Coverage movement — the delta headline above the trend chart.
    The number is the point of the section, so it carries the stat weight and the
    direction is in the glyph rather than in colour alone. */

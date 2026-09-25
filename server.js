@@ -368,7 +368,20 @@ async function handleApi(req, res, url) {
     const plan = store.getPlan(), snap = store.getSnapshot();
     const team = findTeam(plan, q.get('team'));
     const sprint = findSprint(plan, q.get('sprint'), team.id);
-    return json(res, 200, insights.activeSprintView(plan, snap, team, sprint));
+    const view = insights.activeSprintView(plan, snap, team, sprint);
+    /* THE RISKS FOR THIS SPRINT, off the view that was just built rather than
+       from a second call to `riskView` — which would have recomputed the same
+       view and given the screen two independent answers to blend. The register
+       travels with them because a risk the tool cannot see is still a risk to
+       this sprint; the OPEN ones only, since a closed entry is history and
+       belongs on the Risks page with the rest of the register. */
+    return json(res, 200, {
+      ...view,
+      risks: {
+        signals: insights.signalsFor(team, sprint, view, snap),
+        manual: (plan.risks || []).filter(r => String(r.status || '').toLowerCase() !== 'closed'),
+      },
+    });
   }
 
   if (p === '/api/forecast' && req.method === 'GET') {
@@ -506,6 +519,67 @@ async function handleApi(req, res, url) {
       // So a component can link to the SAME set in Jira that the row counts:
       // same project, same issue type. The key lives in config, not the model.
       project: cfg.jira.projectKey || null,
+    });
+  }
+
+  /* THE EPICS BEHIND ONE NUMBER on the coverage screen.
+     Its own route rather than keys on every cell of the payload: that grid is
+     97 components wide by nine buckets and is re-fetched on every keystroke of
+     the picker, so shipping the key list for every cell would make the common
+     case pay for the rare one — the same reason the backlog drill-in is
+     separate. `epicsIn` runs the classification `view` ran, so the list cannot
+     be a different set from the number that opened it. */
+  if (p === '/api/reports/coverage/epics' && req.method === 'GET') {
+    const snap = store.getSnapshot();
+    const m = (cfg.metrics || {});
+    const plan = store.getPlan();
+    /* SEVERAL BUCKETS, OR'D — because one number on the screen is the sum of
+       two of them: "Still to automate" is Ready plus Blocked, and a drill-in
+       that could only answer for one column would have to leave that KPI
+       unclickable or lie about half of it. */
+    const buckets = q.getAll('bucket').filter(Boolean);
+    const tool = q.get('tool') || null;
+
+    // Refused rather than ignored: an unknown column silently listing
+    // everything is a drawer that says 4,146 under a number saying 12.
+    const bad = buckets.find(b => !coverage.BUCKETS.some(x => x.key === b));
+    if (bad) return json(res, 400, { error: `Unknown column "${bad}".` });
+    if (tool && !coverage.TOOLS.some(t => t.key === tool)) {
+      return json(res, 400, { error: `Unknown tool "${tool}".` });
+    }
+
+    const opts = {
+      components: q.getAll('component').filter(Boolean),
+      scope: m.coverageScope || 'Epic',
+      exclude: plan.excludedComponents || [],
+      teams: plan.coverageTeams || [],
+    };
+    const epics = coverage.epicsIn(snap, opts, { component: q.get('row') || null, buckets, tool });
+
+    const names = buckets.map(b => (coverage.BUCKETS.find(x => x.key === b) || {}).label).filter(Boolean);
+    const toolLabel = coverage.TOOLS.find(t => t.key === tool);
+    return json(res, 200, {
+      scope: opts.scope,
+      row: q.get('row') || null,
+      buckets, tool,
+      label: [toolLabel && toolLabel.label, names.join(' + ')].filter(Boolean).join(' · ')
+        || `All ${opts.scope.toLowerCase()}s`,
+      count: epics.length,
+      project: cfg.jira.projectKey || null,
+      epics: epics.map(i => ({
+        key: i.key, summary: i.summary || '', status: i.status || '',
+        statusCategory: i.statusCategory || '', automationStatus: i.automationStatus || '',
+        team: i.team || '', bucket: i.bucket, tool: i.tool,
+        components: coverage.productComponents(i, coverage.excludeSet(opts.exclude)),
+        /* WHAT IS ACTUALLY BLOCKING IT — the Jira "is blocked by" links, which
+           are NOT the same thing as the Blocked bucket. The bucket comes from
+           the Automation Status FIELD; this comes from a link somebody made.
+           On his data 166 epics are marked Blocked and only 26 of them say by
+           what, so the gap between the two is the point rather than a detail:
+           it is the difference between "blocked" and "blocked by something we
+           can go and chase". */
+        blockedBy: i.blockedBy || [],
+      })),
     });
   }
 

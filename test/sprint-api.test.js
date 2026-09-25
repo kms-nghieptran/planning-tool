@@ -538,6 +538,62 @@ check('a field that was not sent is left alone', async () => {
   assert.deepStrictEqual(r.body.team.jiraTeams, ['Katalon Auto Titan']);
 });
 
+/* ── THE SPRINT PAYLOAD CARRIES ITS RISKS ─────────────────────────────
+   The Active sprint screen renders a Risks section out of this route. The
+   view is checked in sprint-view.test.js, against a payload that harness
+   assembles the way this route does; what has to be checked HERE is that the
+   route really assembles it that way — a harness agreeing with itself is the
+   one thing a harness can always manage. */
+
+check('THE SPRINT ROUTE SENDS THE RISKS FOR THAT SPRINT', async () => {
+  const r = await call('GET', '/api/sprint?team=titan&sprint=S39');
+  assert.strictEqual(r.status, 200);
+  assert.ok(r.body.risks, 'no risks on the payload — the section would render empty on every sprint');
+  assert.ok(Array.isArray(r.body.risks.manual));
+  /* NOT "is an array". An empty list is the shape a route that stopped
+     detecting anything returns, and it is indistinguishable from a healthy
+     sprint — so the fixture is a sprint with real trouble in it and the count
+     is asserted. This is the difference between checking the feature and
+     checking that the key exists. */
+  assert.ok(r.body.risks.signals.length >= 2,
+    `this sprint is behind pace with people unassigned; the route found ${r.body.risks.signals.length} risks`);
+  for (const s of r.body.risks.signals) {
+    assert.ok(s.severity && s.title && s.action,
+      `a signal with no severity, title or action cannot be drawn: ${JSON.stringify(s)}`);
+    assert.strictEqual(s.sprintId, 'S39', 'a risk from another sprint has no business on this page');
+  }
+});
+
+check('and they are the SAME risks the Risks page shows for it', async () => {
+  // Two screens, one detector — the reason `signalsFor` was split out of
+  // `riskView`. If these diverge, one screen is telling him something about
+  // this sprint that the other denies.
+  const sprint = await call('GET', '/api/sprint?team=titan&sprint=S39');
+  const risks = await call('GET', '/api/risks?team=titan&sprint=S39');
+  assert.deepStrictEqual(
+    sprint.body.risks.signals.map(s => s.id).sort(),
+    risks.body.signals.map(s => s.id).sort(),
+  );
+});
+
+check('AN OPEN REGISTER ENTRY REACHES THE SPRINT PAGE, a closed one does not', async () => {
+  // A risk somebody typed is one no detector could have found, so it belongs
+  // on the sprint page. A closed one is history and belongs on the register.
+  assert.strictEqual((await call('POST', '/api/risk',
+    { title: 'Client sign-off is late', severity: 'high', mitigation: 'Chase it' })).status, 200);
+  assert.strictEqual((await call('POST', '/api/risk',
+    { title: 'Already handled', severity: 'high', status: 'Closed' })).status, 200);
+
+  const titles = (await call('GET', '/api/sprint?team=titan&sprint=S39')).body.risks.manual.map(x => x.title);
+  assert.ok(titles.includes('Client sign-off is late'), 'an open register entry is missing');
+  assert.ok(!titles.includes('Already handled'), 'a closed entry is history, not a risk to this sprint');
+
+  // The Risks page keeps both — it IS the register, and one you cannot see the
+  // closed items in is not a register.
+  const all = (await call('GET', '/api/risks?team=titan&sprint=S39')).body.manual.map(x => x.title);
+  assert.ok(all.includes('Already handled'), 'the full register still has to hold it');
+});
+
 /* ── run ───────────────────────────────────────────────────────────── */
 
 server.listen(0, '127.0.0.1', async () => {

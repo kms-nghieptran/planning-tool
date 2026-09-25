@@ -485,22 +485,61 @@ async function renderHtml(opts = {}) {
   // payload was how this suite discovered that a flag called `ready` collides
   // with the Ready-for-Automation bucket count every coverage object spreads at
   // its top level — so it gets its own shape here, empty and explicit.
-  ctx.UI.api = async (p) => (p.includes('/movement')
-    ? (moved || { hasTrend: false, points: [], from: null, to: null, deltaPct: null, buckets: [], movers: [], sources: [], days: 180 })
-    : payload);
+  /* Every request the view makes, recorded — so a check can assert not just
+     that a click did something, but that it asked the right question. */
+  const asked = [];
+  ctx.UI.api = async (p) => {
+    asked.push(p);
+    if (p.includes('/movement')) {
+      return moved || { hasTrend: false, points: [], from: null, to: null, deltaPct: null, buckets: [], movers: [], sources: [], days: 180 };
+    }
+    if (p.includes('/coverage/epics')) return epicsAnswer;
+    return payload;
+  };
+  const drawn = [];
+  ctx.UI.drawer = (h) => drawn.push(h);
 
   vm.runInContext(`${VIEW}\n;globalThis.__v = CoverageReport;`, ctx);
   // `wireCombo` closes over ui.js's own `$`, which calls `root.querySelector` —
   // overriding `UI.$` from outside cannot reach it. The mount has to be
   // DOM-shaped, which is more faithful than a stub anyway.
+  /* Clicks are RECORDED rather than swallowed. A control that renders and does
+     nothing when pressed looks identical in the HTML to one that works, so a
+     markup check alone cannot tell them apart — which is exactly how a handler
+     that stopped matching the blockers icon would have shipped. */
+  const clicks = [];
   const mount = {
-    style: {}, addEventListener() {},
+    style: {},
+    addEventListener: (t, fn) => { if (t === 'click') clicks.push(fn); },
     querySelector: () => el(), querySelectorAll: () => [],
     set innerHTML(v) { html = v; }, get innerHTML() { return html; },
   };
   await ctx.__v.render({}, mount);
-  return { html, payload };
+
+  /** Fire a click the way the browser would, at a target `closest` resolves. */
+  const click = async (act, data = {}) => {
+    const target = {
+      dataset: { act, ...data }, textContent: data.textContent || '',
+      closest: (sel) => (sel.includes(act) ? target : null),
+    };
+    for (const fn of clicks.slice()) await fn({ target, preventDefault() {} });
+    await new Promise(r => setTimeout(r, 5));
+  };
+  return { html, payload, click, asked, drawn };
 }
+
+/* What `/api/reports/coverage/epics` answers with in this harness. The route
+   itself is checked over HTTP in coverage-epics.test.js; here it only has to
+   be shaped like the real thing so the drawer can be rendered and read. */
+const epicsAnswer = {
+  scope: 'Epic', row: null, buckets: ['blocked'], tool: null, label: 'Blocked', count: 3,
+  project: 'AUTOKAT',
+  epics: [
+    { key: 'AUTOKAT-1', summary: 'Held by the client', components: ['PS_iGO_NLG'], bucket: 'blocked', blockedBy: ['CLICMNT-1'] },
+    { key: 'AUTOKAT-2', summary: 'Also held by the client', components: ['PS_iGO_NLG'], bucket: 'blocked', blockedBy: ['CLICMNT-1'] },
+    { key: 'AUTOKAT-3', summary: 'Nobody said why', components: ['PS_iGO_NLG'], bucket: 'blocked', blockedBy: [] },
+  ],
+};
 
 check('THE PER-TOOL BREAKDOWN ACTUALLY REACHES THE PAGE', async () => {
   const { html, payload } = await renderHtml({ component: NLG });
@@ -512,9 +551,16 @@ check('THE PER-TOOL BREAKDOWN ACTUALLY REACHES THE PAGE', async () => {
     const n = (html.match(new RegExp(b.label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) || []).length;
     assert.ok(n >= 3, `"${b.label}" appears ${n} times — expected the headline plus one row per tool`);
   }
+  /* The count itself. This used to be asserted as `<strong>N</strong>` — the
+     exact markup — which went red the moment the number became something you
+     can click, with nothing actually wrong. What has to be true is that
+     TrueTest's Automated figure reaches the page AND that it opens the epics
+     behind it. */
   const tt = payload.toolTotals.truetest;
-  assert.ok(html.includes(`<strong>${tt.automated}</strong>`),
-    "TrueTest's Automated count is not rendered anywhere");
+  assert.ok(tt.automated > 0, 'the fixture has to have automated TrueTest work');
+  assert.match(html, new RegExp(
+    `<button[^>]*data-act="cov-epics"[^>]*data-buckets="automated"[^>]*data-tool="truetest"[^>]*>${tt.automated}</button>`),
+  `TrueTest's Automated count (${tt.automated}) is not on the page as an openable number`);
 });
 
 check('and every component row carries its own, in the all-components view', async () => {
@@ -527,6 +573,212 @@ check('and every component row carries its own, in the all-components view', asy
     assert.ok(html.includes(`data-detail="${attr(r.component)}"`), `${r.component} has no expandable detail row`);
     assert.ok(html.includes(`data-expand="${attr(r.component)}"`), `${r.component} has no toggle to open it`);
   }
+});
+
+/* ── EVERY EPIC COUNT OPENS ───────────────────────────────────────────
+   A number on this screen is an assertion about a set, and until it could be
+   opened the only way to check one was to rebuild the filter in Jira by hand.
+   The route behind these is checked over HTTP in coverage-epics.test.js; what
+   is checked here is that the SCREEN asks it the right question — a drill-in
+   wired to the wrong row or the wrong column is worse than none, because it
+   answers confidently. */
+
+/** The drill button carrying exactly these data attributes, if the page has one. */
+const drillFor = (html, { row = '', buckets = '', tool = '' }) => {
+  const esc = (v) => String(v).replace(/&/g, '&amp;').replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/'/g, '&#39;');
+  const m = new RegExp(`<button[^>]*data-act="cov-epics" data-row="${esc(row).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"`
+    + ` data-buckets="${buckets}" data-tool="${tool}"[^>]*>([^<]*)</button>`).exec(html);
+  return m && m[1];
+};
+
+check('EVERY EPIC COUNT IN THE GRID IS A NUMBER YOU CAN OPEN', async () => {
+  const { html, payload } = await renderHtml({});
+  const cols = ['automated', 'maintenance', 'ready', 'blocked', 'na', 'obsoleted', 'none'];
+  let found = 0;
+  for (const r of payload.byComponent) {
+    // The row total, in the scope column.
+    if (r.total) {
+      assert.strictEqual(drillFor(html, { row: r.component }), String(r.total),
+        `${r.component}: the row total is not openable, or opens the wrong set`);
+      found++;
+    }
+    for (const k of cols) {
+      if (!r[k]) continue;   // a zero is a dash, deliberately not a button
+      assert.strictEqual(drillFor(html, { row: r.component, buckets: k }), String(r[k]),
+        `${r.component} / ${k}: not openable, or wired to the wrong slice`);
+      found++;
+    }
+  }
+  assert.ok(found >= 6, `only ${found} counts checked — the fixture proves nothing`);
+});
+
+check('and so is every number in the KPI strip', async () => {
+  const { html, payload } = await renderHtml({});
+  const b = (k) => (payload.buckets.find(x => x.key === k) || {}).count || 0;
+  assert.strictEqual(drillFor(html, { buckets: 'automated' }), String(b('automated')));
+  assert.strictEqual(drillFor(html, { buckets: 'maintenance' }), String(b('maintenance')));
+  /* "Still to automate" is Ready + Blocked, so it opens BOTH columns. A
+     drill-in wired to one of them would answer for half the number above it. */
+  assert.strictEqual(drillFor(html, { buckets: 'ready,blocked' }), String(b('ready') + b('blocked')),
+    'Still to automate has to open both of its columns');
+  assert.ok(b('ready') && b('blocked'), 'and both have to be non-empty, or the sum proves nothing');
+});
+
+check('AN EXPANDED TOOL PANEL OPENS ITS OWN COMPONENT, not the whole portfolio', async () => {
+  /* The panel under a grid row repeats the same markup as the portfolio-wide
+     breakdown above the table. Forget to tell it which component it is for and
+     every number inside it silently opens every component's epics — a drawer
+     that is confidently, invisibly wrong. */
+  const { html, payload } = await renderHtml({});
+  const r = payload.byTool.find(x => x.truetest.automated > 0);
+  assert.ok(r, 'the fixture needs a component with automated TrueTest work');
+  assert.strictEqual(drillFor(html, { row: r.component, buckets: 'automated', tool: 'truetest' }),
+    String(r.truetest.automated),
+    `${r.component}'s expanded panel does not narrow to ${r.component}`);
+
+  // And the portfolio-wide one above the table has no row, because it is not
+  // about one — the same markup, correctly told it has no component.
+  const tt = payload.toolTotals.truetest;
+  assert.strictEqual(drillFor(html, { buckets: 'automated', tool: 'truetest' }), String(tt.automated),
+    'the portfolio breakdown must open the portfolio, not a component');
+});
+
+check('a zero is a dash, not an empty drawer waiting to be opened', async () => {
+  // An empty drill-in teaches the reader that the feature is broken rather
+  // than that the set is empty. `UI.drillNumber` already refuses; this pins
+  // that the coverage screen uses it rather than rolling its own button.
+  const { html, payload } = await renderHtml({});
+  const empty = payload.byComponent.find(r => !r.blocked);
+  assert.ok(empty, 'the fixture needs a component with nothing blocked');
+  assert.strictEqual(drillFor(html, { row: empty.component, buckets: 'blocked' }), null,
+    `${empty.component} has no blocked epics and still offers a button`);
+});
+
+/* ── THE "WHAT IS BLOCKING IT" ICON ──────────────────────────────────
+   Blocked is two different facts. The column counts the Automation Status
+   FIELD; the icon opens Jira's "is blocked by" LINK. On his data 166 epics are
+   in the bucket and 26 carry a link, so the icon is not a second way to press
+   the number — it answers a question the number cannot. */
+
+const blockIcon = (html, { row = '', tool = '' }) => {
+  const esc = (v) => String(v).replace(/&/g, '&amp;').replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/'/g, '&#39;');
+  return new RegExp(`<button[^>]*class="blockicon"[^>]*data-act="cov-blockers"\\s+data-row="`
+    + `${esc(row).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}" data-tool="${tool}"`).test(html);
+};
+
+check('A BLOCKED COUNT CARRIES THE ICON THAT OPENS ITS BLOCKERS', async () => {
+  const { html, payload } = await renderHtml({});
+  const withBlocked = payload.byComponent.filter(r => r.blocked);
+  assert.ok(withBlocked.length, 'the fixture needs a component with blocked work');
+  for (const r of withBlocked) {
+    assert.ok(blockIcon(html, { row: r.component }),
+      `${r.component} has ${r.blocked} blocked and no icon to ask what by`);
+  }
+  // And the KPI strip's own blocked count.
+  assert.ok(blockIcon(html, {}), 'the Still-to-automate card has no blockers icon');
+});
+
+check('and a component with nothing blocked does NOT carry one', async () => {
+  /* An icon that opens "nothing is linked" on every row is one nobody reads
+     after the second time. It appears where there is something to explain. */
+  const { html, payload } = await renderHtml({});
+  const clear = payload.byComponent.filter(r => !r.blocked);
+  assert.ok(clear.length, 'the fixture needs a component with nothing blocked');
+  for (const r of clear) {
+    assert.ok(!blockIcon(html, { row: r.component }),
+      `${r.component} has nothing blocked and still offers an icon`);
+  }
+});
+
+check('THE ICON IS NOT THE NUMBER — it is its own control, asking its own question', async () => {
+  /* If clicking the count and clicking the icon did the same thing, one of
+     them is a lie: the count opens the blocked epics, the icon opens what
+     blocks them, and they return different lists on his data (166 vs 26). */
+  const { html, payload } = await renderHtml({});
+  const r = payload.byComponent.find(x => x.blocked);
+  assert.match(html, new RegExp(`data-act="cov-epics"[^>]*data-buckets="blocked"`),
+    'the count still has to open the blocked epics');
+  assert.match(html, /data-act="cov-blockers"/, 'and the icon a different action');
+  assert.ok(r, 'fixture');
+});
+
+check('CLICKING THE ICON ACTUALLY ASKS FOR THE BLOCKED EPICS', async () => {
+  /* The gap a markup check cannot see: an icon that renders perfectly and does
+     nothing when pressed looks identical in the HTML to one that works. Break
+     the handler's selector and every check above stays green. */
+  const r = await renderHtml({});
+  await r.click('cov-blockers', { row: 'PS_iGO_NLG', tool: '' });
+  const req = r.asked.find(p => p.includes('/coverage/epics'));
+  assert.ok(req, 'the icon was pressed and nothing was requested');
+  assert.match(req, /bucket=blocked/, 'it has to ask for the blocked column, not everything');
+  assert.match(req, /row=PS_iGO_NLG/, 'and for the row it was pressed on');
+  assert.ok(r.drawn.length, 'and open a drawer with the answer');
+});
+
+check('and the drawer groups by BLOCKER, so one ticket is one conversation', async () => {
+  /* Eleven epics held by one ticket is one thing to chase, not eleven. Listed
+     epic-by-epic the reader has to do that grouping by eye. */
+  const r = await renderHtml({});
+  await r.click('cov-blockers', { row: '', tool: '' });
+  const html = r.drawn[r.drawn.length - 1];
+  assert.match(html, /CLICMNT-1/, 'the blocker is not named');
+  assert.match(html, /blocks 2/, 'and it has to say how many it holds');
+});
+
+check('AND SAYS HOW MANY HAVE NO BLOCKER RECORDED, rather than dropping them', async () => {
+  /* The majority of his data: 166 marked Blocked, 26 with a link. A drawer
+     that quietly showed 26 under a column saying 166 is the exact failure
+     every other drill-in on this screen is built to avoid — and "nobody wrote
+     down what is blocking this" is a real finding, not an empty result. */
+  const r = await renderHtml({});
+  await r.click('cov-blockers', { row: '', tool: '' });
+  const html = r.drawn[r.drawn.length - 1];
+  assert.match(html, /No blocker recorded/, 'the unlinked epics are not accounted for');
+  assert.match(html, /AUTOKAT-3/, 'and the epic itself has to be listed, not just counted');
+  // Every epic the route returned reaches the panel, one way or the other.
+  for (const e of epicsAnswer.epics) {
+    assert.ok(html.includes(e.key), `${e.key} is in the column and not in the drawer`);
+  }
+});
+
+check('THE STATUS TABLE\'S OWN BLOCKED ROW CARRIES IT TOO', async () => {
+  /* "Overall automation status" is the most literal Blocked-status on the
+     page — a row whose label IS the status — and it was the one place the
+     icon was missing after the first pass. Every bucket count there opens its
+     epics now, and the Blocked one also asks what by. */
+  const { html, payload } = await renderHtml({});
+  const b = payload.buckets.find(x => x.key === 'blocked');
+  assert.ok(b && b.count, 'the fixture needs blocked work');
+
+  /* Scoped to THIS card. Asserting against the whole page matched the KPI
+     strip's own blocked icon and count, which are always there — so the check
+     passed with the status table carrying neither. A section-level claim has
+     to be checked on the section. */
+  const at = html.indexOf('Overall automation status');
+  assert.ok(at > 0, 'the status card is not on the page');
+  const card = html.slice(at, html.indexOf('</section>', at));
+
+  assert.strictEqual(drillFor(card, { buckets: 'blocked' }), String(b.count),
+    "the status table's Blocked count does not open its epics");
+  assert.ok(blockIcon(card, {}), "the status table's Blocked row has no blockers icon");
+  // Every other row's count opens too — the whole column, not just Blocked.
+  for (const x of payload.buckets.filter(y => y.count)) {
+    assert.strictEqual(drillFor(card, { buckets: x.key }), String(x.count), `${x.label} does not open`);
+  }
+  // And no OTHER status row pretends to have blockers to show.
+  assert.strictEqual((card.match(/class="blockicon"/g) || []).length, 1,
+    'exactly one row in this table is about blocked work');
+});
+
+check('it does not print — a control nobody can press reads as data on paper', async () => {
+  // An exclamation mark beside a number, on paper, is a warning symbol with no
+  // meaning. The count it belongs to still prints.
+  const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'styles.css'), 'utf8');
+  const at = css.indexOf('@media print { .blockicon');
+  assert.ok(at > 0, 'the icon is not hidden in print');
+  assert.match(css.slice(at, css.indexOf('}', at)), /display: none/);
 });
 
 check('EVERY COMPONENT ROW LINKS TO THAT COMPONENT IN JIRA', async () => {
