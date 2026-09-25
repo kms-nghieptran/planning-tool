@@ -66,7 +66,11 @@ const issue = (o) => ({
   status: o.status || 'Open', statusCategory: o.status === 'Done' ? 'done' : 'new',
   assignee: o.assignee || null, labels: [], components: o.components || [],
   points: 'points' in o ? o.points : 3, sprintNames: ['Katalon Titan Sprint 40'],
-  sprints: [{ name: 'Katalon Titan Sprint 40' }], blockedBy: [], relatesTo: o.relatesTo || [],
+  sprints: [{ name: 'Katalon Titan Sprint 40' }],
+  // The item's OWN blockers, and its parent. Both default to nothing, which is
+  // the shape of every Story in Refinement in his sprint: the block is
+  // recorded on the epic, never on the Story.
+  blockedBy: o.blockedBy || [], parentKey: o.parentKey || null, relatesTo: o.relatesTo || [],
   updated: '2026-09-20T00:00:00.000Z',
   resolved: o.status === 'Done' ? '2026-09-21T00:00:00.000Z' : null,
   team: 'Katalon Auto Titan', priority: 'Medium',
@@ -95,6 +99,43 @@ const SNAP = {
     issue({ key: 'A-21', assignee: 'Hien Phan', points: 1, type: 'Bucket Story', relatesTo: [] }),
   ].map(i => [i.key, i])),
   testops: { projects: [] }, github: {}, verification: [],
+};
+
+/* ── REFINEMENT, AND THE BLOCK RECORDED ONE LEVEL UP ───────────────────────
+   His TT Week 14Sep, in miniature. Sixteen Stories sat in Refinement, not one
+   of them naming an "is blocked by" of its own, while ten of their parent
+   epics named a blocker — and all ten named the SAME ticket, in a project this
+   tool does not even sync. The sprint board showed none of it.
+
+   So the fixture is built to fail the plausible implementations:
+     · R-1 and R-2 are in Refinement under DIFFERENT epics that share a blocker,
+       so a drawer keyed off the story rather than its epic still looks right
+       on one of them and wrong on the other.
+     · R-3 is in Refinement under an epic with nothing recorded — the icon must
+       not appear, or it appears on every row and stops meaning anything.
+     · N-1 is NOT in Refinement under a blocked epic, which is the five rows in
+       his sprint that this feature deliberately does not mark.
+     · R-4 carries its own blocker and sits under an unblocked epic, so an
+       implementation that reads the ITEM's blockedBy passes everything above
+       and fails here. */
+const EPIC = (key, blockedBy) => ({
+  key, summary: `Epic ${key}`, issueType: 'Epic', status: 'Open', components: [],
+  labels: [], blockedBy, relatesTo: [],
+});
+
+const REFINE_SNAP = {
+  ...SNAP,
+  issues: Object.fromEntries([
+    ...Object.values(SNAP.issues),
+    EPIC('E-BLOCKED', ['CLICMNTIGO-11567']),
+    EPIC('E-ALSO', ['CLICMNTIGO-11567', 'OTHER-1']),
+    EPIC('E-CLEAR', []),
+    issue({ key: 'R-1', assignee: 'Hien Phan', points: 3, status: 'Refinement', parentKey: 'E-BLOCKED' }),
+    issue({ key: 'R-2', assignee: 'Hien Phan', points: 2, status: 'Refinement', parentKey: 'E-ALSO' }),
+    issue({ key: 'R-3', assignee: 'Hien Phan', points: 1, status: 'Refinement', parentKey: 'E-CLEAR' }),
+    issue({ key: 'R-4', assignee: 'Hien Phan', points: 1, status: 'Refinement', parentKey: 'E-CLEAR', blockedBy: ['OWN-1'] }),
+    issue({ key: 'N-1', assignee: 'Hien Phan', points: 1, status: 'In Dev', parentKey: 'E-BLOCKED' }),
+  ].map(i => [i.key, i])),
 };
 
 /**
@@ -184,9 +225,12 @@ async function renderHtml(snap = SNAP, plan = PLAN) {
     addEventListener: (t, fn) => { if (t === 'click') clicks.push(fn); },
     querySelector: () => el(), querySelectorAll: () => [],
     set innerHTML(v) { html = v; }, get innerHTML() { return html; },
-    /** Fire a click as the browser would, with a target that can be `closest`ed. */
-    click(act) {
-      const target = { closest: (sel) => (sel.includes(act) ? { dataset: { act } } : null) };
+    /** Fire a click as the browser would, with a target that can be `closest`ed.
+        `data` carries the rest of the element's dataset — a handler that reads
+        `dataset.key` to find its row gets nothing without it, and then quietly
+        opens no drawer at all rather than failing. */
+    click(act, data = {}) {
+      const target = { closest: (sel) => (sel.includes(act) ? { dataset: { act, ...data } } : null) };
       for (const fn of clicks.slice()) fn({ target, preventDefault() {} });
     },
   };
@@ -583,7 +627,12 @@ check('THE ITEM TABLE COUNTS TEST CASES UNDER MAINTENANCE', async () => {
   const row = rowFor(body, 'A-20');
   const cells = [...row.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)].map(m => m[1].trim());
   assert.strictEqual(cells.length, 9, `expected 9 cells in the row, got ${cells.length}`);
-  assert.strictEqual(cells[8], '3', `the test-case cell reads "${cells[8]}"`);
+  // The number is a control now, so the cell is a button wrapping it. Still
+  // matched on the LAST cell for the reason above: this row is also worth 3
+  // points, and a looser match was once green with the column deleted.
+  assert.match(cells[8], />3<\/button>/, `the test-case cell reads "${cells[8]}"`);
+  assert.match(cells[8], /data-act="item-testcases"[^>]*data-key="A-20"/,
+    'the number does not open the suites it counted');
 });
 
 check('a bucket story maintaining nothing says zero, and says it loudly', async () => {
@@ -593,6 +642,93 @@ check('a bucket story maintaining nothing says zero, and says it loudly', async 
   const row = rowFor(body, 'A-21');
   assert.ok(row.includes('>0<'), 'no count on an empty bucket story');
   assert.ok(row.includes('tag warn'), 'and nothing draws the eye to it');
+});
+
+/* ── THE DRAWER BEHIND THE TEST-CASE NUMBER ───────────────────────────── */
+
+check('THE DRAWER LISTS EXACTLY WHAT THE NUMBER COUNTED', async () => {
+  /* The property every drill-in on this screen is built around: a list
+     assembled by different code from the figure above it is a list that can
+     disagree with it, and both render perfectly. */
+  const { payload, ctx, mount } = await renderHtml();
+  let drawn = '';
+  ctx.UI.drawer = (h) => { drawn = h; };
+  const a20 = payload.items.find(i => i.key === 'A-20');
+  assert.strictEqual(a20.maintains, 3, 'fixture check');
+
+  mount.click('item-testcases', { key: 'A-20' });
+  assert.match(drawn, /Maintained by A-20/, 'the drawer does not name the bucket story');
+  const rows = (drawn.match(/border-bottom:1px solid var\(--app-line-soft\)/g) || []).length;
+  assert.strictEqual(rows, a20.maintains,
+    `the number says ${a20.maintains}, the drawer shows ${rows}`);
+  for (const k of ['AUTOKAT-1', 'AUTOKAT-2', 'AUTOKAT-3']) assert.match(drawn, new RegExp(k));
+});
+
+check('and the set it lists is the SAME set the count was the size of', async () => {
+  /* Pinned on the payload rather than on the markup: `maintains` is the length
+     of `maintainsLinks`, so a drawer reading the links and a cell reading the
+     count cannot drift. Duplicated links — Jira holds them from both sides —
+     are one suite in both. */
+  const { payload } = await renderHtml();
+  for (const i of payload.items.filter(x => x.bucket)) {
+    assert.strictEqual(i.maintains, (i.maintainsLinks || []).length,
+      `${i.key}: count ${i.maintains}, set ${(i.maintainsLinks || []).length}`);
+    const keys = (i.maintainsLinks || []).map(l => l.key);
+    assert.strictEqual(new Set(keys).size, keys.length, `${i.key}: the set holds a key twice`);
+  }
+});
+
+/* Two bucket stories that BOTH have links, so "opened the wrong row" is
+   visible. With only one clickable row in the grid, a handler that ignores the
+   key it was given and picks the first bucket story it finds is right by
+   accident. */
+const TWO_BUCKETS = {
+  ...SNAP,
+  issues: Object.fromEntries([
+    ...Object.values(SNAP.issues),
+    issue({ key: 'A-22', assignee: 'Hien Phan', points: 2, type: 'Bucket Story',
+      relatesTo: [{ key: 'SHRTEC-7' }, { key: 'SHRTEC-8' }] }),
+  ].map(i => [i.key, i])),
+};
+
+check('THE DRAWER OPENS THE ROW THAT WAS CLICKED, not the first one like it', async () => {
+  const { payload, ctx, mount } = await renderHtml(TWO_BUCKETS);
+  let drawn = '';
+  ctx.UI.drawer = (h) => { drawn = h; };
+  const a22 = payload.items.find(i => i.key === 'A-22');
+  assert.strictEqual(a22.maintains, 2, 'fixture check: A-22 maintains a different set');
+
+  mount.click('item-testcases', { key: 'A-22' });
+  assert.match(drawn, /Maintained by A-22/, `opened the wrong row: ${drawn.slice(0, 120)}`);
+  assert.match(drawn, /SHRTEC-7/);
+  assert.ok(!/AUTOKAT-1</.test(drawn), 'it listed the other bucket story\'s suites');
+});
+
+check('A ZERO IS NOT A BUTTON — nothing behind it, nothing to press', async () => {
+  const body = itemsSection((await renderHtml()).html);
+  const row = rowFor(body, 'A-21');
+  assert.ok(!/data-act="item-testcases"/.test(row),
+    'an empty bucket story offered a control that opens nothing');
+});
+
+check('and a link the tool never synced is still listed, with what the link knows', async () => {
+  /* A maintained suite usually lives outside the three datasets this tool
+     pulls, so the summary Jira put inside the link is the only description of
+     it that will ever exist locally. Dropping those rows would make the list
+     shorter than the number that opened it. */
+  const { payload, ctx } = await renderHtml();
+  const item = {
+    key: 'B-9', bucket: true, maintains: 2,
+    maintainsLinks: [
+      { key: 'SHRTEC-8295', summary: 'iGO smoke pack', type: 'Epic' },
+      { key: 'GHOST-1', summary: null, type: null },
+    ],
+  };
+  const html = ctx.UI.testCasesDrawer(item, payload.items, {}, {});
+  assert.match(html, /iGO smoke pack/, 'the summary the link carried was dropped');
+  assert.match(html, /GHOST-1/, 'a link with nothing known was dropped entirely');
+  assert.match(html, /Not in the local store/, 'and the one with nothing known has to say so');
+  assert.match(html, />Open in Jira</, 'which makes the way out to Jira the point of the panel');
 });
 
 check('ANYTHING THAT IS NOT A BUCKET STORY IS NOT ASKED', async () => {
@@ -1038,6 +1174,259 @@ check('the risks print, because a sprint report without them is the good news on
     'the section itself must not be print-hidden');
   // The link out is screen furniture and does not belong on paper.
   assert.match(block, /class="btn ghost sm print-hide"/, 'the "All risks" link should not print');
+});
+
+/* ── THE "!" ON A STORY IN REFINEMENT ─────────────────────────────────── */
+
+/** The "All sprint items" table, cut out by its heading. */
+const itemTable = (html) => {
+  const at = html.indexOf('All sprint items');
+  assert.ok(at > 0, 'the item table did not render');
+  const start = html.indexOf('<table', at);
+  return html.slice(start, html.indexOf('</table>', start));
+};
+
+/** `rowFor` above, but a missing row is this file's bug rather than a silent ''. */
+const theRow = (tbl, key) => {
+  const row = rowFor(tbl, key);
+  assert.ok(row, `no row for ${key} — the fixture and this check have parted company`);
+  return row;
+};
+
+const refined = () => renderHtml(REFINE_SNAP);
+
+check('A STORY IN REFINEMENT WHOSE EPIC IS BLOCKED GETS THE ICON', async () => {
+  const { html } = await refined();
+  const tbl = itemTable(html);
+  assert.match(theRow(tbl, 'R-1'), /data-act="epic-blockers"[^>]*data-key="R-1"/,
+    'the row that has something to chase has no way to see it');
+  assert.match(theRow(tbl, 'R-2'), /data-act="epic-blockers"/);
+});
+
+check('and one whose epic names nothing does NOT', async () => {
+  // An icon on every row is an icon nobody reads after the second time.
+  const { html } = await refined();
+  assert.ok(!/data-act="epic-blockers"/.test(theRow(itemTable(html), 'R-3')),
+    'the icon appeared on a row with nothing behind it');
+});
+
+check('NOR DOES A ROW IN ANY OTHER STATUS, however blocked its epic', async () => {
+  /* N-1 sits under the same blocked epic as R-1. It is deliberately unmarked:
+     the icon answers "what is this waiting on", and that is the question
+     Refinement is asking. */
+  const { html } = await refined();
+  const row = theRow(itemTable(html), 'N-1');
+  assert.match(row, /In Dev/, 'fixture check: N-1 has to be in another status');
+  assert.ok(!/data-act="epic-blockers"/.test(row), 'the icon is not scoped to Refinement');
+});
+
+check('THE BLOCKERS COME FROM THE EPIC, NOT FROM THE STORY', async () => {
+  /* R-4 is in Refinement, carries its OWN blocker, and sits under an epic with
+     none. Reading the item's `blockedBy` — the obvious implementation, and the
+     one every other screen uses — marks this row and misses the ten that
+     matter. On his data not one Story in Refinement names a blocker itself. */
+  const { payload } = await refined();
+  const r4 = payload.items.find(i => i.key === 'R-4');
+  assert.deepStrictEqual(r4.blockedBy, ['OWN-1'], 'fixture check: R-4 names its own blocker');
+  assert.deepStrictEqual(r4.epicBlockers, [], 'its epic names nothing, so there is nothing to show');
+
+  const { html } = await refined();
+  assert.ok(!/data-act="epic-blockers"/.test(theRow(itemTable(html), 'R-4')),
+    'the icon read the item\'s own blockers instead of its epic\'s');
+});
+
+check('the payload carries which epic each blocker came from, and how it relates', async () => {
+  const { payload } = await refined();
+  const r1 = payload.items.find(i => i.key === 'R-1');
+  /* The blockers are LINKS, not bare keys: the summary Jira sent inside the
+     link is the only description these will ever have, since they live in
+     projects this tool does not sync. */
+  assert.deepStrictEqual(r1.epicBlockers, [
+    { epic: 'E-BLOCKED', name: 'Epic E-BLOCKED', via: 'parent',
+      blockers: [{ key: 'CLICMNTIGO-11567', summary: null, type: null }] },
+  ], 'without the epic and the via, the drawer cannot say whose blockers these are');
+});
+
+check('THE DRAWER LISTS THE EPIC\'S BLOCKERS, and names the epic they belong to', async () => {
+  const { payload, ctx } = await refined();
+  const item = payload.items.find(i => i.key === 'R-2');
+  const html = ctx.UI.epicBlockersDrawer(item, payload.items, {}, {});
+  // E-ALSO names two, one of which R-1's epic names as well.
+  assert.match(html, /CLICMNTIGO-11567/);
+  assert.match(html, /OTHER-1/);
+  assert.match(html, /E-ALSO/, 'the drawer does not say whose blockers these are');
+  assert.match(html, /parent epic/, 'nor how that epic relates to the story');
+  assert.match(html, /R-2/, 'nor which story was clicked');
+});
+
+check('and a blocker in a project this tool does not sync is still listed', async () => {
+  /* Every one of the ten in his sprint is CLICMNTIGO-11567, which lives in a
+     project this tool never syncs. Dropping what it cannot resolve would empty
+     the drawer on exactly the rows it was built for. */
+  const { payload, ctx } = await refined();
+  const item = payload.items.find(i => i.key === 'R-1');
+  const html = ctx.UI.epicBlockersDrawer(item, payload.items, {}, {});
+  assert.match(html, /CLICMNTIGO-11567/, 'the unresolvable blocker was dropped');
+  assert.match(html, /Not in the local store/, 'and it has to say why it shows no detail');
+  assert.match(html, />Open in Jira</, 'which makes the way out to Jira the point of the panel');
+});
+
+check('REFINEMENT IS MATCHED EXACTLY, not by substring', async () => {
+  /* His Jira has one status containing the word today. Workflows grow, and a
+     substring match would silently start marking "Ready for Refinement" or
+     "Refinement Done" — rows the icon says nothing true about. Cheap to pin
+     now, invisible to find later. */
+  const { ctx } = await refined();
+  const blocked = [{ epic: 'E-1', via: 'parent', blockers: ['B-1'] }];
+  assert.ok(ctx.UI.epicBlockerIcon({ key: 'X', status: 'Refinement', epicBlockers: blocked }),
+    'the exact status has to still mark');
+  for (const status of ['Ready for Refinement', 'Refinement Done', 'Pre-Refinement', 'refinements']) {
+    assert.strictEqual(ctx.UI.epicBlockerIcon({ key: 'X', status, epicBlockers: blocked }), '',
+      `"${status}" was marked as Refinement`);
+  }
+  // Whitespace and casing from Jira are not a different status, though.
+  assert.ok(ctx.UI.epicBlockerIcon({ key: 'X', status: '  refinement ', epicBlockers: blocked }),
+    'a cased or padded value is the same status');
+});
+
+/** The "Where the work sits" card, cut out by its heading. */
+const workSits = (html) => {
+  const at = html.indexOf('Where the work sits');
+  assert.ok(at > 0, 'the chart card did not render');
+  return html.slice(at, html.indexOf('</section>', at));
+};
+
+check('THE CHART CARD SAYS WHAT REFINEMENT IS WAITING ON', async () => {
+  /* The bar says how many points are in Refinement and cannot say why. In his
+     TT Week 14Sep ten of sixteen are held, all by one ticket — one
+     conversation, not ten, and nothing on the board said so. */
+  const { html } = await refined();
+  const card = workSits(html);
+  assert.match(card, /data-act="refinement-blockers"/, 'the card offers no way in');
+  assert.match(card, /of 4 in Refinement/, `the line does not say how many of how many: ${card.slice(-300)}`);
+  assert.match(card, /waiting on/);
+});
+
+check('and the control is a real button, not a shape inside the SVG', async () => {
+  /* An SVG has no button. A clickable <g> answers a mouse and is invisible to
+     a keyboard, which this app treats as half a control. */
+  const { html } = await refined();
+  const card = workSits(html);
+  const at = card.indexOf('data-act="refinement-blockers"');
+  const tagStart = card.lastIndexOf('<', at);
+  assert.strictEqual(card.slice(tagStart, tagStart + 7), '<button',
+    'the control is not a <button>, so it cannot be reached by keyboard');
+  assert.ok(at > card.indexOf('</svg>'), 'the control is inside the chart rather than under it');
+});
+
+check('and it is absent when nothing in Refinement is blocked', async () => {
+  // SNAP has no Refinement items at all, so the line must not appear.
+  const { html } = await renderHtml();
+  assert.ok(!/data-act="refinement-blockers"/.test(workSits(html)),
+    'the card advertised blockers on a sprint with none');
+});
+
+check('THE DRAWER GROUPS BY BLOCKER — one ticket, all the items it holds', async () => {
+  /* Ten rows each naming the same ticket is ten rows of one fact. Turned
+     around it is one row with the thing to chase at the top of it. */
+  const { payload, ctx, mount } = await refined();
+  let drawn = '';
+  ctx.UI.drawer = (h) => { drawn = h; };
+  const held = (payload.items || []).filter(i => ctx.UI.inRefinement(i) && (i.epicBlockers || []).length);
+  assert.strictEqual(held.length, 2, 'fixture check: R-1 and R-2 are the blocked ones');
+
+  mount.click('refinement-blockers');
+  assert.match(drawn, /Blocking Refinement/);
+  // CLICMNTIGO-11567 holds BOTH, through two different epics — so it appears
+  // once, with two items under it, not twice.
+  const heads = (drawn.match(/CLICMNTIGO-11567/g) || []).length;
+  assert.ok(heads >= 1, 'the shared blocker is missing');
+  assert.match(drawn, /blocks 2 items/, 'the shared blocker was not grouped');
+  assert.match(drawn, /R-1/); assert.match(drawn, /R-2/);
+  assert.match(drawn, /via/, 'the drawer does not say which epic carried the block');
+});
+
+/* Insertion order deliberately AGAINST size order: the first Refinement item
+   seen names a blocker holding only itself, the next two share a bigger one.
+   Without a sort the drawer lists the one-item blocker first, which is the
+   opposite of "the one ticket worth chasing today". */
+const ORDER_SNAP = {
+  ...SNAP,
+  issues: Object.fromEntries([
+    ...Object.values(SNAP.issues),
+    EPIC('E-ONLY', ['SOLO-1']),
+    EPIC('E-S1', ['BIG-1']),
+    EPIC('E-S2', ['BIG-1']),
+    issue({ key: 'O-1', assignee: 'Hien Phan', points: 1, status: 'Refinement', parentKey: 'E-ONLY' }),
+    issue({ key: 'O-2', assignee: 'Hien Phan', points: 1, status: 'Refinement', parentKey: 'E-S1' }),
+    issue({ key: 'O-3', assignee: 'Hien Phan', points: 1, status: 'Refinement', parentKey: 'E-S2' }),
+  ].map(i => [i.key, i])),
+};
+
+check('THE BIGGEST BLOCKER COMES FIRST — the one ticket worth chasing today', async () => {
+  const { ctx, mount } = await renderHtml(ORDER_SNAP);
+  let drawn = '';
+  ctx.UI.drawer = (h) => { drawn = h; };
+  mount.click('refinement-blockers');
+  /* Measured on the GROUP HEADINGS, not on where each key first appears in the
+     markup: the "Open in Jira" link at the top of the drawer lists every key,
+     sorted, so an indexOf for a key finds it in that URL long before its
+     heading and passes whatever order the groups are actually in. That version
+     of this check was green against a drawer with no sort at all. */
+  const sizes = [...drawn.matchAll(/blocks (\d+) item/g)].map(m => Number(m[1]));
+  assert.deepStrictEqual(sizes, [2, 1],
+    `groups are not biggest-first: ${sizes.join(', ')}`);
+  assert.ok(drawn.indexOf('blocks 2 items') < drawn.indexOf('blocks 1 item'),
+    'the blocker holding one item was listed above the blocker holding two');
+});
+
+check('A BLOCKER SHOWS WHAT JIRA SAID ABOUT IT, not "not in the local store"', async () => {
+  /* The bug he reported. Jira sends the blocker's summary and type inside the
+     link; `blockedBy` used to map to a bare key and throw both away, so the
+     panel showed a naked key under "Not in the local store" — on a blocker
+     that no sync will ever resolve, because it lives in a project this tool
+     does not pull. 283 of his 356 unresolvable link targets already carry a
+     summary on the link row. */
+  const { payload, ctx } = await refined();
+  const item = {
+    key: 'X-1', status: 'Refinement',
+    epicBlockers: [{ epic: 'E-A', via: 'parent',
+      blockers: [{ key: 'CLICMNTIGO-11567', summary: 'iGO client migration sign-off', type: 'Story' }] }],
+  };
+  const html = ctx.UI.epicBlockersDrawer(item, payload.items, {}, {});
+  assert.match(html, /iGO client migration sign-off/, 'the summary the link carried was dropped');
+  assert.ok(!/Not in the local store/.test(html),
+    'it claimed to know nothing about an issue it had the summary for');
+});
+
+check('and a blocker with nothing known still says so', async () => {
+  // The honest remainder: a link that carried no summary has nothing to show,
+  // and saying so beats an empty row.
+  const { payload, ctx } = await refined();
+  const item = {
+    key: 'X-1', status: 'Refinement',
+    epicBlockers: [{ epic: 'E-A', via: 'parent', blockers: [{ key: 'GHOST-1', summary: null, type: null }] }],
+  };
+  const html = ctx.UI.epicBlockersDrawer(item, payload.items, {}, {});
+  assert.match(html, /GHOST-1/);
+  assert.match(html, /Not in the local store/);
+});
+
+check('DUPLICATE BLOCKERS ACROSS EPICS COLLAPSE, so the count is a set', async () => {
+  // A story under two epics that name the same blocker is blocked by one
+  // thing, not two.
+  const { payload, ctx } = await refined();
+  const item = {
+    key: 'X-1', status: 'Refinement',
+    epicBlockers: [
+      { epic: 'E-A', via: 'parent', blockers: ['B-1', 'B-2'] },
+      { epic: 'E-B', via: 'relates', blockers: ['B-2', 'B-3'] },
+    ],
+  };
+  const icon = ctx.UI.epicBlockerIcon(item);
+  assert.match(icon, /blocked by 3 issues/, `counted the links, not the set: ${icon}`);
+  const html = ctx.UI.epicBlockersDrawer(item, payload.items, {}, {});
+  assert.match(html, /3 items/, 'the drawer heading disagrees with the icon');
 });
 
 /* ── run ──────────────────────────────────────────────────────────────── */

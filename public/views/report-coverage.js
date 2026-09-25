@@ -987,7 +987,9 @@ const CoverageReport = (() => {
       const byBlocker = new Map();
       const unlinked = [];
       for (const e of r.epics) {
-        const links = (e.blockedBy || []).filter(Boolean);
+        // Grouped BY KEY: a blocker is the same blocker whether it arrived as
+        // a bare key or as a link carrying its summary.
+        const links = (e.blockedBy || []).map(UI.linkKey).filter(Boolean);
         if (!links.length) { unlinked.push(e); continue; }
         for (const b of links) {
           if (!byBlocker.has(b)) byBlocker.set(b, []);

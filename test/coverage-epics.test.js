@@ -312,13 +312,35 @@ check('and the drawer says which slice it is answering for', async () => {
    distinguishable — because the moment they are conflated, a column saying
    166 opens a list of 26 and nothing says why. */
 
+/* A blocking link arrives as `{key, summary, type}` — the same shape as a
+   relates-to link. It used to be a bare key, which is why a blocker rendered
+   as "Not in the local store" beside a related issue showing its summary: the
+   summary Jira sent was stored and then dropped on the way out. Readers that
+   want only the key say so. */
+const blockKeys = (e) => (e.blockedBy || []).map(b => (b && typeof b === 'object' ? b.key : b));
+
 check('THE BLOCKING LINKS TRAVEL WITH THE EPICS', async () => {
   const d = await open({ buckets: ['blocked'] });
-  const by = Object.fromEntries(d.body.epics.map(e => [e.key, e.blockedBy || []]));
+  const by = Object.fromEntries(d.body.epics.map(e => [e.key, blockKeys(e)]));
   assert.deepStrictEqual(by[NLG_BLOCKED], ['CLICMNT-1']);
   assert.deepStrictEqual(by[SIG_B2], ['CLICMNT-1', 'SHRTEC-9'], 'an epic can be held by more than one');
   assert.deepStrictEqual(by[SIG_UNLINKED], [],
     'an epic marked Blocked with nothing linked must come back with an empty list, not be dropped');
+});
+
+check('AND THEY CARRY WHAT JIRA SAID ABOUT THE BLOCKER, not just its key', async () => {
+  /* The whole point of the fix. Every blocker in his store is in a project
+     this tool does not sync, so the link's own summary is the ONLY description
+     of it that will ever exist locally. Dropping it left the drawer showing a
+     bare key under "Not in the local store" on exactly the rows built to be
+     chased. */
+  const d = await open({ buckets: ['blocked'] });
+  const e = d.body.epics.find(x => x.key === NLG_BLOCKED);
+  const link = (e.blockedBy || [])[0];
+  assert.ok(link && typeof link === 'object', `a blocking link came back as ${JSON.stringify(link)}`);
+  assert.strictEqual(link.key, 'CLICMNT-1');
+  assert.ok('summary' in link && 'type' in link,
+    'the link has no room for what Jira already told us about it');
 });
 
 check('AND THE BUCKET IS NOT THE SAME SET AS THE LINKS', async () => {
@@ -350,7 +372,7 @@ check('and the links narrow with the row, like every other number here', async (
   assert.ok(!keys.includes(NLG_BLOCKED), `${NLG_BLOCKED} is not in ${SIG}`);
   // One ticket holding two epics is one conversation — the grouping the
   // drawer is built around, checked on the data that feeds it.
-  const held = sig.body.epics.filter(e => (e.blockedBy || []).includes('CLICMNT-1'));
+  const held = sig.body.epics.filter(e => blockKeys(e).includes('CLICMNT-1'));
   assert.strictEqual(held.length, 2, 'CLICMNT-1 holds two of SIG\'s blocked epics');
 });
 

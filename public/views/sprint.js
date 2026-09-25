@@ -95,6 +95,7 @@ const SprintView = (() => {
           <h3>Where the work sits</h3>
           <div class="sub">Committed points by status</div>
           ${Charts.ranked(byStatus, { labelKey: 'key', valueKey: 'points' })}
+          ${refinementNote(d)}
         </div>
       </section>
 
@@ -167,6 +168,31 @@ const SprintView = (() => {
       const pdf = e.target.closest('[data-act="export-pdf"]');
       if (pdf) { e.preventDefault(); exportPdf(d, state); return; }
 
+      /* The blockers on the epic behind a Story in Refinement. The item is
+         found in the payload the table was drawn from, so the drawer cannot
+         show a different row from the one that was clicked. */
+      /* The suites a bucket story is maintaining. The item comes from the
+         payload the grid was drawn from, so the drawer cannot open a row other
+         than the one that was clicked. */
+      const tc = e.target.closest('[data-act="item-testcases"]');
+      if (tc) {
+        e.preventDefault();
+        const item = (d.items || []).find(i => i.key === tc.dataset.key);
+        if (item) UI.drawer(UI.testCasesDrawer(item, d.items || [], (d.testCases || {}).catalogue || {}, state));
+        return;
+      }
+
+      const rb = e.target.closest('[data-act="refinement-blockers"]');
+      if (rb) { e.preventDefault(); openRefinementDrawer(d, state); return; }
+
+      const eb = e.target.closest('[data-act="epic-blockers"]');
+      if (eb) {
+        e.preventDefault();
+        const item = (d.items || []).find(i => i.key === eb.dataset.key);
+        if (item) UI.drawer(UI.epicBlockersDrawer(item, d.items || [], (d.testCases || {}).catalogue || {}, state));
+        return;
+      }
+
       const n = e.target.closest('[data-act="drill"]');
       if (n) { e.preventDefault(); openDrill(d, state, n.dataset.scope, n.dataset.col); }
     });
@@ -202,6 +228,97 @@ const SprintView = (() => {
       catalogue: t.catalogue || {},
       state,
     }));
+  }
+
+  /* ── WHAT THE REFINEMENT BAR IS WAITING ON ───────────────────────────────
+     The bar says how many points sit in Refinement. It cannot say why, and on
+     his data the why is both knowable and startling: in TT Week 14Sep ten of
+     the sixteen Stories in Refinement are held up, and all ten by the SAME
+     ticket. That is one conversation, not ten.
+
+     THE CONTROL IS A BUTTON UNDER THE CHART, NOT A MARKER INSIDE IT. The chart
+     is an SVG, and an SVG has no button: a clickable <g> answers the mouse and
+     is invisible to the keyboard, which this app treats as half a control (see
+     `drillNumber`). A real button on its own line is reachable, announces
+     itself, and has room to say what it found. */
+  function refinementItems(d) {
+    return (d.items || []).filter(i => UI.inRefinement(i) && ((i.epicBlockers || []).length));
+  }
+
+  function refinementNote(d) {
+    const held = refinementItems(d);
+    if (!held.length) return '';
+    const inRefinement = (d.items || []).filter(UI.inRefinement).length;
+    const blockers = new Set(held.flatMap(i => (i.epicBlockers || []).flatMap(g => g.blockers || [])).map(UI.linkKey).filter(Boolean));
+    const n = blockers.size;
+    return `
+      <div class="muted" style="display:flex;align-items:center;gap:7px;margin-top:10px;font-size:12px">
+        <button type="button" class="blockicon" data-act="refinement-blockers"
+          title="What the ${UI.int(held.length)} blocked Refinement ${held.length === 1 ? 'item is' : 'items are'} waiting on — from Jira's &quot;is blocked by&quot; links on their epics"
+          aria-label="Show what is blocking the items in Refinement">!</button>
+        <span><strong>${UI.int(held.length)}</strong> of ${UI.int(inRefinement)} in Refinement
+          ${held.length === 1 ? 'is' : 'are'} waiting on ${UI.int(n)} ${n === 1 ? 'blocker' : 'blockers'}</span>
+      </div>`;
+  }
+
+  /**
+   * Grouped by the BLOCKER, because that is the unit of action.
+   *
+   * Listing ten stories each naming the same ticket is ten rows of one fact.
+   * Turned around, it is one row with ten stories under it — and the thing to
+   * chase is at the top of it. The same shape the Coverage blockers panel uses.
+   */
+  function openRefinementDrawer(d, state) {
+    const held = refinementItems(d);
+    const byBlocker = new Map();
+    const detail = new Map();
+    for (const i of held) {
+      for (const g of i.epicBlockers || []) {
+        for (const b of g.blockers || []) {
+          const k = UI.linkKey(b);
+          if (!k) continue;
+          if (!byBlocker.has(k)) byBlocker.set(k, []);
+          byBlocker.get(k).push({ item: i, epic: g.epic });
+          if (b && typeof b === 'object' && (b.summary || b.type) && !detail.has(k)) detail.set(k, b);
+        }
+      }
+    }
+    const groups = [...byBlocker.entries()].sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]));
+
+    UI.drawer(`
+      <div class="drawer-head">
+        <div style="display:flex;align-items:center;gap:10px">
+          <h3 style="margin:0">Blocking Refinement</h3>
+          <span class="spacer"></span>
+          ${UI.openInJira([...byBlocker.keys()])}
+        </div>
+        <div class="muted" style="font-size:12px;margin-top:4px">
+          ${UI.int(held.length)} ${held.length === 1 ? 'item' : 'items'} in Refinement,
+          held by ${UI.int(groups.length)} ${groups.length === 1 ? 'blocker' : 'blockers'}.
+        </div>
+        <div class="muted" style="font-size:11.5px;margin-top:6px">
+          The block is recorded on each item's <strong>epic</strong>, not on the item — which is why the
+          board shows nothing. These are Jira's <strong>is blocked by</strong> links.
+        </div>
+      </div>
+      ${groups.map(([key, rows]) => {
+        const d2 = detail.get(key);
+        return `
+        <div style="margin-top:14px">
+          <div class="eyebrow"><i></i>${UI.issueKey(key)} — blocks ${UI.int(rows.length)} ${rows.length === 1 ? 'item' : 'items'}</div>
+          ${d2 && d2.summary ? `<div style="font-size:13px;margin:4px 0 2px">${UI.esc(d2.summary)}</div>` : ''}
+          ${rows.map(r => `
+            <div style="padding:9px 0;border-bottom:1px solid var(--app-line-soft)">
+              <div style="display:flex;gap:8px;align-items:center">
+                ${UI.issueKey(r.item.key)}
+                <span class="muted" style="font-size:11.5px">via ${UI.issueKey(r.epic)}</span>
+                <span class="spacer"></span>
+                ${r.item.assignee ? `<span class="muted" style="font-size:11.5px">${UI.esc(r.item.assignee)}</span>` : ''}
+              </div>
+              <div style="font-size:13px;margin-top:3px">${UI.esc(r.item.summary || '')}</div>
+            </div>`).join('')}
+        </div>`;
+      }).join('')}`);
   }
 
   /** The filename this report saves as. `UI.exportPdf` does the rest. */

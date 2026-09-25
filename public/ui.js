@@ -200,7 +200,9 @@ const UI = (() => {
    * @param {string} key
    * @param {{cls?: string, title?: string}} opts extra classes / hover text
    */
-  const issueKey = (key, opts = {}) => {
+  const issueKey = (keyOrLink, opts = {}) => {
+    // Tolerant of both link shapes for the same reason `linkKey` exists below.
+    const key = keyOrLink && typeof keyOrLink === 'object' ? keyOrLink.key : keyOrLink;
     if (!key) return '<span class="muted">—</span>';
     const cls = `mono issue-key${opts.cls ? ` ${opts.cls}` : ''}`;
     const title = opts.title ? ` title="${esc(opts.title)}"` : '';
@@ -212,9 +214,19 @@ const UI = (() => {
       : `<span class="${cls}"${title}>${esc(key)}</span>`;
   };
 
+  /**
+   * A link, as just its key.
+   *
+   * A link reaches the views in two shapes — a bare key, or `{key, summary,
+   * type}` — because that is how Jira sends them and how the store keeps them.
+   * Every renderer that only wants the key goes through this, so neither shape
+   * can render as "[object Object]" in a tag somebody forgot to update.
+   */
+  const linkKey = (v) => (v && typeof v === 'object' ? v.key : v);
+
   /** A comma-separated run of keys — blocked-by lists, related issues. */
   const issueKeys = (keys, opts = {}) =>
-    (keys || []).filter(Boolean).map(k => issueKey(k, opts)).join(', ');
+    (keys || []).map(linkKey).filter(Boolean).map(k => issueKey(k, opts)).join(', ');
 
   /**
    * A Jira issue-navigator search for a JQL string.
@@ -558,6 +570,76 @@ const UI = (() => {
     return `<span class="st${stage ? ` st-${stage}` : ''}">${esc(i.status)}</span>`;
   }
 
+  /**
+   * WHAT IS HOLDING UP A STORY IN REFINEMENT.
+   *
+   * Refinement is where work waits on somebody else, and the sprint board has
+   * nothing to say about what it is waiting FOR: on his data not one Story in
+   * Refinement carries an "is blocked by" link of its own. Their parent EPICS
+   * do — ten of sixteen in TT Week 14Sep, every one of them naming the same
+   * ticket. So the fact exists, one level up, and the row that needs it never
+   * showed it.
+   *
+   * ONE STATUS, DELIBERATELY. The icon is scoped to Refinement because that is
+   * where the question "what is this waiting on" is the one being asked, and an
+   * icon on every row is an icon nobody reads. Other statuses in the same
+   * sprint have a blocked parent too — five of them — so this is a choice about
+   * signal, not a claim that Refinement is the only place it happens.
+   *
+   * NO BLOCKER, NO ICON. An icon that opens "nothing is linked" is one people
+   * stop clicking, which is the same as not having it.
+   */
+  const REFINEMENT = /^refinement$/i;
+  const inRefinement = (i) => REFINEMENT.test(String((i && i.status) || '').trim());
+
+  function epicBlockerIcon(i) {
+    if (!inRefinement(i)) return '';
+    const groups = (i && i.epicBlockers) || [];
+    const n = new Set(groups.flatMap(g => g.blockers).map(linkKey).filter(Boolean)).size;
+    if (!n) return '';
+    const epics = groups.map(g => g.epic).join(', ');
+    return `<button type="button" class="blockicon" data-act="epic-blockers" data-key="${esc(i.key)}"
+      title="${esc(`${i.key} is in Refinement and its epic (${epics}) is blocked by ${n} ${n === 1 ? 'issue' : 'issues'} — from Jira's "is blocked by" links`)}"
+      aria-label="${esc(`Show what is blocking the epic behind ${i.key}`)}">!</button>`;
+  }
+
+  /**
+   * The drawer behind that icon.
+   *
+   * Built on `drillDrawer` rather than beside it, so a blocker in a project
+   * this tool does not sync — CLICMNTIGO-11567, which is every one of the ten
+   * in his sprint — is still listed, still says it is not in the local store,
+   * and still opens in Jira. A hand-rolled list here would have had to learn
+   * all three again.
+   */
+  function epicBlockersDrawer(item, items = [], catalogue = {}, state = {}) {
+    const groups = (item && item.epicBlockers) || [];
+    const links = groups.flatMap(g => g.blockers || []);
+    const keys = [...new Set(links.map(linkKey).filter(Boolean))];
+    const VIA = { parent: 'parent epic', relates: 'related epic', 'relates-parent': 'epic of a related issue' };
+    const where = groups.map(g => `${g.epic}${g.name ? ` · ${g.name}` : ''} (${VIA[g.via] || g.via})`).join('; ');
+    /* WHAT THE LINK ITSELF KNOWS, folded into the catalogue the drawer reads.
+       These blockers are in projects this tool does not sync, so nothing else
+       will ever describe them — without this the panel lists bare keys under
+       "not in the local store" on exactly the rows it exists to help chase.
+       Anything already resolved locally wins, since that is the fuller record. */
+    const known = { ...catalogue };
+    for (const l of links) {
+      const k = linkKey(l);
+      if (!k || known[k] || !l || typeof l !== 'object') continue;
+      if (!l.summary && !l.type) continue;
+      known[k] = { key: k, summary: l.summary || '', type: l.type || '', status: '', statusCategory: '', kind: 'blocker' };
+    }
+    catalogue = known;
+    return drillDrawer({
+      title: `Blocking the epic behind ${item.key}`,
+      meaning: `${item.key} is in Refinement. ${keys.length === 1 ? 'This is' : `These ${keys.length} are`} what its ${where} `
+        + `${keys.length === 1 ? 'is' : 'are'} blocked by, from Jira's "is blocked by" links. `
+        + `${item.key} itself names nothing — the block is recorded one level up.`,
+      keys, items, catalogue, state,
+    });
+  }
+
   /* ── a number you can open ────────────────────────────────────────────
      Every count on a summary table is the size of a set, and "which ones?" is
      the next question every single time. These two turn a count into the way
@@ -696,7 +778,41 @@ const UI = (() => {
   function testCasesCell(i) {
     if (!i.bucket) return '<span class="muted">—</span>';
     const n = Number(i.maintains) || 0;
-    return n ? String(n) : '<span class="tag warn" title="A bucket story with no &quot;relates to&quot; links — nothing says which suites this is maintaining">0</span>';
+    /* The number opens the suites it counted. A zero keeps its warn tag and
+       stays un-clickable: there is nothing behind it, and a control that opens
+       an empty drawer teaches people to stop pressing the ones that are not. */
+    if (!n) return '<span class="tag warn" title="A bucket story with no &quot;relates to&quot; links — nothing says which suites this is maintaining">0</span>';
+    return `<button type="button" class="numlink" data-act="item-testcases" data-key="${esc(i.key)}"
+      title="${esc(`The ${n} test case${n === 1 ? '' : 's'} ${i.key} is maintaining — one per "relates to" link`)}">${int(n)}</button>`;
+  }
+
+  /**
+   * The suites one bucket story is keeping alive.
+   *
+   * Built from `maintainsLinks` on the payload — the very set the number was
+   * the size of — rather than from a second walk of `relatesTo` here, which
+   * could dedupe differently and hand back a list that disagrees with the
+   * figure that opened it.
+   */
+  function testCasesDrawer(item, items = [], catalogue = {}, state = {}) {
+    const links = (item && item.maintainsLinks) || [];
+    const keys = links.map(linkKey).filter(Boolean);
+    // A maintained suite is usually outside what we sync, so the link's own
+    // summary is the only description of it there will ever be.
+    const known = { ...catalogue };
+    for (const l of links) {
+      const k = linkKey(l);
+      if (!k || known[k] || !l || typeof l !== 'object') continue;
+      if (!l.summary && !l.type) continue;
+      known[k] = { key: k, summary: l.summary || '', type: l.type || '', status: '', statusCategory: '', kind: 'test case' };
+    }
+    return drillDrawer({
+      title: `Maintained by ${item.key}`,
+      meaning: `${item.key} is a Bucket Story — a fortnight's container for maintenance. `
+        + `${keys.length === 1 ? 'This is the one suite' : `These are the ${keys.length} suites`} it is keeping working, `
+        + `one per "relates to" link.`,
+      keys, items, catalogue: known, state,
+    });
   }
 
   /**
@@ -741,7 +857,7 @@ const UI = (() => {
                 <td class="wrap">${esc(i.summary)}</td>
                 <td><span class="tag"><i class="dot" style="background:${CATEGORY_COLORS[i.category]}"></i>${esc((cats[i.category] || {}).label || i.category)}</span></td>
                 <td>${i.assignee ? `<div class="name-cell">${avatar(i.assignee)}${esc(i.assignee)}</div>` : '<span class="tag warn">unassigned</span>'}</td>
-                <td>${statusText(i)}</td>
+                <td>${statusText(i)}${epicBlockerIcon(i)}</td>
                 <td class="num">${i.points == null ? '<span class="tag risk">—</span>' : num(i.points)}</td>
                 <td class="muted">${esc((i.components || [])[0] || '—')}</td>
                 <td>${epicCell(i)}</td>
@@ -1109,7 +1225,8 @@ const UI = (() => {
     });
   }
 
-  return { esc, el, $, $$, num, pct, int, date, dateTime, ago, initials, avatar, personColor, workloadClass, toast, drawer, closeDrawer, api, jsonPut, jsonPost, jsonDelete, kpi, bar, mixBar, pointsFieldNote, CATEGORY_COLORS, setJiraBase, issueUrl, issueKey, issueKeys, jiraSearch, componentSearchUrl, keysSearchUrl, openInJira, combo, wireCombo, matchText, fitChars, sortable, sortTable, sortableTable, sortNumber,
+  return { esc, el, $, $$, num, pct, int, date, dateTime, ago, initials, avatar, personColor, workloadClass, toast, drawer, closeDrawer, api, jsonPut, jsonPost, jsonDelete, kpi, bar, mixBar, pointsFieldNote, CATEGORY_COLORS, setJiraBase, issueUrl, issueKey, issueKeys, linkKey, jiraSearch, componentSearchUrl, keysSearchUrl, openInJira, combo, wireCombo, matchText, fitChars, sortable, sortTable, sortableTable, sortNumber,
     itemsTable, epicCell, byStatusThenPoints, statusText, statusStage, drillNumber, drillDrawer,
+    inRefinement, epicBlockerIcon, epicBlockersDrawer, testCasesDrawer,
     tagList, wireTagList, splitKeywords, exportPdf, priorityTag, prioritySort, PRIORITY_UNSET_SORT, busy };
 })();

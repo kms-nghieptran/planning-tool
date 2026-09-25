@@ -126,7 +126,10 @@ check('RELATES-TO LINKS SURVIVE A SYNC THAT REWRITES BLOCKED-BY', () => {
   repo.upsertIssues([ISSUE({ blockedBy: ['AUTOKAT-3'] })]);   // a second sync
 
   const stored = repo.getIssue('AUTOKAT-1');
-  assert.deepStrictEqual(stored.blockedBy, ['AUTOKAT-3'], 'blocked-by is rewritten from the new payload');
+  // Both kinds come back in the same shape now: key, summary and type. A
+  // blocker used to be a bare key, so the summary Jira sent was stored and
+  // then dropped on the way out of the database.
+  assert.deepStrictEqual(stored.blockedBy.map(l => l.key), ['AUTOKAT-3'], 'blocked-by is rewritten from the new payload');
   assert.deepStrictEqual(stored.relatesTo.map(l => l.key), ['AUTOKAT-100'],
     'rewriting one kind of link must not delete the other kind — this is how the Epic column would empty itself');
 });
@@ -135,7 +138,7 @@ check('the reverse too: rewriting relates-to leaves blocked-by alone', () => {
   repo.upsertIssues([ISSUE()]);
   repo.upsertIssues([ISSUE({ relatesTo: [{ key: 'AUTOKAT-200', summary: 'Quoting', type: 'Epic' }] })]);
   const stored = repo.getIssue('AUTOKAT-1');
-  assert.deepStrictEqual(stored.blockedBy, ['AUTOKAT-2']);
+  assert.deepStrictEqual(stored.blockedBy.map(l => l.key), ['AUTOKAT-2']);
   assert.deepStrictEqual(stored.relatesTo.map(l => l.key), ['AUTOKAT-200']);
 });
 

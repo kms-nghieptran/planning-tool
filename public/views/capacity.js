@@ -488,6 +488,14 @@ const CapacityView = (() => {
         e.preventDefault();
         const r = data.rows.find(x => x.memberId === act.dataset.member);
         UI.drawer(itemsDrawer(r.name, r.items, state));
+      } else if (kind === 'item-testcases') {
+        e.preventDefault();
+        const item = (data.items || []).find(i => i.key === act.dataset.key);
+        if (item) UI.drawer(UI.testCasesDrawer(item, data.items || [], {}, state));
+      } else if (kind === 'epic-blockers') {
+        e.preventDefault();
+        const item = (data.items || []).find(i => i.key === act.dataset.key);
+        if (item) UI.drawer(UI.epicBlockersDrawer(item, data.items || [], {}, state));
       } else if (kind === 'show-unassigned') {
         UI.drawer(itemsDrawer('No assignee in this sprint', data.unassigned.items, state));
       } else if (kind === 'show-off-roster') {

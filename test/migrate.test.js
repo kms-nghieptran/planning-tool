@@ -390,6 +390,19 @@ check('THE SNAPSHOT COMES BACK EXACTLY AS IT WENT IN', () => {
     delete i.source; delete i.syncedAt; delete i.extra;
     if (!i.sprintIds.length && !snapshot.issues[i.key].sprintIds.length) i.sprintIds = snapshot.issues[i.key].sprintIds;
   }
+  /* A BLOCKING LINK IS NORMALISED ON THE WAY IN, and that is deliberate. An
+     export taken before blockers carried their summary holds bare keys; the
+     store keeps every link as `{key, summary, type}`, so importing an older
+     file upgrades the shape. No information is lost — a bare key simply has
+     no summary to carry — so the keys are compared and the shape is not. */
+  for (const i of Object.values(out.issues)) {
+    const was = snapshot.issues[i.key].blockedBy || [];
+    assert.deepStrictEqual(
+      (i.blockedBy || []).map(l => (l && typeof l === 'object' ? l.key : l)),
+      was.map(l => (l && typeof l === 'object' ? l.key : l)),
+      `${i.key}: a blocker was lost or renamed importing an older export`);
+    i.blockedBy = was;
+  }
   same(snapshot, out, 'snapshot');
 });
 

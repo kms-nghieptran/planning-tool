@@ -64,7 +64,7 @@ check('an issue round-trips with every relation intact', () => {
   assert.deepStrictEqual(i.components.sort(), ['R&D_iGO_E2E', 'TrueTest']);
   assert.deepStrictEqual(i.labels, ['TestPak']);
   assert.deepStrictEqual(i.sprintNames, ['Katalon Ruby Sprint 39']);
-  assert.deepStrictEqual(i.blockedBy, ['AUTOKAT-2']);
+  assert.deepStrictEqual(i.blockedBy.map(l => l.key), ['AUTOKAT-2']);
 });
 
 check('NULL POINTS SURVIVE AS NULL, and zero survives as zero', () => {
