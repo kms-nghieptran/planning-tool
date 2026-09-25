@@ -494,6 +494,138 @@ check('and the panel no longer tells him to hand-edit plan.json', async () => {
 
 /* ── run ───────────────────────────────────────────────────────────── */
 
+/* ── THE DRAWER BEHIND A WIN COUNT ────────────────────────────────────────
+   A count you can open is only worth having if the list is the very set that
+   was counted. Both now come from one walk (`decide`), and these pin that the
+   two agree — including under first-match-wins, where a rule matching a
+   thousand issues can win none of them. */
+
+check('THE LIST IS EXACTLY THE SET THE COUNT COUNTED', async () => {
+  await restoreDefaults();
+  const hits = (await call('GET', '/api/state')).body.ruleHits;
+  assert.ok(hits && hits.byRule, 'the settings payload carries no win counts');
+  for (const [ruleId, n] of Object.entries(hits.byRule)) {
+    const r = await call('GET', `/api/category-rules/winners?rule=${encodeURIComponent(ruleId)}`);
+    assert.strictEqual(r.status, 200, `${ruleId}: ${JSON.stringify(r.body)}`);
+    assert.strictEqual(r.body.total, n, `${ruleId}: count says ${n}, the drawer has ${r.body.total}`);
+    assert.strictEqual(r.body.keys.length, Math.min(n, 300), `${ruleId}: wrong number of keys`);
+    assert.strictEqual(new Set(r.body.keys).size, r.body.keys.length, `${ruleId}: a key appears twice`);
+  }
+});
+
+check('and every issue is won by exactly one rule, or by none', async () => {
+  /* First match wins, so the win lists must PARTITION the issues: an issue in
+     two lists would be double-counted in the mix, and one in none that is not
+     also in the Other pile would have vanished. */
+  await restoreDefaults();
+  const st = (await call('GET', '/api/state')).body;
+  const hits = st.ruleHits;
+  const seen = new Map();
+  for (const ruleId of Object.keys(hits.byRule)) {
+    const { body } = await call('GET', `/api/category-rules/winners?rule=${encodeURIComponent(ruleId)}`);
+    for (const k of body.keys) {
+      assert.ok(!seen.has(k), `${k} is won by both ${seen.get(k)} and ${ruleId}`);
+      seen.set(k, ruleId);
+    }
+  }
+  const other = (await call('GET', '/api/category-rules/winners?rule=__unmatched')).body;
+  assert.strictEqual(other.total, hits.unmatched, 'the Other pile disagrees with the status line');
+  for (const k of other.keys) assert.ok(!seen.has(k), `${k} is both won and unmatched`);
+  assert.strictEqual(seen.size + other.total, hits.total, 'issues went missing between the lists');
+});
+
+check('A SHADOWED RULE HAS NOTHING TO OPEN, and says zero', async () => {
+  /* Two rules, the second unreachable behind the first. Its count is 0, and the
+     drawer for it is empty rather than showing what it WOULD have matched —
+     which is the number the reader would then not be able to explain. */
+  const rules = [
+    { id: 'first', field: 'issueType', op: 'equals', value: 'Story', category: 'new' },
+    { id: 'behind', field: 'issueType', op: 'equals', value: 'Story', category: 'maintenance' },
+  ];
+  const saved = await call('PUT', '/api/category-rules', { rules });
+  assert.strictEqual(saved.status, 200, JSON.stringify(saved.body));
+  assert.strictEqual(saved.body.hits.byRule.behind, 0, 'fixture check: the second rule must be shadowed');
+
+  const r = await call('GET', '/api/category-rules/winners?rule=behind');
+  assert.strictEqual(r.status, 200);
+  assert.strictEqual(r.body.total, 0, 'the shadowed rule opened issues it does not win');
+  assert.deepStrictEqual(r.body.keys, []);
+  await restoreDefaults();
+});
+
+check('THE WINNERS COME FROM THE SAVED RULES, not from whatever was asked for', async () => {
+  // The number the drawer opens was computed from the saved rules, so the list
+  // has to be too. Anything else answers for a rule set nobody is looking at.
+  await call('PUT', '/api/category-rules', {
+    rules: [{ id: 'only', field: 'issueType', op: 'equals', value: 'Defect', category: 'support' }],
+  });
+  const r = await call('GET', '/api/category-rules/winners?rule=only');
+  assert.strictEqual(r.body.total, 1, 'T-5 is the one Defect in the fixture');
+  assert.deepStrictEqual(r.body.keys, ['T-5']);
+  // A rule id that is not in the saved set is refused rather than answered with an empty list.
+  const gone = await call('GET', '/api/category-rules/winners?rule=r1');
+  assert.strictEqual(gone.status, 404, 'an unknown rule should not answer with an empty drawer');
+  await restoreDefaults();
+});
+
+check('the drawer carries enough to render each issue, not just its key', async () => {
+  await restoreDefaults();
+  const { body } = await call('GET', '/api/category-rules/winners?rule=r10');
+  assert.ok(body.keys.length, 'fixture check: r10 wins the plain Stories');
+  const one = body.catalogue[body.keys[0]];
+  assert.ok(one, 'no catalogue entry for a key the drawer will list');
+  assert.ok('summary' in one && 'status' in one && 'type' in one,
+    'the drawer would show a bare key for an issue the tool has in full');
+});
+
+check('THE CAP CUTS THE LIST AND NEVER THE TOTAL', () => {
+  /* Exercised on a set big enough to be cut, which the five-issue fixture in
+     this file is not — the route's cap was reported as the true total for a
+     whole afternoon and every check here stayed green, because nothing in the
+     fixture ever reached it. `total` is what the number on screen shows, so it
+     has to keep counting what was NOT sent. */
+  const rules = [{ id: 'all', field: 'issueType', op: 'equals', value: 'Story', category: 'new' }];
+  const many = Array.from({ length: 400 }, (_, i) => ({ key: `BIG-${i}`, issueType: 'Story' }));
+
+  const cut = cls.winnersOf(many, rules, 'all', { limit: 300 });
+  assert.strictEqual(cut.total, 400, 'the cap was reported as the whole population');
+  assert.strictEqual(cut.shown, 300);
+  assert.strictEqual(cut.keys.length, 300, 'shown disagrees with what was sent');
+  assert.strictEqual(cut.truncated, true);
+  assert.deepStrictEqual(cut.keys, many.slice(0, 300).map(i => i.key),
+    'the cut is not the first N — a reader cannot say which ones these are');
+
+  const whole = cls.winnersOf(many, rules, 'all');
+  assert.strictEqual(whole.total, 400);
+  assert.strictEqual(whole.truncated, false, 'an uncapped list must not claim it was cut');
+});
+
+check('A CAP IS STATED, NEVER SILENT', async () => {
+  /* His `issueType = Story` rule wins 3,369 issues. A drawer cannot show them
+     all and the payload should not try — but a list quietly shorter than the
+     number that opened it is the one thing a drill-in must never be. */
+  const { body } = await call('GET', '/api/category-rules/winners?rule=r10');
+  assert.strictEqual(body.truncated, body.total > body.keys.length,
+    'truncation is reported inconsistently with what was sent');
+  assert.strictEqual(body.shown, body.keys.length);
+  assert.ok(body.keys.length <= 300, 'the cap did not hold');
+  // The fixture is small, so nothing is cut here — the flag must say so.
+  assert.strictEqual(body.truncated, false, 'a five-issue fixture cannot have been truncated');
+});
+
+check('THE WINS NUMBER IS A BUTTON, and a zero is not', async () => {
+  /* Swept from the view source: the next person to touch this cell will copy
+     the row above it, and a count that silently stops being clickable is
+     invisible in a screenshot. */
+  const src = fs.readFileSync(path.join(__dirname, '..', 'public', 'views', 'settings.js'), 'utf8');
+  const at = src.indexOf('rule-wins');
+  assert.ok(at > 0, 'the Wins cell has moved — this check has gone stale');
+  const cell = src.slice(at, at + 600);
+  assert.match(cell, /drillNumber\(/, 'the win count is not a drill-in');
+  assert.match(cell, /data-act[^\n]*rule-wins|act: 'rule-wins'/, 'the button carries no action');
+  assert.match(cell, /muted">0</, 'a zero must stay plain — there is nothing behind it');
+});
+
 server.listen(0, '127.0.0.1', async () => {
   base = `http://127.0.0.1:${server.address().port}`;
   for (const [name, fn] of checks) {

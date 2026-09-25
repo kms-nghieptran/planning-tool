@@ -115,8 +115,22 @@ const BacklogView = (() => {
     const items = filtered();
     const blockedKeys = new Set(data.blocked.items.map(i => i.key));
     const pts = items.reduce((t, i) => t + (i.points || 0), 0);
+    /* OPEN IN JIRA SITS ON THE COUNT LINE, NOT IN THE SECTION HEAD.
+       This line is redrawn on every filter change, so the link always opens the
+       set the number beside it describes. The head holds Export CSV, which
+       exports the WHOLE backlog whatever the filters say — a filtered link up
+       there would read as the same scope and quietly be a different one.
+
+       It opens what the COUNT says, not the 400 rows the table draws: the row
+       cap is about what a table can usefully show, and Jira has no such
+       problem. Where the key list outgrows one URL the button says how many it
+       is opening — see `openInJira`. */
     UI.$('#blTable', mount).innerHTML = items.length ? `
-      <div class="muted" style="margin-bottom:8px;font-size:12px">${items.length} items · ${UI.num(pts)} pts</div>
+      <div class="muted" style="display:flex;align-items:center;gap:10px;margin-bottom:8px;font-size:12px">
+        <span>${items.length} items · ${UI.num(pts)} pts</span>
+        <span class="spacer"></span>
+        ${UI.openInJira(items.map(i => i.key))}
+      </div>
       <div class="table-wrap">
         <table>
           <thead><tr><th>Key</th><th>Summary</th><th>Category</th><th>State</th><th>Component</th><th>Priority</th><th class="num">Points</th><th>Assignee</th></tr></thead>

@@ -952,6 +952,38 @@ async function handleApi(req, res, url) {
     });
   }
 
+  /* THE ISSUES BEHIND ONE RULE'S WIN COUNT.
+     Computed from the SAVED rules, never from a draft in the browser, because
+     the number this opens was computed from the saved rules too — a drawer
+     answering for a different rule set than the figure beside it is worse than
+     no drawer at all. The editor blanks its counts the moment you edit, so
+     there is no button to press while the two could disagree.
+
+     CAPPED, AND IT SAYS SO. His `issueType = Story` rule wins 3,369 issues: a
+     drawer of three thousand rows helps nobody and the payload is most of a
+     megabyte. The first N come back with the TRUE total beside them, so the
+     panel can say what it is showing rather than quietly showing less. */
+  if (p === '/api/category-rules/winners' && req.method === 'GET') {
+    const ruleId = url.searchParams.get('rule') || '';
+    const LIMIT = 300;
+    const plan = store.getPlan();
+    const issues = Object.values(store.getSnapshot().issues || {});
+    const found = classify.winnersOf(issues, plan.categoryRules, ruleId, { limit: LIMIT });
+    if (!found.known) return json(res, 404, { error: `No rule "${ruleId}" among the saved rules` });
+    const rule = (plan.categoryRules || classify.DEFAULT_RULES).find(r => r.id === ruleId) || null;
+    const keys = found.keys;
+    const byKey = new Map(issues.map(i => [String(i.key).toUpperCase(), i]));
+    const catalogue = {};
+    for (const k of keys) {
+      const i = byKey.get(String(k).toUpperCase());
+      if (i) catalogue[String(k).toUpperCase()] = { key: i.key, summary: i.summary || '', status: i.status || '', statusCategory: i.statusCategory || '', type: i.issueType || '', kind: 'item' };
+    }
+    return json(res, 200, {
+      ruleId, rule, keys, catalogue,
+      total: found.total, shown: found.shown, truncated: found.truncated,
+    });
+  }
+
   if (p === '/api/availability' && req.method === 'PUT') {
     // { teamId, sprintId, memberId, row:[14] }  or  { entries: [ {...}, ... ] }
     const body = await readJsonBody(req);

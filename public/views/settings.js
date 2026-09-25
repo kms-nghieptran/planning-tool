@@ -476,8 +476,15 @@ const SettingsView = (() => {
         <td><select data-k="op">${opt(s.ops, r.op)}</select></td>
         <td><input type="text" data-k="value" value="${UI.esc(r.value == null ? '' : r.value)}" placeholder="e.g. Maintenance"></td>
         <td><select data-k="category">${opt(cats, r.category)}</select></td>
+        ${/* A non-zero win count opens the issues it counted. A ZERO STAYS
+              PLAIN: it means the rule is shadowed by one above it, so there is
+              nothing behind it to show. While the draft is unsaved the counts
+              are already an em-dash, so no button is offered then either — the
+              figure and the drawer have to answer for the same rule set. */''}
         <td class="num rule-wins">${stale ? '<span class="muted">—</span>'
-          : `<span class="${(counts.byRule || {})[r.id] ? '' : 'muted'}">${UI.int((counts.byRule || {})[r.id] || 0)}</span>`}</td>
+          : ((counts.byRule || {})[r.id]
+            ? UI.drillNumber((counts.byRule || {})[r.id], { act: 'rule-wins', rule: r.id })
+            : '<span class="muted">0</span>')}</td>
         <td class="rule-ops">
           <button class="btn ghost xs" data-act="rule-up" data-i="${i}" title="Move up"${i === 0 ? ' disabled' : ''}>↑</button>
           <button class="btn ghost xs" data-act="rule-down" data-i="${i}" title="Move down"${i === n - 1 ? ' disabled' : ''}>↓</button>
@@ -511,6 +518,38 @@ const SettingsView = (() => {
       rules[i][ctl.dataset.k] = ctl.value;
       markStale();
     });
+
+    /**
+     * The issues one rule wins.
+     *
+     * Fetched rather than carried in the page: the biggest rule here claims
+     * 3,369 issues, and shipping every rule's key list with the Settings
+     * payload would cost most of a megabyte to serve a panel most visits never
+     * open. The server computes it from the SAVED rules with the same walk that
+     * produced the number on screen.
+     */
+    const openWins = async (ruleId) => {
+      UI.drawer('<div class="empty">Reading…</div>');
+      try {
+        const r = await UI.api(`/api/category-rules/winners?rule=${encodeURIComponent(ruleId)}`);
+        const rule = r.rule || {};
+        const what = rule.field
+          ? `${rule.field} ${rule.op} "${rule.value}" → ${((s.categories || {})[rule.category] || {}).label || rule.category}`
+          : ruleId;
+        UI.drawer(UI.drillDrawer({
+          title: `Won by rule ${ruleId}`,
+          meaning: `${what}. First match wins, so these are the issues this rule claims OUTRIGHT — `
+            + `others may match it and be taken by a rule above.`
+            + (r.truncated ? ` Showing the first ${UI.int(r.shown)} of ${UI.int(r.total)}.` : ''),
+          keys: r.keys,
+          items: [],
+          catalogue: r.catalogue || {},
+          state,
+        }));
+      } catch (err) {
+        UI.drawer(`<div class="empty">Could not read the issues — ${UI.esc(err.message)}</div>`);
+      }
+    };
 
     drawRules();
 
@@ -596,7 +635,9 @@ const SettingsView = (() => {
       const v = (id) => UI.$(`#${id}`, mount).value.trim();
       try {
         btn.disabled = true;
-        if (act === 'save-jira') {
+        if (act === 'rule-wins') {
+          await openWins(btn.dataset.rule);
+        } else if (act === 'save-jira') {
           const jira = { baseUrl: v('jBase'), email: v('jEmail'), projectKey: v('jProject') };
           if (v('jToken')) jira.apiToken = v('jToken');
           await UI.jsonPut('/api/config', { jira });
