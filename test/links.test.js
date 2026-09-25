@@ -626,6 +626,192 @@ check('the link style is specific enough to beat the global anchor colour', () =
     'a link you can only reach with a mouse is half a link');
 });
 
+/* ── OPEN IN JIRA: the whole drawer, not one key at a time ────────────────
+   A drawer is a set the app already decided on, and the point of the button is
+   to hand Jira that exact set. The failure mode is a link that opens something
+   PLAUSIBLE — a few keys short, a stale filter, the right count of the wrong
+   issues — because a reader cannot tell from the far side which of the two
+   screens is lying. So these checks read the JQL back out of the URL and
+   compare it to what the drawer listed. */
+
+/** The decoded JQL out of a built issue-navigator URL. */
+const jqlOf = (href) => decodeURIComponent(String(href).split('jql=')[1] || '');
+/** The keys named by a `key in (...)` clause. */
+const keysOf = (href) => {
+  const m = jqlOf(href).match(/key in \(([^)]*)\)/);
+  return m ? m[1].split(',').map(s => s.trim()).filter(Boolean) : [];
+};
+
+check('THE LINK OPENS EXACTLY THE KEYS IT WAS GIVEN', () => {
+  const UI = loadUI();
+  UI.setJiraBase(BASE);
+  const keys = ['AUTOKAT-9715', 'AUTOKAT-1', 'AUTOKAT-7789'];
+  const r = UI.keysSearchUrl(keys);
+  assert.deepStrictEqual(keysOf(r.href).sort(), [...keys].sort(),
+    'the URL names a different set from the one handed in');
+  assert.strictEqual(r.shown, 3);
+  assert.strictEqual(r.truncated, false);
+  assert.ok(r.href.startsWith(`${BASE}/issues/?jql=`), 'it has to be the issue navigator');
+});
+
+check('and it asks BY KEY, never by a filter that Jira re-evaluates', () => {
+  /* The tempting alternative — "status = X AND component = Y" — is evaluated
+     against Jira's data at click time, so it opens whatever matches TODAY, not
+     what this drawer counted. A drill-in that opens a different set from the
+     number that opened it is worse than no link at all. */
+  const UI = loadUI();
+  UI.setJiraBase(BASE);
+  const jql = jqlOf(UI.keysSearchUrl(['A-1', 'A-2']).href);
+  assert.match(jql, /^key in \(/, `the query is not a key list: ${jql}`);
+  assert.ok(!/status|component|sprint|assignee|project\s*=/i.test(jql),
+    `the query re-describes the set instead of naming it: ${jql}`);
+});
+
+check('DUPLICATES COLLAPSE, however Jira cased them', () => {
+  // Two bucket stories can relate to the same suite. Jira accepts the repeat
+  // and then reports a count that disagrees with the heading that was clicked.
+  const UI = loadUI();
+  UI.setJiraBase(BASE);
+  const r = UI.keysSearchUrl(['AUTOKAT-2', 'autokat-2', ' AUTOKAT-2 ', 'AUTOKAT-3']);
+  assert.deepStrictEqual(keysOf(r.href), ['AUTOKAT-2', 'AUTOKAT-3']);
+  assert.strictEqual(r.total, 2, 'the total counts the set, not the input');
+});
+
+check('A LIST TOO LONG FOR ONE URL IS CUT TO FIT, AND SAYS SO', () => {
+  /* The coverage drill-in can hand this several thousand epics. A URL naming
+     all of them is refused by the browser or truncated mid-key by the server,
+     and either way the link opens the wrong thing without saying a word. */
+  const UI = loadUI();
+  UI.setJiraBase(BASE);
+  const many = Array.from({ length: 4000 }, (_, i) => `AUTOKAT-${1000 + i}`);
+  const r = UI.keysSearchUrl(many);
+  assert.strictEqual(r.total, 4000);
+  assert.ok(r.truncated, 'four thousand keys cannot have fitted');
+  assert.ok(r.shown > 0 && r.shown < 4000, `cut to ${r.shown}`);
+  assert.ok(r.href.length <= 6000, `the url is ${r.href.length} characters, which is the thing this prevents`);
+  // Cut BETWEEN keys, never through one: a half key silently opens the wrong issue.
+  assert.strictEqual(keysOf(r.href).length, r.shown, 'the url names a different number than it reports');
+  for (const k of keysOf(r.href)) assert.match(k, /^AUTOKAT-\d{4}$/, `truncated mid-key: ${k}`);
+});
+
+check('THE CUT IS A PREFIX, not whichever keys happened to fit', () => {
+  /* Keys are not all the same length, so "stop at the first one that does not
+     fit" and "skip the ones that do not fit" are different functions — and the
+     second one is wrong in a way no count reveals. It quietly steps over a long
+     key, picks up a shorter one further down, and returns a gappy subset while
+     the button still says "the first N". The reader gets a set nobody can
+     describe, and gets a different one the next time a key is renamed.
+
+     A prefix of the sorted set is the only cut that is both reproducible and
+     explainable, so that is the property, pinned on a list whose key lengths
+     vary across the budget boundary. */
+  const UI = loadUI();
+  UI.setJiraBase(BASE);
+  /* The fixture has to be BUILT to tell the two apart. A list of same-length
+     keys cannot: once one of them does not fit, none of them do, and skipping
+     is indistinguishable from stopping. So: fill the budget to one key short,
+     then a key far too long to fit, then a short one that would. Stopping ends
+     at the long key; skipping steps over it and swallows the short one. */
+  const probe = Array.from({ length: 2000 }, (_, i) => `AAA-${String(i).padStart(5, '0')}`);
+  const n = UI.keysSearchUrl(probe).shown;
+  assert.ok(n > 10 && n < 2000, `the probe has to truncate to be a budget: ${n}`);
+  const many = [...probe.slice(0, n - 1), `ZLONG-${'9'.repeat(400)}`, 'ZZ-1'];
+
+  const r = UI.keysSearchUrl(many);
+  const sorted = [...new Set(many.map(k => k.toUpperCase()))].sort();
+  assert.ok(r.truncated, 'the fixture has to overflow for this to mean anything');
+  assert.deepStrictEqual(keysOf(r.href), sorted.slice(0, r.shown),
+    'the link opened a gappy subset rather than the first N in key order');
+  assert.ok(!keysOf(r.href).includes('ZZ-1'),
+    'a key past the cut was pulled in because it happened to be short enough');
+});
+
+check('and the button says how many it is opening when it cannot open them all', () => {
+  const UI = loadUI();
+  UI.setJiraBase(BASE);
+  const many = Array.from({ length: 4000 }, (_, i) => `AUTOKAT-${1000 + i}`);
+  const shown = UI.keysSearchUrl(many).shown;
+  const html = UI.openInJira(many);
+  assert.match(html, new RegExp(`Open ${shown} in Jira`), 'a silent cut is the bug this exists to avoid');
+  assert.match(html, /do not fit in one URL/, 'and the hover says why');
+  // While a list that DOES fit makes no fuss about a limit nobody hit.
+  assert.match(UI.openInJira(['A-1', 'A-2']), />Open in Jira</);
+  assert.ok(!/do not fit/.test(UI.openInJira(['A-1', 'A-2'])));
+});
+
+check('NO JIRA URL, NO BUTTON — not a dead one', () => {
+  const UI = loadUI();
+  UI.setJiraBase('');
+  assert.strictEqual(UI.openInJira(['A-1']), '', 'a button that goes nowhere is worse than no button');
+  assert.strictEqual(UI.keysSearchUrl(['A-1']), null);
+});
+
+check('and no keys, no button', () => {
+  const UI = loadUI();
+  UI.setJiraBase(BASE);
+  assert.strictEqual(UI.openInJira([]), '');
+  assert.strictEqual(UI.openInJira(null), '');
+  assert.strictEqual(UI.keysSearchUrl([null, '', undefined]), null, 'a set of nothings is not a set');
+});
+
+check('the button opens a new tab and severs the opener, like every other link here', () => {
+  const UI = loadUI();
+  UI.setJiraBase(BASE);
+  const html = UI.openInJira(['A-1']);
+  assert.match(html, /target="_blank"/);
+  assert.match(html, /rel="noopener"/);
+});
+
+check('THE DRILL DRAWER CARRIES THE BUTTON, for the rows it is showing', () => {
+  const UI = loadUI();
+  UI.setJiraBase(BASE);
+  const html = UI.drillDrawer({
+    title: 'Maintained',
+    keys: ['AUTOKAT-1', 'AUTOKAT-2'],
+    items: [{ key: 'AUTOKAT-1', summary: 'one', points: 3 }],
+    catalogue: { 'AUTOKAT-2': { key: 'AUTOKAT-2', summary: 'two' } },
+  });
+  assert.match(html, />Open in Jira</, 'the drawer has no way into Jira for the set as a whole');
+  const href = (html.match(/href="([^"]*issues\/\?jql=[^"]*)"/) || [])[1];
+  assert.ok(href, 'the button has no href');
+  assert.deepStrictEqual(keysOf(href).sort(), ['AUTOKAT-1', 'AUTOKAT-2'],
+    'the link opens a different set from the rows listed below it');
+});
+
+check('and a key with no local copy is still in the link — it is the one worth opening', () => {
+  /* An unresolvable key is exactly what you go to Jira for. Building the link
+     from the rows the tool could resolve would drop it, and quietly. */
+  const UI = loadUI();
+  UI.setJiraBase(BASE);
+  const html = UI.drillDrawer({ title: 'x', keys: ['GHOST-1', 'AUTOKAT-1'], items: [{ key: 'AUTOKAT-1' }], catalogue: {} });
+  const href = (html.match(/href="([^"]*issues\/\?jql=[^"]*)"/) || [])[1];
+  assert.deepStrictEqual(keysOf(href).sort(), ['AUTOKAT-1', 'GHOST-1']);
+});
+
+check('EVERY DRAWER THAT LISTS ISSUES OFFERS THE BUTTON', () => {
+  /* The sweep, in the spirit of this file: the next drawer someone adds will
+     copy the one above it, and the failure is silent — a panel that simply has
+     no way out to Jira. So the drawer-building sites are checked by source. */
+  const DRAWERS = [
+    // Anchored on where each drawer is BUILT, not where it is opened — the
+    // call sites come first in both files, and a window from one of those
+    // reads whatever happens to follow it.
+    ['views/capacity.js', 'function itemsDrawer'],      // member items, unassigned, off-roster
+    ['views/report-coverage.js', 'Blocked by${ds.row'], // the blockers panel
+  ];
+  for (const [file, marker] of DRAWERS) {
+    const src = read(VIEWS, path.basename(file));
+    const at = src.indexOf(marker);
+    assert.ok(at > 0, `${file}: could not find ${marker} — this check has gone stale`);
+    const window = src.slice(at, at + 2000);
+    assert.match(window, /UI\.openInJira\(/,
+      `${file}: the ${marker} drawer lists issues but offers no way to open them in Jira`);
+  }
+  // And the shared one, which is where most of them come from.
+  assert.match(read(PUBLIC, 'ui.js').slice(read(PUBLIC, 'ui.js').indexOf('function drillDrawer')), /openInJira\(/,
+    'drillDrawer lost its button');
+});
+
 (async () => {
   for (const [name, fn] of checks) {
     try { await fn(); passed++; console.log(`  ✓ ${name}`); }

@@ -453,7 +453,9 @@ const SprintView = (() => {
   const MEANING = {
     automated: 'Distinct parent epics of this component’s Stories whose Automation Status reads Automated.',
     inFlight: 'Parent epics of this component’s Stories that are not Automated yet.',
-    maintained: 'Distinct test cases linked from this component’s Bucket Stories — one per "relates to" link.',
+    maintained: 'Test cases linked from this component’s Bucket Stories whose own Automation Status reads Automated — the suite is working again.',
+    maintaining: 'Test cases linked from this component’s Bucket Stories whose own Automation Status reads Maintenance — still being fixed.',
+    unclassified: 'Test cases linked from this component’s Bucket Stories whose Automation Status is neither Automated nor Maintenance — Ready for Automation, Blocked, N/A, or not set at all.',
     stories: 'Sprint items of type Story.',
     buckets: 'Sprint items that are Bucket Stories — the maintenance containers.',
     items: 'Every sprint item in this component.',
@@ -461,7 +463,8 @@ const SprintView = (() => {
     committed: 'Every item committed to this sprint. The number above is their points.',
   };
   const TITLE = {
-    automated: 'Automated', inFlight: 'In flight', maintained: 'Maintained',
+    automated: 'Automated', inFlight: 'In flight',
+    maintained: 'Maintained', maintaining: 'Maintaining', unclassified: 'No automation status',
     stories: 'Stories', buckets: 'Bucket stories', items: 'Items', done: 'Done',
     committed: 'Committed',
   };
@@ -470,7 +473,11 @@ const SprintView = (() => {
     const t = d.testCases;
     if (!t || !t.rows.length) return '';
     const T = t.totals;
-    const pendingLinks = T.buckets > 0 && T.maintained === 0;
+    /* "No links at all" is a sync problem; "links, but none finished" is a real
+       fortnight. Reading only `maintained` would confuse the two and tell him to
+       run a full sync when what he is looking at is a team mid-repair. */
+    const links = T.maintained + T.maintaining + T.unclassified;
+    const pendingLinks = T.buckets > 0 && links === 0;
 
     return `
       <section class="section">
@@ -478,8 +485,9 @@ const SprintView = (() => {
           <h2>Test cases by component</h2>
           <span class="muted">
             <strong>${UI.int(T.automated)}</strong> automated ·
+            ${UI.int(T.inFlight)} still in flight ·
             <strong>${UI.int(T.maintained)}</strong> maintained ·
-            ${UI.int(T.inFlight)} still in flight
+            ${UI.int(T.maintaining)} maintaining
           </span>
         </div>
         <div class="table-wrap">
@@ -489,7 +497,8 @@ const SprintView = (() => {
               <th title="Set on the Coverage screen's component grid — this column shows it, it does not own it">Priority</th>
               <th class="num" title="Distinct parent epics of this component's Stories whose Automation Status is Automated">Automated</th>
               <th class="num" title="Parent epics of this component's Stories not yet Automated">In flight</th>
-              <th class="num" title="Distinct test cases linked from this component's Bucket Stories">Maintained</th>
+              <th class="num" title="Test cases linked from this component's Bucket Stories whose own Automation Status is Automated — working again">Maintained</th>
+              <th class="num" title="Test cases linked from this component's Bucket Stories whose own Automation Status is Maintenance — still being fixed">Maintaining</th>
               <th class="num">Stories</th><th class="num">Bucket stories</th>
               <th class="num">Items</th><th class="num">Done</th>
             </tr></thead>
@@ -499,7 +508,8 @@ const SprintView = (() => {
                 <td data-sort-value="${UI.prioritySort(r.priority)}">${UI.priorityTag(r.priority, d.priorityLevels)}</td>
                 <td class="num ${r.automated ? 'pct good' : ''}">${drill(r, 'automated')}</td>
                 <td class="num">${drill(r, 'inFlight')}</td>
-                <td class="num">${drill(r, 'maintained')}</td>
+                <td class="num ${r.maintained ? 'pct good' : ''}">${drill(r, 'maintained')}</td>
+                <td class="num">${drill(r, 'maintaining')}</td>
                 <td class="num">${drill(r, 'stories')}</td>
                 <td class="num">${drill(r, 'buckets')}</td>
                 <td class="num">${drill(r, 'items')}</td>
@@ -512,6 +522,7 @@ const SprintView = (() => {
               <td class="num"><strong>${drill(T, 'automated')}</strong></td>
               <td class="num"><strong>${drill(T, 'inFlight')}</strong></td>
               <td class="num"><strong>${drill(T, 'maintained')}</strong></td>
+              <td class="num"><strong>${drill(T, 'maintaining')}</strong></td>
               <td class="num">${drill(T, 'stories')}</td>
               <td class="num">${drill(T, 'buckets')}</td>
               <td class="num">${drill(T, 'items')}</td>
@@ -523,9 +534,15 @@ const SprintView = (() => {
           <li><strong>Automated</strong> counts the <em>parent epic</em> of each Story, using the epic's own
             Automation Status — a Story is the work, the epic is the test case. Two Stories under one epic are one
             test case.</li>
-          <li><strong>Maintained</strong> counts the "relates to" links on Bucket Stories, one link per suite kept
-            working. Bucket Stories are excluded from Automated: every one of them hangs off the same maintenance
-            container epic, which would report one epic as several automated test cases.</li>
+          <li><strong>Maintained</strong> and <strong>Maintaining</strong> both count the "relates to" links on
+            Bucket Stories, one link per suite touched, split by the <em>linked</em> epic's own Automation Status:
+            <strong>Automated</strong> means the suite is working again, <strong>Maintenance</strong> means it is
+            still being fixed. Bucket Stories are excluded from Automated: every one of them hangs off the same
+            maintenance container epic, which would report one epic as several automated test cases.</li>
+          ${T.unclassified ? `<li class="warn">${drill(T, 'unclassified')} linked test case${T.unclassified === 1 ? '' : 's'}
+            ${T.unclassified === 1 ? 'is' : 'are'} in neither Maintained nor Maintaining — ${T.unclassified === 1 ? 'its' : 'their'}
+            Automation Status is Ready for Automation, Blocked, N/A, or not set. That is a missing field in Jira, not a
+            gap in the count, so the two columns add up to less than the links on the Bucket Stories.</li>` : ''}
           ${t.shared ? `<li>${t.shared} item${t.shared === 1 ? '' : 's'} sit${t.shared === 1 ? 's' : ''} in more than one
             component and count in each, so the rows add up to more than the sprint total — the total row is the
             distinct count.</li>` : ''}
@@ -533,8 +550,8 @@ const SprintView = (() => {
             so ${t.unlinked === 1 ? 'it is' : 'they are'} in neither column. That is a missing link in Jira, not a
             gap in the count.</li>` : ''}
           ${pendingLinks ? `<li class="warn">${UI.int(T.buckets)} Bucket Stories carry no "relates to" links in the
-            local store, so Maintained reads zero everywhere. The links arrive with a <strong>full sync</strong> —
-            an incremental one does not backfill them.</li>` : ''}
+            local store, so Maintained and Maintaining read zero everywhere. The links arrive with a
+            <strong>full sync</strong> — an incremental one does not backfill them.</li>` : ''}
         </ul>
       </section>`;
   }

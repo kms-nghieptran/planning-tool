@@ -229,6 +229,64 @@ const UI = (() => {
   const jql = (v) => `"${String(v == null ? '' : v).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 
   /**
+   * THE SAME ISSUES THIS DRAWER IS LISTING, in Jira's own issue navigator.
+   *
+   * Every drawer in this app is a set of keys the app already decided on, so
+   * the query is `key in (...)` and nothing else. NOT a re-description of how
+   * the set was chosen: a drill-in for "epics in flight" could be spelled as a
+   * status filter, but that query is evaluated by Jira against today's data and
+   * would quietly open a DIFFERENT set from the one on screen. Listing the keys
+   * is the only form that cannot drift from the number it was opened by.
+   *
+   * THE URL HAS A CEILING AND THE LIST DOES NOT. The coverage drill-in can
+   * hand this several thousand epics, and a URL naming all of them is refused
+   * by the browser or truncated mid-key by the server — either way the link
+   * silently opens the wrong thing, which is the one outcome worse than no
+   * link. So the keys are fitted to a byte budget and the caller is told how
+   * many made it, to say so on the button rather than pretend.
+   *
+   * Deduped and sorted, because a set is what the drawer is showing: Jira
+   * rejects nothing for a repeated key, it just reports a count that disagrees
+   * with the heading the reader clicked.
+   */
+  const JQL_URL_BUDGET = 6000;
+
+  function keysSearchUrl(keys, o = {}) {
+    const clean = [...new Set((keys || []).filter(Boolean).map(k => String(k).trim().toUpperCase()))].sort();
+    if (!jiraBase || !clean.length) return null;
+    const order = o.order || 'key ASC';
+    const wrap = (list) => `key in (${list.join(',')}) ORDER BY ${order}`;
+    // Measured on the ENCODED url, which is what actually has to fit — a comma
+    // costs three characters once encoded, not one.
+    let left = JQL_URL_BUDGET - jiraSearch(wrap([])).length;
+    const fit = [];
+    for (const k of clean) {
+      const cost = encodeURIComponent(k).length + (fit.length ? 3 : 0);
+      if (cost > left) break;
+      left -= cost;
+      fit.push(k);
+    }
+    if (!fit.length) return null;
+    return { href: jiraSearch(wrap(fit)), shown: fit.length, total: clean.length, truncated: fit.length < clean.length };
+  }
+
+  /**
+   * The "Open in Jira" control for a drawer.
+   *
+   * Returns nothing at all when there is no Jira base configured or no keys to
+   * open — a dead or empty button is a promise the screen cannot keep.
+   */
+  function openInJira(keys, o = {}) {
+    const r = keysSearchUrl(keys, o);
+    if (!r) return '';
+    const label = r.truncated ? `Open ${int(r.shown)} in Jira` : 'Open in Jira';
+    const title = r.truncated
+      ? `Jira is asked for these by key, and ${int(r.total)} keys do not fit in one URL — this opens the first ${int(r.shown)} of them.`
+      : `Open ${r.shown === 1 ? 'this issue' : `all ${int(r.shown)}`} in the Jira issue navigator`;
+    return `<a class="btn ghost sm" href="${esc(r.href)}" target="_blank" rel="noopener" title="${esc(title)}">${esc(label)}</a>`;
+  }
+
+  /**
    * The Jira search behind a component on a coverage screen.
    *
    * It reproduces the SCOPE of the number it sits next to — same project, same
@@ -580,9 +638,16 @@ const UI = (() => {
         ${(r.components || []).length ? `<div class="muted" style="font-size:11.5px;margin-top:3px">${esc(r.components.join(', '))}</div>` : ''}
       </div>`;
 
+    /* The link opens the ROWS, not the keys handed in — they are the same set,
+       but the rows are what the heading counted and what the reader is looking
+       at, so taking the keys from anywhere else is how the two come apart. */
     return `
       <div class="eyebrow"><i></i>${esc(title)}</div>
-      <h2 style="margin:6px 0 2px">${int(rows.length)} ${rows.length === 1 ? 'item' : 'items'}</h2>
+      <div style="display:flex;align-items:center;gap:10px;margin:6px 0 2px">
+        <h2 style="margin:0">${int(rows.length)} ${rows.length === 1 ? 'item' : 'items'}</h2>
+        <span class="spacer"></span>
+        ${openInJira(rows.map(r => r.key))}
+      </div>
       ${meaning ? `<p class="muted" style="font-size:12.5px;margin:2px 0 0;max-width:60ch">${esc(meaning)}</p>` : ''}
       <div class="muted" style="margin:10px 0 16px;font-size:12px">
         ${points ? `${num(points)} pts · ` : ''}${missing ? `${int(missing)} not synced locally` : 'all resolved from the local store'}
@@ -1044,7 +1109,7 @@ const UI = (() => {
     });
   }
 
-  return { esc, el, $, $$, num, pct, int, date, dateTime, ago, initials, avatar, personColor, workloadClass, toast, drawer, closeDrawer, api, jsonPut, jsonPost, jsonDelete, kpi, bar, mixBar, pointsFieldNote, CATEGORY_COLORS, setJiraBase, issueUrl, issueKey, issueKeys, jiraSearch, componentSearchUrl, combo, wireCombo, matchText, fitChars, sortable, sortTable, sortableTable, sortNumber,
+  return { esc, el, $, $$, num, pct, int, date, dateTime, ago, initials, avatar, personColor, workloadClass, toast, drawer, closeDrawer, api, jsonPut, jsonPost, jsonDelete, kpi, bar, mixBar, pointsFieldNote, CATEGORY_COLORS, setJiraBase, issueUrl, issueKey, issueKeys, jiraSearch, componentSearchUrl, keysSearchUrl, openInJira, combo, wireCombo, matchText, fitChars, sortable, sortTable, sortableTable, sortNumber,
     itemsTable, epicCell, byStatusThenPoints, statusText, statusStage, drillNumber, drillDrawer,
     tagList, wireTagList, splitKeywords, exportPdf, priorityTag, prioritySort, PRIORITY_UNSET_SORT, busy };
 })();

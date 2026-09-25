@@ -68,6 +68,16 @@ const EPICS = [
   epic('E-3', 'Ready for Automation', ['PS_A']),
   epic('E-4', 'Done', ['PS_B']),            // Jira's alias for Automated
   epic('E-BUCKET', null, ['KAT_Common_Maintenance']),
+  /* The TEST CASES the bucket stories link to. These are epics too, and it is
+     THEIR Automation Status that splits Maintained from Maintaining — so the
+     store has to resolve them, exactly as the live one does. T-100 is
+     deliberately absent everywhere: a link this tool has no local copy of is a
+     real case, and it must not be guessed into either column. */
+  epic('T-1', 'Automated', ['PS_A']),
+  epic('T-2', 'Automated', ['PS_A']),
+  epic('T-3', 'Automated', ['PS_A']),
+  epic('T-101', 'Automated', ['PS_A']),
+  epic('T-102', 'Automated', ['PS_B']),
 ];
 
 /* ── the correction this table was rebuilt around ─────────────────────── */
@@ -111,6 +121,105 @@ check('BUCKET STORIES ARE NOT COUNTED AS AUTOMATION, however many parents they h
   assert.strictEqual(t.totals.automated, 0,
     'even with the container epic marked Automated, a bucket story automates nothing');
   assert.strictEqual(t.totals.maintained, 3, 'it maintains, which is the other column');
+});
+
+/* ── MAINTAINED vs MAINTAINING ────────────────────────────────────────────
+   The maintenance half of the table is one population — the "relates to" links
+   on Bucket Stories — split by the state of the thing linked. "We touched 40
+   suites" does not say how many are working again, and that is the question the
+   split exists to answer.
+
+   THE STATUS READ IS THE LINKED EPIC'S, never the bucket story's and never its
+   container's. Every bucket story in his sprint hangs off the same maintenance
+   container, so reading anything other than the link target reports one answer
+   for the whole fortnight. */
+
+const MAINT_EPICS = [
+  epic('T-A', 'Automated'),          // fixed, back to green
+  epic('T-B', 'Maintenance'),        // still being worked
+  epic('T-C', 'Maintenance'),
+  epic('T-D', 'Done'),               // Jira's alias for Automated
+  epic('T-E', 'Ready for Automation'),
+  epic('T-F', 'Blocked'),
+  epic('T-G', null),                 // resolvable, but nobody set the field
+  epic('E-BUCKET', 'Maintenance', ['KAT_Common_Maintenance']),
+];
+
+check('THE LINKS SPLIT BY THE LINKED EPIC\'S OWN AUTOMATION STATUS', () => {
+  const items = [bucket('B-1', ['PS_A'], ['T-A', 'T-B', 'T-C'])];
+  const t = insights.testCaseSummary(items, store(MAINT_EPICS));
+  const row = t.rows[0];
+  assert.strictEqual(row.maintained, 1, 'only T-A is Automated');
+  assert.strictEqual(row.maintaining, 2, 'T-B and T-C are still under maintenance');
+  assert.strictEqual(t.totals.maintained, 1);
+  assert.strictEqual(t.totals.maintaining, 2);
+});
+
+check('and NOT by the bucket story\'s own container, which is the same for all of them', () => {
+  /* E-BUCKET reads Maintenance. If the container were what got read, every link
+     in the sprint would land in Maintaining and the split would be a constant. */
+  const items = [bucket('B-1', ['PS_A'], ['T-A', 'T-D'])];
+  const t = insights.testCaseSummary(items, store(MAINT_EPICS));
+  assert.strictEqual(t.totals.maintaining, 0, 'the container\'s status is not the links\' status');
+  assert.strictEqual(t.totals.maintained, 2, 'both targets are Automated — T-D via Jira\'s "Done" alias');
+});
+
+check('THE REMAINDER IS COUNTED, NOT FOLDED INTO EITHER SIDE', () => {
+  /* Ready for Automation, Blocked, and an epic nobody set the field on. None of
+     them is "fixed" and none is "being fixed", and guessing either way reports
+     work that did not happen. 118 links across his store were like this when
+     the split was built. */
+  const items = [bucket('B-1', ['PS_A'], ['T-A', 'T-B', 'T-E', 'T-F', 'T-G'])];
+  const t = insights.testCaseSummary(items, store(MAINT_EPICS));
+  assert.strictEqual(t.totals.maintained, 1, 'T-A');
+  assert.strictEqual(t.totals.maintaining, 1, 'T-B');
+  assert.strictEqual(t.totals.unclassified, 3, 'T-E, T-F and T-G are in neither');
+  assert.deepStrictEqual([...t.totals.keys.unclassified].sort(), ['T-E', 'T-F', 'T-G']);
+});
+
+check('a link the tool cannot resolve is unclassified, not assumed', () => {
+  // No local copy means no status to read. Assuming either column would be
+  // inventing a fact about a suite this tool has never seen.
+  const items = [bucket('B-1', ['PS_A'], ['T-A', 'GHOST-1'])];
+  const t = insights.testCaseSummary(items, store(MAINT_EPICS));
+  assert.strictEqual(t.totals.maintained, 1);
+  assert.strictEqual(t.totals.maintaining, 0);
+  assert.deepStrictEqual([...t.totals.keys.unclassified], ['GHOST-1']);
+});
+
+check('THE THREE ADD UP TO THE LINKS, so nothing is lost between them', () => {
+  /* The property that makes the remainder trustworthy: every distinct link is
+     in exactly one of the three. Drop a branch and this goes red, which is the
+     point — a link silently in no column is the failure this table exists to
+     avoid. */
+  const items = [
+    bucket('B-1', ['PS_A'], ['T-A', 'T-B', 'T-E']),
+    bucket('B-2', ['PS_A'], ['T-B', 'T-F', 'GHOST-9']),   // T-B shared
+  ];
+  const t = insights.testCaseSummary(items, store(MAINT_EPICS));
+  const distinct = new Set(['T-A', 'T-B', 'T-E', 'T-F', 'GHOST-9']).size;
+  const T = t.totals;
+  assert.strictEqual(T.maintained + T.maintaining + T.unclassified, distinct,
+    `${distinct} distinct links, ${T.maintained}+${T.maintaining}+${T.unclassified} counted`);
+  const row = t.rows[0];
+  assert.strictEqual(row.maintained + row.maintaining + row.unclassified, distinct,
+    'and the same holds on the row');
+});
+
+check('a Story is untouched by the split — it is the other half of the table', () => {
+  /* The split moved the maintenance half only. Automated and In flight still
+     count parent epics of Stories, and a change to one half that quietly
+     rewrote the other is exactly what this pins. */
+  const items = [
+    story('A-1', 'E-1', ['PS_A']),      // epic Automated
+    story('A-2', 'E-3', ['PS_A']),      // epic Ready for Automation
+  ];
+  const t = insights.testCaseSummary(items, store(EPICS));
+  assert.strictEqual(t.totals.automated, 1);
+  assert.strictEqual(t.totals.inFlight, 1, 'still in flight, not moved to the remainder');
+  assert.strictEqual(t.totals.maintained, 0, 'a Story contributes to neither maintenance column');
+  assert.strictEqual(t.totals.maintaining, 0);
+  assert.strictEqual(t.totals.unclassified, 0);
 });
 
 /* ── a test case is an epic, so the count is of epics ─────────────────── */
@@ -324,6 +433,100 @@ check('and both numbers reach the screen, with the sprint total beside them', as
   assert.ok((section.match(/<tr>/g) || []).length >= 2, 'one row per component');
 });
 
+/* ── the maintenance split, on the screen ─────────────────────────────── */
+
+/** The test-case table, cut out by its own heading. */
+const tcTable = (html) => {
+  const at = html.indexOf('Test cases by component');
+  assert.ok(at > 0, 'the section did not render');
+  const start = html.indexOf('<table', at);
+  return html.slice(start, html.indexOf('</table>', start));
+};
+
+check('MAINTAINING IS A COLUMN OF ITS OWN, next to Maintained', async () => {
+  const items = [bucket('B-1', ['PS_A'], ['T-A', 'T-B', 'T-C'])];
+  const payload = payloadFor(items, MAINT_EPICS);
+  assert.strictEqual(payload.testCases.totals.maintaining, 2, 'precondition');
+
+  const tbl = tcTable(await renderSprint(payload));
+  const head = tbl.slice(0, tbl.indexOf('</thead>'));
+  /* Matched on the header's TEXT, not on the string anywhere in the cell: the
+     Maintained column's own tooltip contains the words "Bucket Stories", so a
+     bare indexOf('Stories') finds the tooltip and the order check passes no
+     matter where the column actually sits. */
+  const order = [...head.matchAll(/>([^<>]+)<\/th>/g)].map(m => m[1].trim());
+  const at = (label) => order.indexOf(label);
+  assert.ok(at('Maintained') > 0, `Maintained is not a column header: ${order.join(' | ')}`);
+  assert.strictEqual(at('Maintaining'), at('Maintained') + 1,
+    `Maintaining is not straight after Maintained: ${order.join(' | ')}`);
+  assert.ok(at('Maintaining') < at('Stories'),
+    'both stay on the test-case side of the table');
+});
+
+check('THE TABLE STILL LINES UP — header, row and footer all gained one cell', async () => {
+  /* Adding a column is where a table quietly goes one cell out: the header
+     grows, a row or the footer does not, and every number after it shifts one
+     place left while rendering perfectly. */
+  const items = [
+    story('A-1', 'E-1', ['PS_A']),
+    bucket('B-1', ['PS_A'], ['T-A', 'T-B']),
+  ];
+  const tbl = tcTable(await renderSprint(payloadFor(items, [...EPICS, ...MAINT_EPICS])));
+  const cells = (frag, tag) => (frag.match(new RegExp(`<${tag}[\\s>]`, 'g')) || []).length;
+  const head = tbl.slice(0, tbl.indexOf('</thead>'));
+  const foot = tbl.slice(tbl.indexOf('<tfoot'));
+  const body = tbl.slice(tbl.indexOf('<tbody'), tbl.indexOf('</tbody>'));
+  const firstRow = body.slice(body.indexOf('<tr'), body.indexOf('</tr>'));
+
+  const n = cells(head, 'th');
+  assert.ok(n >= 10, `expected the widened header, got ${n} columns`);
+  assert.strictEqual(cells(firstRow, 'td'), n, 'a body row is a different width from the header');
+  assert.strictEqual(cells(foot, 'td'), n, 'the footer is a different width from the header');
+});
+
+check('and the numbers on the screen are the numbers the model counted', async () => {
+  // The whole table renders from one payload; a cell that recomputed anything
+  // could disagree with the column beside it.
+  const items = [bucket('B-1', ['PS_A'], ['T-A', 'T-D', 'T-B', 'T-E'])];
+  const payload = payloadFor(items, MAINT_EPICS);
+  const T = payload.testCases.totals;
+  assert.deepStrictEqual([T.maintained, T.maintaining, T.unclassified], [2, 1, 1], 'precondition');
+
+  const html = await renderSprint(payload);
+  // From the heading to ITS table — searching from 0 finds an earlier table on
+  // the page and slices a window that never contained the headline at all.
+  const at = html.indexOf('Test cases by component');
+  const head = html.slice(at, html.indexOf('<table', at));
+  assert.match(head, /<strong>2<\/strong>\s*maintained/, 'the headline maintained count');
+  assert.match(head, /1\s*maintaining/, 'and the maintaining one beside it');
+});
+
+check('THE REMAINDER IS STATED ON THE SCREEN, not silently missing', async () => {
+  /* Two columns that do not add up to the links they came from is the kind of
+     thing a reader files as a bug. It is not one — it is a field nobody set in
+     Jira — so the screen has to say so. */
+  const items = [bucket('B-1', ['PS_A'], ['T-A', 'T-E', 'T-F'])];
+  const payload = payloadFor(items, MAINT_EPICS);
+  assert.strictEqual(payload.testCases.totals.unclassified, 2, 'precondition');
+
+  const html = await renderSprint(payload);
+  const section = html.slice(html.indexOf('Test cases by component'), html.indexOf('All sprint items'));
+  assert.match(section, /neither Maintained nor Maintaining/, 'the gap is named');
+  assert.match(section, /Ready for Automation, Blocked, N\/A, or not set/, 'and its cause given');
+});
+
+check('and nothing is said when every link has a status', async () => {
+  // A permanent paragraph explaining a gap that is not there is noise, and
+  // teaches the reader to skip the warnings that matter.
+  const items = [bucket('B-1', ['PS_A'], ['T-A', 'T-B'])];
+  const payload = payloadFor(items, MAINT_EPICS);
+  assert.strictEqual(payload.testCases.totals.unclassified, 0, 'precondition');
+
+  const html = await renderSprint(payload);
+  const section = html.slice(html.indexOf('Test cases by component'), html.indexOf('All sprint items'));
+  assert.ok(!/neither Maintained nor Maintaining/.test(section), 'the warning cried wolf');
+});
+
 check('THE SCREEN SAYS WHEN MAINTAINED IS ZERO BECAUSE THE LINKS ARE NOT SYNCED', async () => {
   // His store has 1,736 Bucket Stories and no "relates to" links on any of
   // them, so this column reads zero everywhere until a full sync. A zero with
@@ -342,6 +545,27 @@ check('and it does not cry wolf once the links are there', async () => {
     'a warning that stays up after it is fixed is one nobody reads next time');
 });
 
+check('NOR WHEN THE LINKS ARE THERE BUT NONE OF THEM FINISHED', async () => {
+  /* The case the split creates, and it is not hypothetical: his Katalon Titan
+     Sprint 40 has five linked suites, every one of them still Maintenance and
+     none Automated. "Maintained is zero" is now a true statement about a real
+     fortnight, so keying the sync warning off Maintained alone would tell him
+     to run a full sync to fix data that is perfectly correct — and send him
+     looking for a bug in the tool instead of at a team mid-repair.
+
+     The warning belongs to "no links at all", which is what it was written for. */
+  const items = [bucket('B-1', ['PS_A'], ['T-B', 'T-C'])];   // both Maintenance
+  const payload = payloadFor(items, MAINT_EPICS);
+  assert.strictEqual(payload.testCases.totals.maintained, 0, 'precondition: nothing finished');
+  assert.strictEqual(payload.testCases.totals.maintaining, 2, 'precondition: but the links are there');
+
+  const html = await renderSprint(payload);
+  assert.ok(!/carry no "relates to" links/.test(html),
+    'told him to re-sync a sprint whose links are present and correct');
+  assert.ok(!/full sync/.test(html.slice(html.indexOf('Test cases by component'))),
+    'and offered the remedy for a problem he does not have');
+});
+
 check('the unlinked-story gap is stated on the screen too', async () => {
   const html = await renderSprint(payloadFor([story('A-1', null, ['PS_A'])]));
   assert.match(html, /no parent epic/, 'a count that is short has to say why on the page it is short on');
@@ -357,13 +581,13 @@ const DRILL_ITEMS = [
   story('A-1', 'E-1', ['PS_A'], { status: 'Done' }),
   story('A-2', 'E-1', ['PS_A']),                        // same epic: one test case, two items
   story('A-3', 'E-3', ['PS_A', 'PS_B']),                // in flight, and in two components
-  bucket('M-1', ['PS_A'], ['T-100', 'T-101']),
-  bucket('M-2', ['PS_B'], ['T-101']),                   // shares T-101 with M-1
+  bucket('M-1', ['PS_A'], ['T-100', 'T-101', 'T-102']),
+  bucket('M-2', ['PS_B'], ['T-101', 'T-102']),          // shares BOTH with M-1
 ];
 
 check('EVERY COUNT CARRIES THE KEYS IT IS THE COUNT OF', () => {
   const t = insights.testCaseSummary(DRILL_ITEMS, store(EPICS));
-  const cols = ['automated', 'inFlight', 'maintained', 'stories', 'buckets', 'items', 'done'];
+  const cols = ['automated', 'inFlight', 'maintained', 'maintaining', 'unclassified', 'stories', 'buckets', 'items', 'done'];
   for (const r of t.rows) {
     for (const c of cols) {
       assert.strictEqual(r.keys[c].length, r[c], `${r.component}.${c}: ${r[c]} counted, ${r.keys[c].length} keys`);
@@ -376,14 +600,17 @@ check('EVERY COUNT CARRIES THE KEYS IT IS THE COUNT OF', () => {
 
 check('and the total\'s keys are DISTINCT, not the rows concatenated', () => {
   const t = insights.testCaseSummary(DRILL_ITEMS, store(EPICS));
-  // A-3 is in two components and T-101 is linked from two bucket stories, so
-  // stitching the rows together would list both twice — a list longer than the
-  // number above it, which is the one thing a drill-in must never do.
+  // A-3 is in two components and T-101/T-102 are linked from two bucket stories
+  // each, so stitching the rows together would list them twice — a list longer
+  // than the number above it, which is the one thing a drill-in must never do.
   const stitched = t.rows.reduce((n, r) => n + r.keys.items.length, 0);
   assert.ok(stitched > t.totals.keys.items.length, 'the fixture really does share an item across components');
   assert.strictEqual(new Set(t.totals.keys.items).size, t.totals.keys.items.length, 'no key twice in the sprint list');
   assert.strictEqual(new Set(t.totals.keys.maintained).size, t.totals.keys.maintained.length, 'nor in the maintained list');
-  assert.deepStrictEqual([...t.totals.keys.maintained].sort(), ['T-100', 'T-101'], 'T-101 counted once, not twice');
+  assert.deepStrictEqual([...t.totals.keys.maintained].sort(), ['T-101', 'T-102'], 'each counted once, not twice');
+  // And the link whose target this tool cannot resolve is in its own list,
+  // not folded into either side of the split.
+  assert.deepStrictEqual([...t.totals.keys.unclassified], ['T-100']);
 });
 
 check('the catalogue carries what the sprint item list cannot', () => {
@@ -402,7 +629,7 @@ check('CLICKING A NUMBER OPENS EXACTLY THAT MANY ROWS', async () => {
   const t = insights.testCaseSummary(DRILL_ITEMS, store(EPICS));
 
   for (const row of t.rows) {
-    for (const col of ['automated', 'inFlight', 'maintained', 'stories', 'buckets', 'items', 'done']) {
+    for (const col of ['automated', 'inFlight', 'maintained', 'maintaining', 'unclassified', 'stories', 'buckets', 'items', 'done']) {
       if (!row[col]) continue;
       const html = r.click({ act: 'drill', scope: row.component, col });
       assert.ok(html, `${row.component}.${col} opened nothing`);
@@ -419,11 +646,16 @@ check('CLICKING A NUMBER OPENS EXACTLY THAT MANY ROWS', async () => {
 });
 
 check('a test case with no local copy is still listed, not quietly dropped', async () => {
+  /* T-100 has no local copy, so it has no Automation Status to read and lands
+     in the unclassified remainder rather than in Maintained or Maintaining.
+     It still has to be reachable: a link the tool cannot resolve is the thing
+     he would most want to chase, and dropping it would make the remainder a
+     number with nothing behind it. */
   const r = await renderSprintClickable(payloadFor(DRILL_ITEMS));
-  const html = r.click({ act: 'drill', scope: '__total', col: 'maintained' });
+  const html = r.click({ act: 'drill', scope: '__total', col: 'unclassified' });
   assert.match(html, /T-100/, 'the key is shown');
   assert.match(html, /Not in the local store/, 'and said to be unsynced rather than left blank');
-  assert.match(html, /2 not synced locally/, 'counted in the header too');
+  assert.match(html, /1 not synced locally/, 'counted in the header too');
 });
 
 check('A KEY THE DRAWER CANNOT RESOLVE AT ALL IS STILL A ROW', async () => {

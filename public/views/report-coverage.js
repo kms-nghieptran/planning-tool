@@ -1000,7 +1000,14 @@ const CoverageReport = (() => {
 
       UI.drawer(`
         <div class="drawer-head">
-          <h3 style="margin:0">Blocked by${ds.row ? ` — ${UI.esc(ds.row)}` : ''}</h3>
+          <div style="display:flex;align-items:center;gap:10px">
+            <h3 style="margin:0">Blocked by${ds.row ? ` — ${UI.esc(ds.row)}` : ''}</h3>
+            <span class="spacer"></span>
+            ${/* The BLOCKED ones — what the number in the column counted. The
+                 blockers themselves are a different set and are each already a
+                 link in their own group heading. */''}
+            ${UI.openInJira(r.epics.map(e => e.key))}
+          </div>
           <div class="muted" style="font-size:12px;margin-top:4px">
             ${UI.int(r.count)} blocked ${UI.esc(noun)}${r.count === 1 ? '' : 's'}${ds.row ? ` in ${UI.esc(ds.row)}` : ''}${ds.tool ? ` on ${UI.esc(ds.tool === 'truetest' ? 'TrueTest' : 'KSE')}` : ''}
             · <strong>${UI.int(linked)}</strong> name what is blocking them, across

@@ -587,7 +587,11 @@ const CapacityView = (() => {
     const total = sorted.reduce((t, i) => t + (i.points || 0), 0);
     return `
       <div class="eyebrow"><i></i>Sprint items</div>
-      <h2 style="margin:6px 0 2px">${UI.esc(title)}</h2>
+      <div style="display:flex;align-items:center;gap:10px;margin:6px 0 2px">
+        <h2 style="margin:0">${UI.esc(title)}</h2>
+        <span class="spacer"></span>
+        ${UI.openInJira(sorted.map(i => i.key))}
+      </div>
       <div class="muted" style="margin-bottom:16px">${sorted.length} items · ${UI.num(total)} pts</div>
       ${sorted.length ? sorted.map(i => `
         <div style="padding:11px 0;border-bottom:1px solid var(--app-line-soft)">
