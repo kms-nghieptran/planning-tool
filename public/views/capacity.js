@@ -91,6 +91,7 @@ const CapacityView = (() => {
           <table>
             <thead><tr>
               <th>Role</th><th>Name</th>
+              <th class="num" title="Their hours are not counted toward the team's capacity this sprint. Work already committed to them still counts — see the note under the table">Calc exempt</th>
               <th class="num">Support %</th><th class="num">Days</th><th class="num">Capacity h</th>
               <th class="num">Capacity pts</th><th class="num">Committed</th><th class="num">Done</th>
               <th class="num">Load</th><th style="min-width:120px">Load bar</th><th class="num">Goal</th>
@@ -101,6 +102,7 @@ const CapacityView = (() => {
               ${removedRow(state)}
               <tr class="total">
                 <td colspan="2">Team total</td>
+                <td class="num">${t.exempt ? `<span class="muted" title="Not counted in the figures on this row">${UI.int(t.exempt)} exempt</span>` : '—'}</td>
                 <td class="num">—</td>
                 <td class="num">${UI.num(t.availableDays)}</td>
                 <td class="num">${UI.num(t.capacityHours)}</td>
@@ -115,6 +117,14 @@ const CapacityView = (() => {
             </tbody>
           </table>
         </div>
+        ${t.exempt ? `
+          <p class="muted" style="font-size:11.5px;margin:10px 0 0">
+            <strong>${UI.int(t.exempt)} ${t.exempt === 1 ? 'person is' : 'people are'} exempt from this sprint's capacity.</strong>
+            Their hours are out of Capacity h and Capacity pts above. Work already committed to them
+            is still counted — it is real work in the sprint, and the burndown would end above zero without it —
+            so the team can read as more loaded than its capacity covers. That is the point of the toggle,
+            not a side effect of it.
+          </p>` : ''}
       </section>
 
       <section class="section">
@@ -220,10 +230,15 @@ const CapacityView = (() => {
       ? `<span class="tag" title="Work assigned in Jira to ${UI.esc(on.matchedNames.join(', '))} is counted here — matched by name, because this row has no Jira account on it">= ${UI.esc(on.matchedNames.join(', '))}</span>`
       : '';
     return `
-      <tr class="${r.status === 'Released' ? 'released' : ''}" data-member="${r.memberId}">
+      <tr class="${r.status === 'Released' ? 'released' : ''}${r.calcExempt ? ' exempt' : ''}" data-member="${r.memberId}">
         <td class="muted">${UI.esc(r.role)}</td>
         <td><div class="name-cell">${UI.avatar(r.name)}<span>${UI.esc(r.name)}${r.status === 'Released' ? ' <span class="tag">Released</span>' : ''}${why}${guest}${matched}</span></div></td>
-        <td class="num"><input type="number" min="0" max="100" step="5" value="${r.supportPct}" data-support="${r.memberId}" style="width:64px;text-align:right"></td>
+        <td class="num">
+          <input type="checkbox" class="exempt-box" data-exempt="${r.memberId}" ${r.calcExempt ? 'checked' : ''} ${ro ? 'disabled' : ''}
+            title="${r.calcExempt ? `${UI.esc(r.name)} is not counted in this sprint's capacity` : `Stop counting ${UI.esc(r.name)}'s hours in this sprint's capacity`}"
+            aria-label="Exempt ${UI.esc(r.name)} from this sprint's capacity">
+        </td>
+        <td class="num"><input type="number" min="0" max="100" step="5" value="${r.supportPct}" data-support="${r.memberId}" ${ro ? 'disabled' : ''} style="width:64px;text-align:right"></td>
         <td class="num">${UI.num(r.availableDays)}</td>
         <td class="num">${UI.num(r.capacityHours)}</td>
         <td class="num">${UI.int(r.predicted)}</td>
@@ -432,6 +447,23 @@ const CapacityView = (() => {
         const row = UI.$$('.day', grid).map(c => c.dataset.v);
         await UI.jsonPut('/api/availability', { teamId: state.teamId, sprintId: state.sprintId, memberId: grid.dataset.member, row });
         App.refresh();
+      });
+    });
+
+    UI.$$('[data-exempt]', mount).forEach(box => {
+      box.addEventListener('change', async () => {
+        try {
+          await UI.jsonPut('/api/calc-exempt', {
+            teamId: state.teamId, sprintId: state.sprintId,
+            memberId: box.dataset.exempt, exempt: box.checked,
+          });
+          App.refresh();
+        } catch (err) {
+          // Put the box back: a tick that stayed on after a refused write says
+          // the person is exempt when the plan still counts them.
+          box.checked = !box.checked;
+          UI.toast(err.message, true);
+        }
       });
     });
 

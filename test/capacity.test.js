@@ -133,6 +133,83 @@ check('a Released member contributes no capacity', () => {
   assert.strictEqual(grid.totals.headcount, 0);
 });
 
+/* ── CALC EXEMPT ──────────────────────────────────────────────────────
+   On the roster, out of the capacity arithmetic. Not "released" (they have
+   not left), not "excluded" (they are this team's), not off the sprint roster
+   (they are on this sprint, often carrying work) — their HOURS are simply not
+   what the team is planning against. */
+
+const twoPeople = (over = {}) => ({
+  id: 't', name: 'T', settings: { ceremonyHours: 9, hoursPerDay: 7, hoursPerPoint: 2.9 },
+  members: [
+    { id: 'a', name: 'A', role: 'Auto QA', status: 'Active', supportPct: 0, ...(over.a || {}) },
+    { id: 'b', name: 'B', role: 'QA Lead', status: 'Active', supportPct: 0, ...(over.b || {}) },
+  ],
+});
+const full = () => new Array(14).fill('1');
+const bothDays = { a: full(), b: full() };
+
+check('AN EXEMPT MEMBER CONTRIBUTES NO CAPACITY, exactly as a released one does', () => {
+  const base = cap.sprintGrid(twoPeople(), { id: 'S1' }, bothDays, {});
+  const grid = cap.sprintGrid(twoPeople({ b: { calcExempt: true } }), { id: 'S1' }, bothDays, {});
+
+  assert.ok(base.totals.capacityHours > 0, 'the fixture has to have capacity to remove');
+  assert.strictEqual(grid.totals.headcount, base.totals.headcount - 1);
+  // Both have identical availability and support, so exempting one leaves
+  // exactly one person's hours — asserted against that row, not against a
+  // halving this fixture merely happens to satisfy.
+  const a = grid.rows.find(r => r.memberId === 'a');
+  assert.strictEqual(grid.totals.capacityHours, a.capacityHours,
+    'the remaining capacity is the remaining person');
+  assert.ok(grid.totals.predicted < base.totals.predicted, 'and fewer predicted points');
+  assert.strictEqual(grid.totals.exempt, 1, 'and the total says how many, so the headcount is explainable');
+});
+
+check('and their ROW is still there, with their own days and hours at zero', () => {
+  // They are on the sprint. Hiding them would make this the roster screen
+  // again, and there is already one of those.
+  const grid = cap.sprintGrid(twoPeople({ b: { calcExempt: true } }), { id: 'S1' }, bothDays, {});
+  const b = grid.rows.find(r => r.memberId === 'b');
+  assert.ok(b, 'the exempt member vanished from the grid');
+  assert.strictEqual(b.calcExempt, true, 'and the row has to say so, or the screen cannot mark it');
+  assert.strictEqual(b.capacityHours, 0);
+  assert.ok(b.availableDays > 0, 'their availability is still their availability');
+});
+
+check('THEIR COMMITTED WORK STILL COUNTS — the burndown depends on it', () => {
+  /* `totals.planned` is what the sprint screen reports as Committed and draws
+     the burndown from. Dropping an exempt member's points would make the
+     sprint report less work than was taken on, and the burndown would end
+     above zero with everything delivered. */
+  const work = { b: { planned: 12, actual: 5, items: [] } };
+  const grid = cap.sprintGrid(twoPeople({ b: { calcExempt: true } }), { id: 'S1' }, bothDays, work);
+  assert.strictEqual(grid.totals.planned, 12, 'work committed to an exempt member left the sprint');
+  assert.strictEqual(grid.totals.actual, 5, 'and so did work they delivered');
+  // Which is exactly the rule a released member already follows.
+  const rel = cap.sprintGrid(twoPeople({ b: { status: 'Released' } }), { id: 'S1' }, bothDays, work);
+  assert.strictEqual(rel.totals.planned, 12, 'the two have to agree, or one of them is wrong');
+});
+
+check('so the team reads as MORE loaded, which is the point of the toggle', () => {
+  // Commit work to someone whose hours are not counted and the capacity being
+  // planned against no longer covers it. That has to show.
+  const work = { b: { planned: 12, actual: 0, items: [] } };
+  const base = cap.sprintGrid(twoPeople(), { id: 'S1' }, bothDays, work);
+  const grid = cap.sprintGrid(twoPeople({ b: { calcExempt: true } }), { id: 'S1' }, bothDays, work);
+  assert.ok(grid.totals.workloadPct > base.totals.workloadPct,
+    `exempting the person holding the work has to raise the load, got ${grid.totals.workloadPct} vs ${base.totals.workloadPct}`);
+});
+
+check('exempting EVERYONE leaves no capacity and no headcount, and does not divide by zero', () => {
+  const grid = cap.sprintGrid(twoPeople({ a: { calcExempt: true }, b: { calcExempt: true } }),
+    { id: 'S1' }, bothDays, { a: { planned: 3, actual: 0, items: [] } });
+  assert.strictEqual(grid.totals.capacityHours, 0);
+  assert.strictEqual(grid.totals.headcount, 0);
+  assert.strictEqual(grid.totals.predicted, 0);
+  assert.strictEqual(grid.totals.workloadPct, null, 'workload over zero hours is null, not Infinity');
+  assert.strictEqual(grid.totals.planned, 3, 'the work is still committed');
+});
+
 /* ── 6. Calibration + velocity helpers ───────────────────────────────── */
 check('calibration needs three sprints of evidence before it speaks', () => {
   assert.strictEqual(cap.calibrateHoursPerPoint([{ actual: 10, capacityHours: 29 }, { actual: 10, capacityHours: 29 }]), null);

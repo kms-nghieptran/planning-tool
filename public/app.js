@@ -432,21 +432,49 @@ const App = (() => {
    * so `main`'s padding and max-width apply to the view's own sections exactly
    * as before.
    */
+  /**
+   * Re-render the current view WITHOUT the page going away first.
+   *
+   * It used to replace `#main` with "Loading…" and only then await the render.
+   * Every saved leave cell, every priority set from a dropdown, every chip
+   * added in Settings tore the screen down and rebuilt it — the page jumped to
+   * the top, and for a moment there was nothing on it. For a change to one
+   * cell that reads as the app reloading itself.
+   *
+   * So the new view is built into a DETACHED node while the old one stays on
+   * screen, and the two are swapped in one go when it is ready. No view
+   * measures layout during render — checked — so building off-document is
+   * safe, and `UI.api` is already showing the busy bar for the fetches this
+   * render makes. The scroll position is put back because the swap replaces
+   * the element the page was scrolled within.
+   *
+   * THE FIRST PAINT IS THE EXCEPTION: there is nothing to keep, so it still
+   * shows the loading state rather than an empty frame.
+   */
   async function refresh() {
     renderCrumbs();
     const host = UI.$('#main');
+    const hasContent = host.childElementCount > 0 && !host.querySelector('.loading');
 
-    // Attached BEFORE rendering, carrying the loading state, so a view still
-    // renders into a node that is in the document — exactly as it did when it
-    // was handed `#main` itself. Only the node's lifetime has changed.
     const mount = document.createElement('div');
     mount.style.display = 'contents';
-    mount.innerHTML = '<div class="loading">Loading…</div>';
-    host.replaceChildren(mount);
+    if (!hasContent) {
+      mount.innerHTML = '<div class="loading">Loading…</div>';
+      host.replaceChildren(mount);
+    } else {
+      // Held back, not hidden: what he was reading stays readable while the
+      // new one is built behind it.
+      UI.busy(true);
+    }
 
+    const y = window.scrollY;
     const r = routeFor(state.route);
     try {
       await r.view().render(state, mount, r);
+      if (hasContent) {
+        host.replaceChildren(mount);
+        window.scrollTo(0, y);
+      }
       // Every grid on every screen becomes sortable here, once, rather than in
       // fifteen views that would each do it slightly differently. It binds to
       // the per-render container, so it goes when the render goes.
@@ -459,6 +487,8 @@ const App = (() => {
           <p class="muted" style="font-size:12px">The local data is intact — check the connection in Integrations &amp; setup.</p>
         </div>`;
       console.error(err);
+    } finally {
+      if (hasContent) UI.busy(false);
     }
   }
 

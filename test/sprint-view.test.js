@@ -29,6 +29,7 @@ const SCRATCH = fs.mkdtempSync(path.join(os.tmpdir(), 'pt-sprint-view-'));
 process.env.STORE_DIR = SCRATCH;
 
 const insights = require('../lib/insights');
+const priority = require('../lib/priority');
 
 let passed = 0, failed = 0;
 const checks = [];
@@ -141,6 +142,10 @@ async function renderHtml(snap = SNAP, plan = PLAN) {
       signals: insights.signalsFor(TEAM, SPRINT, view, snap),
       manual: (plan.risks || []).filter(r => String(r.status || '').toLowerCase() !== 'closed'),
     },
+    testCases: view.testCases
+      ? { ...view.testCases, rows: priority.decorate(view.testCases.rows, plan) }
+      : view.testCases,
+    priorityLevels: priority.LEVELS,
   };
   let html = '';
   const el = () => ({
@@ -381,6 +386,86 @@ check('the capacity payload carries the items at all', async () => {
   const { payload: sprint } = await renderHtml();
   assert.ok(Array.isArray(payload.items) && payload.items.length === sprint.items.length,
     'the capacity screen must carry the same items the sprint screen does');
+});
+
+/* ── CALC EXEMPT, ON THE CAPACITY GRID ────────────────────────────────
+   On the roster, out of the capacity arithmetic. The model is checked in
+   capacity.test.js and the round trip in sprint-api.test.js; here it is the
+   screen — the control exists, the row is marked, the table still lines up,
+   and the consequence is stated rather than left to be discovered. */
+
+/** The member capacity table, cut out by its own header. */
+const memberTable = (html) => {
+  const at = html.indexOf('Calc exempt');
+  assert.ok(at > 0, 'there is no Calc exempt column on the capacity grid');
+  const start = html.lastIndexOf('<table', at);
+  return html.slice(start, html.indexOf('</table>', start));
+};
+
+const EXEMPT_PLAN = { ...PLAN, calcExempt: { 'titan|S40|m2': true } };
+
+check('EVERY MEMBER HAS A CALC-EXEMPT TOGGLE', async () => {
+  const { html, payload } = await renderCapacity(SNAP, PLAN);
+  const tbl = memberTable(html);
+  assert.ok(payload.rows.length, 'the fixture needs members');
+  for (const r of payload.rows) {
+    assert.match(tbl, new RegExp(`data-exempt="${r.memberId}"`), `${r.name} has no toggle`);
+  }
+});
+
+check('and an exempt member is TICKED and marked, not hidden', async () => {
+  // They are on the sprint and may be carrying work. Hiding them would make
+  // this the roster screen, and there is already one of those.
+  const { html, payload } = await renderCapacity(SNAP, EXEMPT_PLAN);
+  const tbl = memberTable(html);
+  const ex = payload.rows.find(r => r.calcExempt);
+  assert.ok(ex, 'the fixture did not produce an exempt member');
+  assert.match(tbl, new RegExp(`data-exempt="${ex.memberId}"[^>]*checked`), 'the box is not ticked');
+  assert.match(tbl, /<tr class="[^"]*exempt"/, 'the row is not marked');
+  assert.match(tbl, new RegExp(ex.name), 'the exempt member vanished from the grid');
+});
+
+check('THE HOURS COME OUT OF THE TEAM TOTAL, and the screen says how many are exempt', async () => {
+  const base = await renderCapacity(SNAP, PLAN);
+  const { html, payload } = await renderCapacity(SNAP, EXEMPT_PLAN);
+  assert.ok(payload.totals.capacityHours < base.payload.totals.capacityHours,
+    'exempting somebody did not reduce the capacity');
+  assert.strictEqual(payload.totals.exempt, 1);
+  assert.match(memberTable(html), /1 exempt/, 'the total row does not explain its own headcount');
+});
+
+check('AND THE CONSEQUENCE IS STATED — committed work still counts', async () => {
+  /* The surprising half. Their hours leave the capacity, their work does not
+     leave the sprint, so the team can read as more loaded than its capacity
+     covers. A reader who is not told that will file it as a bug. */
+  const { html } = await renderCapacity(SNAP, EXEMPT_PLAN);
+  assert.match(html, /exempt from this sprint's capacity/);
+  assert.match(html, /still counted/);
+});
+
+check('and nothing is said when nobody is exempt', async () => {
+  // A permanent paragraph explaining a feature nobody is using is noise.
+  const { html } = await renderCapacity(SNAP, PLAN);
+  assert.ok(!/exempt from this sprint's capacity/.test(html));
+});
+
+check('THE MEMBER TABLE STILL LINES UP, header, rows and footer', async () => {
+  /* Adding a column is where a table quietly goes one cell out: the header
+     grows, a row or the footer does not, and every number after it shifts one
+     place left while rendering perfectly. */
+  for (const [label, plan] of [['no exemptions', PLAN], ['one exempt', EXEMPT_PLAN]]) {
+    const tbl = memberTable((await renderCapacity(SNAP, plan)).html);
+    const cols = (tbl.match(/<th(?=[\s>])[^>]*>/g) || []).length;
+    assert.ok(cols >= 11, `${label}: expected the full table, saw ${cols} columns`);
+    const body = tbl.slice(tbl.indexOf('<tbody>'), tbl.indexOf('</tbody>'));
+    const rows = body.split('<tr').slice(1);
+    assert.ok(rows.length, `${label}: no rows`);
+    for (const r of rows) {
+      const cells = (r.match(/<td[^>]*>/g) || []).length;
+      const span = [...r.matchAll(/colspan="(\d+)"/g)].reduce((t, m) => t + (Number(m[1]) - 1), 0);
+      assert.strictEqual(cells + span, cols, `${label}: a row has ${cells + span} cells against ${cols} columns`);
+    }
+  }
 });
 
 check('EVERY ROW HAS AS MANY CELLS AS THE HEADER HAS COLUMNS', async () => {
@@ -696,6 +781,89 @@ check('AN ISSUE KEY IS NEVER BROKEN ACROSS LINES', async () => {
 check('a card is not split across a page break', async () => {
   assert.match(printRules, /break-inside: avoid/);
   assert.match(printRules, /break-after: avoid/, 'a heading must not be orphaned from its table');
+});
+
+/* ── PRIORITY ON "TEST CASES BY COMPONENT" ────────────────────────────
+   His judgement of which suites matter, on the sprint's own component table.
+   Set on the Coverage grid, shown here — one owner, three readers. */
+
+/** The "Test cases by component" section, cut out by its heading. */
+const testCaseSection = (html) => {
+  const at = html.indexOf('<h2>Test cases by component</h2>');
+  assert.ok(at > 0, 'the test-case section is not on the page');
+  return html.slice(html.lastIndexOf('<section', at), html.indexOf('</section>', at));
+};
+
+/** A plan where two of the fixture's components carry a priority and one does not. */
+const PRIORITISED = { ...PLAN, componentPriority: { PS_iGO_NLG: 1, KAT_Common: 4 } };
+
+check('THE TEST-CASE TABLE SHOWS EACH COMPONENT\'S PRIORITY', async () => {
+  const { html, payload } = await renderHtml(SNAP, PRIORITISED);
+  const sec = testCaseSection(html);
+  assert.match(sec, /<th[^>]*>Priority<\/th>/, 'no Priority column');
+
+  const rows = payload.testCases.rows;
+  assert.ok(rows.length, 'the fixture needs test-case rows');
+  const set = rows.filter(r => r.priority != null);
+  assert.ok(set.length >= 2, `only ${set.length} rows carry a priority — the fixture proves nothing`);
+  for (const r of set) {
+    assert.match(sec, new RegExp(`prio-p${r.priority}"[^>]*>P${r.priority}<`),
+      `${r.component} is P${r.priority} and the table does not say so`);
+  }
+});
+
+check('and a component nobody has judged shows a dash, not P4', async () => {
+  /* Unset is a real state. Rendering it as the bottom of the scale claims a
+     judgement nobody made — the rule `priority.js` is built around. */
+  const { html, payload } = await renderHtml(SNAP, PRIORITISED);
+  const unset = payload.testCases.rows.filter(r => r.priority == null);
+  assert.ok(unset.length, 'the fixture needs a component with no priority set');
+  const sec = testCaseSection(html);
+  // As many dashes as there are unjudged rows, and no P-tag for them.
+  const tags = (sec.match(/class="tag prio-tag/g) || []).length;
+  assert.strictEqual(tags, payload.testCases.rows.length - unset.length,
+    'a row with no priority is wearing a tag');
+});
+
+check('and it sorts unset LAST, in both directions', async () => {
+  // `data-sort-value="—"` is what `SORT_BLANK` pins to the bottom whichever
+  // way the column points. A numeric 99 would float every unjudged row above
+  // the P1s on a descending sort — the bug the Coverage grid already had.
+  const { html, payload } = await renderHtml(SNAP, PRIORITISED);
+  const sec = testCaseSection(html);
+  const unset = payload.testCases.rows.filter(r => r.priority == null).length;
+  assert.strictEqual((sec.match(/data-sort-value="—"/g) || []).length, unset);
+  for (const r of payload.testCases.rows.filter(x => x.priority != null)) {
+    assert.match(sec, new RegExp(`data-sort-value="${r.priority}"`));
+  }
+});
+
+check('THE COLUMN IS READ-ONLY — the Coverage grid owns the value', async () => {
+  // Two editors for one field is two places for it to drift. This shows it.
+  const sec = testCaseSection((await renderHtml(SNAP, PRIORITISED)).html);
+  assert.ok(!/<select/.test(sec), 'a dropdown here is a second owner of the same judgement');
+  assert.ok(!/data-prio|data-set-priority/.test(sec), 'and no write handler');
+});
+
+check('EVERY ROW AND THE FOOTER MATCH THE HEADER, column for column', async () => {
+  /* The failure adding this column risks: a `<th>` with no matching `<td>` in
+     the body or the FOOTER shifts every number one place left and still
+     renders perfectly. The footer is the easy one to forget — it is written
+     once, far from the rows. */
+  const sec = testCaseSection((await renderHtml(SNAP, PRIORITISED)).html);
+  const cols = (sec.match(/<th(?=[\s>])[^>]*>/g) || []).length;
+  assert.ok(cols >= 9, `expected the full table, saw ${cols} columns`);
+
+  const body = sec.slice(sec.indexOf('<tbody>'), sec.indexOf('</tbody>'));
+  const rows = body.split('<tr>').slice(1);
+  assert.ok(rows.length, 'no rows to check');
+  for (const r of rows) {
+    assert.strictEqual((r.match(/<td[^>]*>/g) || []).length, cols,
+      'a row has a different number of cells than the header has columns');
+  }
+  const foot = sec.slice(sec.indexOf('<tfoot>'), sec.indexOf('</tfoot>'));
+  assert.strictEqual((foot.match(/<td[^>]*>/g) || []).length, cols,
+    'the footer has drifted from the header — every total is one column out');
 });
 
 /* ── THE RISK SECTION ─────────────────────────────────────────────────

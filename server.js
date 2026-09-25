@@ -29,6 +29,7 @@ const backlogProfile = require('./lib/backlog-profile');
 const covHistory = require('./lib/coverage-history');
 const priority = require('./lib/priority');
 const keywords = require('./lib/keywords');
+const sprintDates = require('./lib/sprint-dates');
 const reset = require('./lib/reset');
 const provenance = require('./lib/provenance');
 const query = require('./lib/query');
@@ -381,6 +382,18 @@ async function handleApi(req, res, url) {
         signals: insights.signalsFor(team, sprint, view, snap),
         manual: (plan.risks || []).filter(r => String(r.status || '').toLowerCase() !== 'closed'),
       },
+      /* HIS COMPONENT PRIORITIES, on the sprint's own component table.
+         The same judgement the Coverage grid owns, attached to the rows this
+         screen already renders rather than looked up in the browser from
+         another page's payload — one row shape carrying its own priority is
+         what stops two screens disagreeing about a component. Read-only here:
+         the value is SET in one place, and two editors for one field is two
+         places for it to drift. */
+      testCases: view.testCases ? {
+        ...view.testCases,
+        rows: priority.decorate(view.testCases.rows, plan),
+      } : view.testCases,
+      priorityLevels: priority.LEVELS,
     });
   }
 
@@ -415,7 +428,12 @@ async function handleApi(req, res, url) {
           // What Jira actually said, where the derived last-working-day differs
           // from it. Carried from whichever of the two rows the dates came from,
           // so the hover on the screen explains the date the screen is showing.
-          jiraEnd: (t.end ? t.jiraEnd : s2.jiraEnd) || undefined,
+          /* `??`, not a truthy pick: a team's copy of a sprint can carry no
+             dates of its own, and a recorded `null` there means "Jira gave
+             this row none" — in which case the traceable original is the
+             calendar row's, not nothing. With `t.end ? t.jiraEnd : …` an
+             overridden sprint showed his date with no way back to Jira's. */
+          jiraEnd: (t.jiraEnd ?? s2.jiraEnd) || undefined,
           jiraId: t.jiraId,
           count: stat.count || 0, points: stat.points || 0, donePoints: stat.donePoints || 0,
         };
@@ -946,6 +964,23 @@ async function handleApi(req, res, url) {
     return json(res, 200, { ok: true });
   }
 
+  /* ON THE ROSTER, OUT OF THE CAPACITY ARITHMETIC.
+     Their hours stop being counted; their committed work does not — see
+     `sprintGrid`, where the same reasoning already governs released members.
+     Per sprint, and clearing it deletes the key rather than storing a false. */
+  if (p === '/api/calc-exempt' && req.method === 'PUT') {
+    const body = await readJsonBody(req);   // { teamId, sprintId, memberId, exempt }
+    const plan = store.getPlan();
+    const team = findTeam(plan, body.teamId);
+    assertSprintOpen(team.id, body.sprintId);
+    plan.calcExempt = plan.calcExempt || {};
+    const key = `${team.id}|${body.sprintId}|${body.memberId}`;
+    if (body.exempt) plan.calcExempt[key] = true; else delete plan.calcExempt[key];
+    store.savePlan(plan);
+    store.audit('capacity.exempt', { teamId: team.id, sprintId: body.sprintId, memberId: body.memberId, exempt: !!body.exempt });
+    return json(res, 200, { ok: true, exempt: !!body.exempt });
+  }
+
   if (p === '/api/support' && req.method === 'PUT') {
     const body = await readJsonBody(req);   // { teamId, sprintId, memberId, pct }
     const plan = store.getPlan();
@@ -1171,6 +1206,51 @@ async function handleApi(req, res, url) {
     store.savePlan(plan);
     store.audit('reconcile.manual', rec);
     return json(res, 200, rec);
+  }
+
+  /* A SPRINT'S REAL SPAN, where Jira's is wrong.
+     Jira records what someone clicked, not what the team did: "TT Week 14Sep"
+     is stored 13–27 Sep and really ran 14–30 Sep. Nothing derivable from the
+     timestamps can find that, so it is a decision, and decisions live in the
+     plan where no sync can reach them. Sending no dates clears the override
+     and Jira's own figures come back. */
+  if (p === '/api/sprint/dates' && req.method === 'PUT') {
+    const body = await readJsonBody(req);
+    const plan = store.getPlan();
+    const id = String(body.sprintId || '').trim();
+    const sprint = plan.sprints.find(x => x.id === id);
+    if (!sprint) return json(res, 404, { error: `No sprint with id "${id}".` });
+
+    plan.sprintDates = plan.sprintDates || {};
+    const iso = (v) => (v == null || v === '' ? null : String(v).slice(0, 10));
+    const start = iso(body.start);
+    const end = iso(body.end);
+
+    if (!start && !end) {
+      delete plan.sprintDates[id];
+      store.savePlan(plan);
+      store.audit('sprint.dates.cleared', { sprintId: id, name: sprint.name });
+      return json(res, 200, { ok: true, cleared: true, sprintDates: plan.sprintDates });
+    }
+    // Both or neither: half an override leaves the other end on Jira's value
+    // and produces a span nobody chose.
+    if (!start || !end) return json(res, 400, { error: 'Give both a start and an end, or neither to clear.' });
+    const ok = (d) => /^\d{4}-\d{2}-\d{2}$/.test(d) && !Number.isNaN(Date.parse(`${d}T00:00:00Z`));
+    if (!ok(start) || !ok(end)) return json(res, 400, { error: 'Dates must be YYYY-MM-DD.' });
+    if (end < start) return json(res, 400, { error: 'The end date is before the start.' });
+
+    plan.sprintDates[id] = { start, end };
+    store.savePlan(plan);
+    store.audit('sprint.dates.set', { sprintId: id, name: sprint.name, start, end });
+
+    // What it works out to, so the caller can check the number it came for
+    // rather than re-deriving the working-day rule at the other end.
+    const span = sprintDates.normalise({ start, end });
+    return json(res, 200, {
+      ok: true, sprintId: id, name: sprint.name, start, end,
+      workingDays: span ? span.workingDays : null,
+      sprintDates: plan.sprintDates,
+    });
   }
 
   if (p === '/api/sprints' && req.method === 'POST') {

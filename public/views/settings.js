@@ -565,7 +565,14 @@ const SettingsView = (() => {
         await UI.api('/api/team', { method: 'DELETE', body: JSON.stringify({ teamId: btn.dataset.removeTeam }) });
         UI.toast(`${name} removed`);
         localStorage.removeItem('pt-team');
-        location.reload();
+        /* `App.reload()`, not `location.reload()`. Removing a team changes the
+           sidebar, the team selector and which team every screen is scoped to,
+           which is why this reached for the browser — but `reload` re-reads
+           the state and redraws the nav, which is the whole of that. A real
+           page reload throws away the Jira base URL, the sort the table was
+           in and anything open, and takes a second to come back. */
+        await App.reload();
+        await App.refresh();
       } catch (err) { UI.toast(err.message, true); }
     }));
 

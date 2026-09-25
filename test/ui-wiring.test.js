@@ -190,8 +190,12 @@ check('and the narrow layout keeps its own drawer, untouched', () => {
 /* ── the nav ─────────────────────────────────────────────────────────── */
 
 /** ROUTES and the nav it renders, evaluated from the real app.js. */
-function navOf() {
+function navOf({ quiet = true } = {}) {
   const ctx = sandbox([]);
+  /* `boot()` refreshes on load, and in this sandbox that render fails because
+     no view module is loaded — three raw stack traces in the suite's output
+     that say nothing about any check and bury the ones that do. */
+  if (quiet) ctx.console = { log() {}, error() {}, warn() {} };
   /* app.js boots itself on load, so it needs the handful of browser globals
      that boot touches. They are stubs, not a DOM: this check is about the route
      table and how the nav filters it, and a real DOM would add a great deal of
@@ -413,6 +417,188 @@ function fixtureFor(p) {
   }
   return {};
 }
+
+/* ── A CHANGE MUST NOT LOOK LIKE A PAGE RELOAD ────────────────────────
+   `refresh` used to replace `#main` with "Loading…" and only then await the
+   render. Saving one leave cell, one priority, one chip in Settings tore the
+   screen down and rebuilt it: the page jumped to the top and for a moment
+   there was nothing on it. The new view is now built detached and swapped in
+   when it is ready, so what he was reading stays readable, and a slim bar says
+   the app is working. */
+
+/** `navOf`'s harness, with a `#main` that really holds children. */
+function appWithMain() {
+  const { ctx } = navOf();
+  /* `boot()` runs on load and refreshes once, which in this sandbox reaches
+     for view modules that are not loaded. Neutralised up front so the noise
+     from that first render does not land in the middle of a check. */
+  ctx.__app.ROUTES.forEach(r => { r.view = () => ({ render: async () => {} }); });
+  const main = {
+    children: [],
+    get childElementCount() { return this.children.length; },
+    replaceChildren(...kids) { this.children = kids; },
+    querySelector(sel) {
+      // Only `.loading` is asked for, and only to tell a first paint apart
+      // from a re-render.
+      return this.children.some(k => String(k.innerHTML || '').includes('loading')) ? {} : null;
+    },
+    set innerHTML(v) { this.children = [{ innerHTML: v }]; },
+    get innerHTML() { return this.children.map(k => k.innerHTML || '').join(''); },
+  };
+  // The busy bar looks itself up by id and creates one if it is missing.
+  const bars = {};
+  ctx.document.getElementById = (id) => bars[id] || null;
+  ctx.document.body = { appendChild(node) { bars[node.id] = node; } };
+
+  const made = [];
+  ctx.document.createElement = () => {
+    const node = { style: {}, innerHTML: '', id: '', querySelector: () => null, querySelectorAll: () => [],
+      addEventListener() {}, setAttribute(k, v) { this[k] = v; }, appendChild() {},
+      classList: { on: false, add() { this.on = true; }, remove() { this.on = false; } } };
+    made.push(node);
+    return node;
+  };
+  /* DELEGATES rather than replaces. `boot()` runs on load and reaches for a
+     handful of shell elements; a leaner stub here broke it with
+     "classList.contains is not a function" — which says nothing about
+     refreshing. Only `#main` is answered differently. */
+  const base$ = ctx.UI.$;
+  ctx.UI.$ = (sel, root) => (sel === '#main' ? main : base$(sel, root));
+  ctx.UI.sortable = () => {};
+  ctx.window.scrollY = 0;
+  ctx.window.scrollTo = () => {};
+  // The bar as the app made it — asserting on the real node rather than on a
+  // stand-in is what makes "it went up" a fact about the app.
+  const uiSrc = fs.readFileSync(path.join(VIEWS, '..', 'ui.js'), 'utf8');
+  const realUI = vm.runInContext(`(function () { ${uiSrc}; return UI; })()`, ctx);
+  Object.assign(ctx.UI, {
+    api: realUI.api, jsonPut: realUI.jsonPut, jsonPost: realUI.jsonPost,
+    jsonDelete: realUI.jsonDelete, busy: realUI.busy,
+  });
+  ctx.__bar = () => { ctx.UI.busy(true); ctx.UI.busy(false); return bars.busybar; };
+  return { app: ctx.__app, main, ctx };
+}
+
+check('THE PAGE STAYS ON SCREEN WHILE THE NEW ONE IS BUILT', async () => {
+  const { app, main, ctx } = appWithMain();
+  main.children = [{ innerHTML: '<h2>Per-component progress</h2>' }];   // what he was reading
+
+  let release;
+  const rendered = new Promise((r) => { release = r; });
+  app.ROUTES.forEach(r => { r.view = () => ({ render: async () => { await rendered; } }); });
+
+  const done = app.refresh();
+  await new Promise(r => setTimeout(r, 5));
+  assert.match(main.innerHTML, /Per-component progress/,
+    'the old view was torn down before the new one was ready — that is the reload he is complaining about');
+  assert.ok(!/loading/i.test(main.innerHTML), 'and it was not replaced by a loading state');
+
+  release();
+  await done;
+  assert.ok(!/Per-component progress/.test(main.innerHTML), 'and the swap does happen once it is ready');
+});
+
+check('and the FIRST paint still shows a loading state', async () => {
+  // Nothing to keep, so an empty frame would be worse than "Loading…".
+  const { app, main } = appWithMain();
+  main.children = [];
+  let release;
+  const rendered = new Promise((r) => { release = r; });
+  app.ROUTES.forEach(r => { r.view = () => ({ render: async () => { await rendered; } }); });
+
+  const done = app.refresh();
+  await new Promise(r => setTimeout(r, 5));
+  assert.match(main.innerHTML, /loading/i, 'a blank frame on first load says nothing is happening');
+  release();
+  await done;
+});
+
+check('THE BUSY BAR GOES UP FOR A WRITE AND COMES BACK DOWN', async () => {
+  const { ctx } = appWithMain();
+  const bar = ctx.__bar();
+
+  let release;
+  ctx.fetch = () => new Promise((r) => { release = () => r({ ok: true, text: async () => '{}' }); });
+  const call = ctx.UI.jsonPut('/api/thing', {});
+  await new Promise(r => setTimeout(r, 260));      // past the anti-flicker delay
+  assert.strictEqual(bar.classList.on, true, 'a write in flight shows nothing is happening');
+  release();
+  await call;
+  assert.strictEqual(bar.classList.on, false, 'and it has to come back down');
+});
+
+check('and it comes down even when the write FAILS', async () => {
+  // A bar left spinning after an error says the app is still working on
+  // something it has already given up on.
+  const { ctx } = appWithMain();
+  const bar = ctx.__bar();
+  ctx.fetch = async () => ({ ok: false, status: 500, statusText: 'Server Error', text: async () => '{"error":"nope"}' });
+
+  await assert.rejects(() => ctx.UI.jsonPut('/api/thing', {}));
+  /* PAST THE DELAY before asserting. Checking the instant the rejection lands
+     passes whether or not anything lowers it — the bar has not been raised
+     yet, so "off" is true either way. Without the `finally` the count stays up
+     and the pending timer puts the bar on a moment later, which is the state
+     this has to catch: a bar left spinning over an error. */
+  await new Promise(r => setTimeout(r, 260));
+  assert.strictEqual(bar.classList.on, false, 'left spinning after a failed write');
+});
+
+check('TWO OVERLAPPING REQUESTS KEEP IT UP UNTIL THE LAST ONE FINISHES', async () => {
+  /* A save and the refresh that follows it overlap. A boolean would be
+     switched off by whichever finished first, hiding the bar while work was
+     still in flight. */
+  const { ctx } = appWithMain();
+  const bar = ctx.__bar();
+
+  const releases = [];
+  ctx.fetch = () => new Promise((r) => releases.push(() => r({ ok: true, text: async () => '{}' })));
+  const a = ctx.UI.jsonPut('/api/one', {});
+  const b = ctx.UI.api('/api/two');
+  await new Promise(r => setTimeout(r, 260));
+  assert.strictEqual(bar.classList.on, true);
+
+  releases[0](); await a;
+  assert.strictEqual(bar.classList.on, true, 'one of two finishing must not lower it');
+  releases[1](); await b;
+  assert.strictEqual(bar.classList.on, false);
+});
+
+check('a QUICK request never flashes the bar at all', async () => {
+  // Most of these are local and answer in milliseconds. A bar that blinks on
+  // and off for every keystroke-triggered fetch is worse than no bar.
+  const { ctx } = appWithMain();
+  const bar = ctx.__bar();
+  /* SLOWER THAN AN INSTANT, FASTER THAN THE DELAY. A fetch that resolves in
+     the same tick never shows the bar whatever the delay is set to — so a
+     check built on one passes with the delay removed, and the flicker it
+     exists to prevent ships. 50ms is a local round trip. */
+  ctx.fetch = () => new Promise(r => setTimeout(() => r({ ok: true, text: async () => '{}' }), 50));
+
+  const call = ctx.UI.api('/api/quick');
+  await new Promise(r => setTimeout(r, 40));
+  assert.strictEqual(bar.classList.on, false, 'shown for a request that answers in 50ms');
+  await call;
+  await new Promise(r => setTimeout(r, 260));
+  assert.strictEqual(bar.classList.on, false, 'and never shown after it finished either');
+});
+
+check('NOTHING RELOADS THE BROWSER', () => {
+  /* The one that did was "remove a team" — which changes the sidebar, the team
+     selector and every screen's scoping, and reached for the browser to get
+     all three. `App.reload()` re-reads the state and redraws the nav, which is
+     the whole of that, without throwing away the Jira base URL, the sort a
+     table was in, or a second of his time. */
+  // Comments stripped first: the one explaining why this rule exists names
+  // `location.reload()`, and a check that cannot tell code from prose fails on
+  // its own documentation.
+  const code = (src) => src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  for (const f of fs.readdirSync(VIEWS)) {
+    const hit = code(fs.readFileSync(path.join(VIEWS, f), 'utf8'))
+      .split('\n').find(l => /location\.reload\s*\(/.test(l));
+    assert.ok(!hit, `${f} reloads the whole page: ${String(hit).trim()}`);
+  }
+});
 
 (async () => {
   for (const [name, fn] of checks) {

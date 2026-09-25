@@ -43,13 +43,23 @@ const ISSUES = [
   issue('T-3', 'acc-hy', 'Hy Nguyen', '938'),
   // The two shapes the Epic column has to handle, in the sprint the tests read.
   // A Story filed UNDER an epic...
-  { ...issue('T-4', 'acc-hien', 'Hien Phan', '938'),
+  /* Components on T-4 and T-5, so "Test cases by component" has real rows to
+     hang a priority on. Without them every row is "— no component —", which
+     is a placeholder rather than a suite and cannot carry a judgement. */
+  { ...issue('T-4', 'acc-hien', 'Hien Phan', '938'), components: ['PS_iGO_NLG'],
     parentKey: 'T-900', parentStatus: 'In Progress',
     parentSummary: 'Renewals regression suite', parentType: 'Epic' },
   // ...and a maintenance ticket LINKED to one.
-  { ...issue('T-5', 'acc-thao', 'Thao Dang', '938'),
+  { ...issue('T-5', 'acc-thao', 'Thao Dang', '938'), components: ['KAT_Common'],
     issueType: 'Task', labels: ['Maintenance'],
     relatesTo: [{ key: 'T-901', summary: 'Quoting regression suite', type: 'Epic' }] },
+  /* An EPIC on the same component. The Coverage grid is built from epics and
+     the sprint table from sprint work, so without this the two screens share
+     no component and a check comparing their priorities compares nothing —
+     which is how it first passed. */
+  { ...issue('T-900', null, null, '938'), issueType: 'Epic', components: ['PS_iGO_NLG'],
+    status: 'In Progress', statusCategory: 'indeterminate', automationStatus: 'Automated',
+    summary: 'Renewals regression suite', sprints: [], datasets: ['epics'] },
 ];
 
 fs.writeFileSync(path.join(SCRATCH, 'store', 'plan.json'), JSON.stringify({
@@ -123,6 +133,7 @@ const call = (method, p, body) => new Promise((resolve, reject) => {
   req.end();
 });
 
+const round2 = (n) => Math.round(n * 100) / 100;
 let passed = 0, failed = 0;
 const checks = [];
 const check = (name, fn) => checks.push([name, fn]);
@@ -592,6 +603,195 @@ check('AN OPEN REGISTER ENTRY REACHES THE SPRINT PAGE, a closed one does not', a
   // closed items in is not a register.
   const all = (await call('GET', '/api/risks?team=titan&sprint=S39')).body.manual.map(x => x.title);
   assert.ok(all.includes('Already handled'), 'the full register still has to hold it');
+});
+
+check('THE SPRINT ROUTE SENDS HIS COMPONENT PRIORITIES', async () => {
+  /* The Test-cases-by-component table shows them. The view is checked in
+     sprint-view.test.js against a payload that harness assembles the way this
+     route does; what has to be checked HERE is that the route really sends
+     them — a harness agreeing with itself is the one thing it can always do. */
+  const set = await call('PUT', '/api/component-priority', { component: 'PS_iGO_NLG', level: 1 });
+  assert.strictEqual(set.status, 200, `could not set a priority: ${JSON.stringify(set.body)}`);
+
+  // S38 is the sprint this fixture's items are in.
+  const r = await call('GET', '/api/sprint?team=titan&sprint=S38');
+  assert.ok(Array.isArray(r.body.priorityLevels) && r.body.priorityLevels.length === 4,
+    'the four levels have to travel with the rows, or the tag has no colour');
+  const rows = (r.body.testCases || {}).rows || [];
+  assert.ok(rows.length, 'the fixture needs test-case rows');
+  assert.ok(rows.every(x => 'priority' in x),
+    'a row with no priority key renders a blank cell, not a dash');
+  /* NOT `if (nlg)`. A guard there makes the whole check pass on a fixture with
+     no component rows at all — which is exactly what this fixture had until
+     T-4 and T-5 were given components, and the check was green throughout. */
+  const nlg = rows.find(x => x.component === 'PS_iGO_NLG');
+  assert.ok(nlg, `no PS_iGO_NLG row — rows are ${rows.map(x => x.component).join(', ')}`);
+  assert.strictEqual(nlg.priority, 1, 'the priority he set is not on the row');
+  assert.ok(rows.some(x => x.priority == null), 'and an unjudged component stays unjudged');
+  // And unset stays unset rather than becoming a level.
+  for (const x of rows.filter(y => y.component !== 'PS_iGO_NLG')) {
+    assert.ok(x.priority == null || [1, 2, 3, 4].includes(x.priority));
+  }
+});
+
+check('and it is the SAME judgement the Coverage grid shows', async () => {
+  // One owner, several readers. If these ever diverge, one screen is telling
+  // him a component matters and the other is not.
+  const sprint = await call('GET', '/api/sprint?team=titan&sprint=S38');
+  const cov = await call('GET', '/api/reports/coverage');
+  const byName = Object.fromEntries((cov.body.byComponent || []).map(r => [r.component, r.priority]));
+  const rows = (sprint.body.testCases || {}).rows || [];
+  assert.ok(rows.some(r => r.component in byName),
+    'the two screens share no component — this check would compare nothing');
+  for (const r of rows) {
+    if (!(r.component in byName)) continue;
+    assert.strictEqual(r.priority ?? null, byName[r.component] ?? null,
+      `${r.component}: the sprint screen and the coverage grid disagree about its priority`);
+  }
+});
+
+/* ── CALC EXEMPT ──────────────────────────────────────────────────────
+   On the roster, out of the capacity arithmetic. The model is checked in
+   capacity.test.js; what has to be checked here is that the round trip works
+   — the toggle is stored, survives, reaches the grid, and can be cleared. */
+
+check('EXEMPTING SOMEONE TAKES THEIR HOURS OUT OF THE TEAM CAPACITY', async () => {
+  const before = await call('GET', '/api/capacity?team=titan&sprint=S39');
+  const who = (before.body.rows || []).find(r => r.capacityHours > 0);
+  assert.ok(who, 'the fixture needs somebody with hours to remove');
+
+  const r = await call('PUT', '/api/calc-exempt', { teamId: 'titan', sprintId: 'S39', memberId: who.memberId, exempt: true });
+  assert.strictEqual(r.status, 200, JSON.stringify(r.body));
+
+  const after = await call('GET', '/api/capacity?team=titan&sprint=S39');
+  assert.strictEqual(after.body.totals.capacityHours,
+    round2(before.body.totals.capacityHours - who.capacityHours),
+    'their hours did not come out of the total');
+  assert.strictEqual(after.body.totals.headcount, before.body.totals.headcount - 1);
+  assert.strictEqual(after.body.totals.exempt, 1);
+
+  const row = after.body.rows.find(x => x.memberId === who.memberId);
+  assert.ok(row, 'the exempt member must stay on the grid — they are on the sprint');
+  assert.strictEqual(row.calcExempt, true);
+  assert.strictEqual(row.capacityHours, 0);
+});
+
+check('and their committed work is still in the sprint', async () => {
+  // `totals.planned` is the sprint's Committed figure and the burndown's
+  // starting height. It must not move when somebody is exempted.
+  const cap = await call('GET', '/api/capacity?team=titan&sprint=S39');
+  const sp = await call('GET', '/api/sprint?team=titan&sprint=S39');
+  assert.strictEqual(sp.body.totals.planned, cap.body.totals.planned,
+    'the two screens have to agree about what was committed');
+});
+
+check('CLEARING IT PUTS THE HOURS BACK', async () => {
+  const on = await call('GET', '/api/capacity?team=titan&sprint=S39');
+  const who = (on.body.rows || []).find(r => r.calcExempt);
+  assert.ok(who, 'nothing is exempt to clear');
+
+  const r = await call('PUT', '/api/calc-exempt', { teamId: 'titan', sprintId: 'S39', memberId: who.memberId, exempt: false });
+  assert.strictEqual(r.status, 200);
+  assert.strictEqual(r.body.exempt, false);
+
+  const off = await call('GET', '/api/capacity?team=titan&sprint=S39');
+  assert.strictEqual(off.body.totals.exempt, 0);
+  assert.ok(off.body.totals.capacityHours > on.body.totals.capacityHours, 'the hours did not come back');
+  assert.strictEqual(off.body.rows.find(x => x.memberId === who.memberId).calcExempt, false);
+});
+
+check('IT IS PER SPRINT — exempting in one does not exempt in another', async () => {
+  /* Being lent to another project is a thing that happens for a fortnight.
+     A flag that leaked across sprints would quietly plan every future sprint
+     without that person. */
+  const who = (await call('GET', '/api/capacity?team=titan&sprint=S39')).body.rows.find(r => r.capacityHours > 0);
+  await call('PUT', '/api/calc-exempt', { teamId: 'titan', sprintId: 'S39', memberId: who.memberId, exempt: true });
+
+  const other = await call('GET', '/api/capacity?team=titan&sprint=S40');
+  const there = other.body.rows.find(x => x.memberId === who.memberId);
+  if (there) assert.strictEqual(there.calcExempt, false, 'the exemption leaked into another sprint');
+  assert.strictEqual(other.body.totals.exempt || 0, 0);
+
+  await call('PUT', '/api/calc-exempt', { teamId: 'titan', sprintId: 'S39', memberId: who.memberId, exempt: false });
+});
+
+check('a CLOSED sprint refuses it, like every other capacity write', async () => {
+  // S38 is closed. Re-planning history is the thing the lock exists to stop.
+  const r = await call('PUT', '/api/calc-exempt', { teamId: 'titan', sprintId: 'S38', memberId: 'm1', exempt: true });
+  assert.strictEqual(r.status, 409, `expected a refusal, got ${r.status}`);
+});
+
+/* ── A SPRINT'S REAL SPAN ─────────────────────────────────────────────
+   Jira records what someone clicked, not what the team did. "TT Week 14Sep"
+   is stored 13–27 Sep and really ran 14–30 Sep — a sprint extended in the
+   world and never extended in the tool, which nothing derivable from the
+   timestamps can find because there is nothing wrong with them to find. */
+
+check('AN OVERRIDDEN SPAN CHANGES THE WORKING DAYS THE SCREEN COUNTS', async () => {
+  const before = await call('GET', '/api/sprint?team=titan&sprint=S38');
+  const was = before.body.window.workingDays;
+
+  const r = await call('PUT', '/api/sprint/dates', { sprintId: 'S38', start: '2026-09-14', end: '2026-09-30' });
+  assert.strictEqual(r.status, 200, JSON.stringify(r.body));
+  assert.strictEqual(r.body.workingDays, 13, 'the route has to say what it works out to');
+
+  const after = await call('GET', '/api/sprint?team=titan&sprint=S38');
+  assert.strictEqual(after.body.window.workingDays, 13,
+    `the screen still counts ${after.body.window.workingDays} — the override did not reach it`);
+  assert.notStrictEqual(was, 13, 'the fixture has to actually change, or this proves nothing');
+  // 14 Sep → 30 Sep is 17 days, which snapToWeeks leaves alone. If it were
+  // snapped to a fortnight this would be 10 and the override would look broken.
+  assert.strictEqual(after.body.window.days.length, 17);
+});
+
+check('and it reaches the sprint list as well as the sprint screen', async () => {
+  // `reconcile.forTeam` prefers the TEAM's dates over the calendar row's, so
+  // an override applied to only one of them shows a page disagreeing with
+  // itself: the list saying one span and the screen counting another.
+  const list = await call('GET', '/api/sprints?team=titan');
+  // The route buckets by state — closed | active | future | unknown | local.
+  const all = [].concat(list.body.closed || [], list.body.active || [],
+    list.body.future || [], list.body.unknown || [], list.body.local || []);
+  const s = all.find(x => x.id === 'S38');
+  assert.ok(s, `S38 is not in the list — got ${all.map(x => x.id).join(', ')}`);
+  assert.strictEqual(s.start, '2026-09-14');
+  assert.strictEqual(s.end, '2026-09-30');
+  assert.ok(s.jiraEnd && s.jiraEnd !== s.end, "Jira's own end has to be kept, so the change can be traced");
+});
+
+check('A SYNC CANNOT UNDO IT — that is the whole point of it being a decision', async () => {
+  /* The trap this feature exists to avoid: the per-team dates every screen
+     reads are rewritten from Jira on every sync, so a fix applied to those
+     reverts silently the next time anyone presses Sync. */
+  const re = await call('POST', '/api/reconcile', {});
+  assert.ok(re.status === 200 || re.status === 400, `unexpected ${re.status}`);
+  const after = await call('GET', '/api/sprint?team=titan&sprint=S38');
+  assert.strictEqual(after.body.window.workingDays, 13, 'a sync put Jira\'s dates back');
+});
+
+check('and clearing it hands the sprint back to Jira', async () => {
+  const r = await call('PUT', '/api/sprint/dates', { sprintId: 'S38' });
+  assert.strictEqual(r.status, 200);
+  assert.strictEqual(r.body.cleared, true);
+  const after = await call('GET', '/api/sprint?team=titan&sprint=S38');
+  assert.strictEqual(after.body.window.workingDays, 10, 'Jira\'s own span has to come back');
+});
+
+check('half an override is refused, and so is a backwards one', async () => {
+  // Half leaves the other end on Jira's value and produces a span nobody chose.
+  const half = await call('PUT', '/api/sprint/dates', { sprintId: 'S38', start: '2026-09-14' });
+  assert.strictEqual(half.status, 400);
+  assert.match(half.body.error, /both/i);
+
+  const back = await call('PUT', '/api/sprint/dates', { sprintId: 'S38', start: '2026-09-30', end: '2026-09-14' });
+  assert.strictEqual(back.status, 400);
+  assert.match(back.body.error, /before/i);
+
+  const junk = await call('PUT', '/api/sprint/dates', { sprintId: 'S38', start: '14 Sep', end: '30 Sep' });
+  assert.strictEqual(junk.status, 400);
+
+  const gone = await call('PUT', '/api/sprint/dates', { sprintId: 'nope', start: '2026-09-14', end: '2026-09-30' });
+  assert.strictEqual(gone.status, 404);
 });
 
 /* ── run ───────────────────────────────────────────────────────────── */

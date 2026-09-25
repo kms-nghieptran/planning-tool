@@ -38,6 +38,7 @@ process.env.STORE_DIR = SCRATCH;
 process.env.DB_FILE = path.join(SCRATCH, 'test.db');
 
 const db = require('../lib/db');
+const dates = require('../lib/sprint-dates');
 const imp = require('../lib/import-json');
 const project = require('../lib/project');
 const store = require('../lib/store');
@@ -166,6 +167,10 @@ const PLAN = () => ({
   holidays: ['2026-04-30', '2026-05-01'],
   availability: { 'ruby|S39|ruby-thao-dang': ['1', '1', 'WO', 'WO', '1', '1', '1', '1', '1', 'WO', 'WO', '1', '1', '0.5'] },
   support: { 'ruby|S39|ruby-thao-dang': 25 },
+  /* On the roster, out of the capacity arithmetic — a decision no sync can
+     rederive, and one a migration that drops it turns back into a full-time
+     person whose hours nobody meant to plan against. */
+  calcExempt: { 'ruby|S39|ruby-hien-phan': true },
   ceremony: { 'ruby|S39': 8.5 },
   overrides: { 'ruby|S39|ruby-abiran-lopez': { planned: 30, actual: 28 } },
   risks: [{ id: 'r1', title: 'Env unstable', severity: 'High' }],
@@ -183,6 +188,14 @@ const PLAN = () => ({
   // the Team field's own strings, which on his instance are not the board
   // names — a distinction a migration must carry through untouched.
   coverageTeams: ['Katalon PSA (Titan)', 'Katalon RDA (Ruby)'],
+  /* A sprint span he corrected by hand. Jira says one thing and the team
+     worked another, and only the plan remembers which — a migration that
+     drops this silently hands every screen Jira's figure back. */
+  /* A sprint span he corrected by hand. Kept on an id this plan no longer
+     has, so the round-trip is exercised without steering the normalisation
+     checks below — an override for a departed sprint is inert by
+     construction, which is also what happens when a sprint is removed. */
+  sprintDates: { 'S-gone': { start: '2026-01-05', end: '2026-01-21' } },
   notes: { 'ruby|S39': 'Focus on Sig regression' },
   excluded: { ruby: ['acc-zzz', 'acc-aaa', 'An Nguyen'] },
   // Roster decisions: one person put on a sprint, one taken off. These are the
@@ -277,6 +290,71 @@ check('THE STORE HANDS OUT NORMALISED SPRINT DATES', () => {
   assert.strictEqual(tt.jiraEnd, '2026-05-25', 'and Jira\'s own date is kept');
   assert.strictEqual(tt.byTeam.ruby.end, '2026-05-22', 'the team\'s own copy too, from its OWN start');
   assert.strictEqual(tt.start, '2026-05-18', 'the start is never moved');
+});
+
+check('AND HIS OWN SPAN BEATS JIRA\'S, on the row AND on every team\'s copy', () => {
+  /* The case this exists for: a sprint that really ran longer than Jira says.
+     `reconcile.forTeam` prefers the TEAM's dates over the row's, so an
+     override that reached only the row would fix the sprint list and leave
+     every sprint screen on Jira's figure — the page disagreeing with itself. */
+  const plan = PLAN();
+  plan.sprintDates = { J16178: { start: '2026-05-18', end: '2026-06-03' } };
+  imp.importAll({ snapshot: SNAPSHOT(), plan });
+  store.invalidate();
+
+  const tt = store.getPlan().sprints.find(s => s.id === 'J16178');
+  assert.strictEqual(tt.start, '2026-05-18');
+  assert.strictEqual(tt.end, '2026-06-03', `his end, got ${tt.end}`);
+  assert.strictEqual(tt.jiraEnd, '2026-05-25', "and Jira's own end is kept, to trace it back");
+  assert.strictEqual(tt.byTeam.ruby.end, '2026-06-03', "the team's copy is overridden too");
+
+  // 18 May → 3 Jun is 17 days, which `snapToWeeks` leaves alone: 13 working days.
+  const span = dates.normalise(tt);
+  assert.strictEqual(span.workingDays, 13, `got ${span.workingDays}`);
+});
+
+check('AN OVERRIDE ENDING ON A WEEKEND STILL LEAVES JIRA\'S DATES RECOVERABLE', () => {
+  /* The case that hides the leak. When his end date is already a working day,
+     `applied` normalises to the same value and returns early — so it never
+     touches the provenance `overridden` recorded, and a clobber there goes
+     unnoticed. Give it an end that has to be normalised (a Saturday) and
+     `applied` runs its assignment: if it overwrites `jiraEnd` with what it was
+     handed, that is HIS date, `restored` writes it back as though Jira had
+     said it, and the original is gone for good. That is not a display bug —
+     it is his data, destroyed on the next save. */
+  const plan = PLAN();
+  plan.sprintDates = { J16178: { start: '2026-05-18', end: '2026-06-06' } };   // Sat
+  imp.importAll({ snapshot: SNAPSHOT(), plan });
+  store.invalidate();
+
+  const tt = store.getPlan().sprints.find(s => s.id === 'J16178');
+  assert.strictEqual(tt.end, '2026-06-05', `normalised to the Friday, got ${tt.end}`);
+  assert.strictEqual(tt.jiraEnd, '2026-05-25', `Jira's own end, got ${tt.jiraEnd}`);
+
+  store.savePlan(store.getPlan());
+  store.invalidate();
+  const row = db.get('SELECT start, end FROM calendar_sprint WHERE id = ?', 'J16178');
+  assert.strictEqual(row.end, '2026-05-25', `Jira's end must survive the save, got ${row.end}`);
+  assert.strictEqual(row.start, '2026-05-18');
+});
+
+check('and saving the plan writes JIRA\'S dates back, never his override', () => {
+  /* The override is a READ-time decision. If a save persisted it, the next
+     sync would find Jira's own dates already "agreeing" and the record of what
+     Jira actually said would be gone for good. */
+  const plan = PLAN();
+  plan.sprintDates = { J16178: { start: '2026-05-18', end: '2026-06-03' } };
+  imp.importAll({ snapshot: SNAPSHOT(), plan });
+  store.invalidate();
+
+  store.savePlan(store.getPlan());          // a read-modify-write, as every route does
+  store.invalidate();
+
+  const rawRow = db.get('SELECT start, end FROM calendar_sprint WHERE id = ?', 'J16178');
+  assert.strictEqual(rawRow.start, '2026-05-18');
+  assert.strictEqual(rawRow.end, '2026-05-25', `Jira's end must survive a save, got ${rawRow.end}`);
+  // And the override is still in force on the next read.
+  assert.strictEqual(store.getPlan().sprints.find(s => s.id === 'J16178').end, '2026-06-03');
 });
 
 check('AND WHAT GOES BACK IN IS WHAT JIRA SAID', () => {
@@ -467,6 +545,36 @@ check('board sprints for a team the plan no longer has are skipped, not fatal', 
   const counts = imp.importAll({ snapshot, plan: PLAN() });
   assert.strictEqual(counts.sprintTeamLinks, 2, 'a sprint was linked to a team that does not exist');
   assert.ok(imp.verify({ snapshot, plan: PLAN() }).ok);
+});
+
+check('EVERY PLAN TABLE THE IMPORT FILLS IS ONE THE SAVE CLEARS', () => {
+  /* Two lists that have to agree, and one of them had drifted. `persist.savePlan`
+     wipes PLAN_TABLES and then re-imports; `import-json` wipes its own list on a
+     full import. A plan table missing from the FIRST list is never cleared on a
+     save, so a row can be written and never removed — which is exactly what
+     happened to `calc_exempt`: ticking the toggle worked, clearing it did
+     nothing, and the person stayed out of the capacity for good.
+
+     Checked structurally rather than by naming the tables, so the next
+     per-sprint table added cannot repeat it. */
+  const persistSrc = fs.readFileSync(path.join(__dirname, '..', 'lib', 'persist.js'), 'utf8');
+  const importSrc = fs.readFileSync(path.join(__dirname, '..', 'lib', 'import-json.js'), 'utf8');
+
+  const listIn = (src, anchor2) => {
+    const at = src.indexOf(anchor2);
+    assert.ok(at > 0, `could not find ${anchor2}`);
+    return new Set([...src.slice(at, src.indexOf(']', at)).matchAll(/'([a-z_]+)'/g)].map(m => m[1]));
+  };
+  const saved = listIn(persistSrc, 'const PLAN_TABLES = [');
+  const wiped = listIn(importSrc, "'issue_component', 'issue_label'");
+  assert.ok(saved.size > 5 && wiped.size > 5, 'the lists did not parse');
+
+  // Snapshot tables are Jira's and savePlan has no business touching them.
+  const SNAPSHOT_ONLY = new Set(['issue_component', 'issue_label', 'issue_sprint', 'issue_link',
+    'issue', 'sprint_team', 'sprint', 'board', 'person']);
+  const missing = [...wiped].filter(t => !SNAPSHOT_ONLY.has(t) && !saved.has(t));
+  assert.deepStrictEqual(missing, [],
+    `re-imported on save but never cleared, so rows cannot be deleted: ${missing.join(', ')}`);
 });
 
 console.log(`\n${passed} passed, ${failed} failed\n`);

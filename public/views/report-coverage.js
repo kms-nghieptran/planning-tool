@@ -883,12 +883,10 @@ const CoverageReport = (() => {
      value on one page is two things to keep in step, and the one that is not
      focused is the one that looks wrong. Border and text only, so a column of
      them does not shout over the percentages beside it. */
-  function priorityTag(m, value) {
-    if (value == null) return '<span class="muted">—</span>';
-    const lvl = (m && m.priorityLevels || []).find(l => l.value === Number(value)) || {};
-    const cls = lvl.key ? `prio-${UI.esc(lvl.key)}` : `prio-p${Number(value)}`;
-    return `<span class="tag prio-tag ${cls}" title="${UI.esc(lvl.name || '')}">${UI.esc(lvl.label || `P${value}`)}</span>`;
-  }
+  /* The tag itself moved to `UI.priorityTag` when the Active sprint screen
+     became its third caller. This keeps the (payload, value) shape the two
+     call sites here already use. */
+  const priorityTag = (m, value) => UI.priorityTag(value, (m && m.priorityLevels) || []);
 
   function moversTable(d, rows, m) {
     if (!rows.length) return '';

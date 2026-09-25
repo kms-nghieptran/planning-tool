@@ -55,8 +55,61 @@ const UI = (() => {
   };
   const closeDrawer = () => { $('#drawer').hidden = true; };
 
+  /* ── BUSY, WITHOUT BLANKING THE PAGE ──────────────────────────────
+     A write used to give no sign it was happening until the whole screen was
+     torn down and rebuilt — so the feedback for "I changed something" was the
+     page disappearing. This is the other half of that fix: a slim bar at the
+     top says the app is working while what you were looking at stays on
+     screen and stays readable.
+
+     COUNTED, not a boolean. Several requests overlap — a save and the refresh
+     that follows it — and a flag would be switched off by whichever finished
+     first, hiding the bar while work was still in flight.
+
+     DELAYED by a moment before it appears. Most of these calls are local and
+     answer in a few milliseconds; a bar that flashes on and straight off again
+     for every keystroke-triggered fetch is worse than no bar at all. If the
+     work is quick, nothing is ever shown. */
+  let busyCount = 0;
+  let busyTimer = null;
+  const BUSY_AFTER = 180;
+
+  function busyBar() {
+    let el2 = document.getElementById('busybar');
+    if (!el2) {
+      el2 = document.createElement('div');
+      el2.id = 'busybar';
+      el2.setAttribute('role', 'status');
+      el2.setAttribute('aria-live', 'polite');
+      el2.innerHTML = '<i></i><span class="sr-only">Working…</span>';
+      document.body.appendChild(el2);
+    }
+    return el2;
+  }
+
+  function busy(on) {
+    busyCount = Math.max(0, busyCount + (on ? 1 : -1));
+    if (busyCount > 0) {
+      if (busyTimer == null) {
+        busyTimer = setTimeout(() => { busyBar().classList.add('on'); busyTimer = null; }, BUSY_AFTER);
+      }
+      return;
+    }
+    if (busyTimer != null) { clearTimeout(busyTimer); busyTimer = null; }
+    busyBar().classList.remove('on');
+  }
+
   /* fetch wrapper that surfaces server errors as readable toasts */
   const api = async (path, options = {}) => {
+    busy(true);
+    try {
+      return await request(path, options);
+    } finally {
+      busy(false);
+    }
+  };
+
+  const request = async (path, options = {}) => {
     const res = await fetch(path, {
       ...options,
       headers: options.body && typeof options.body === 'string' && options.raw
@@ -456,6 +509,34 @@ const UI = (() => {
      and it has to be reachable by keyboard and announced as one. A zero is NOT
      a button — an em-dash that opens an empty drawer teaches people the control
      is broken, so nothing to show means nothing to click. */
+  /**
+   * A COMPONENT'S PRIORITY, AS A TAG.
+   *
+   * In ui.js rather than in the view that first needed it, because three
+   * screens now render this — the Coverage grid, TrueTest vs KSE, and Test
+   * cases by component on the Active sprint — and `priority.js` says in its own
+   * header why that matters: "a second list is how P2 ends up amber on one of
+   * them and grey on another". The levels travel from the server with the rows
+   * they describe, so the colour is the level's, not a lookup table repeated in
+   * three files.
+   *
+   * UNSET IS A DASH, not P4. Most components will never be given a priority and
+   * rendering those as the bottom of the scale claims a judgement nobody made.
+   *
+   * @param {number|null} value  1–4, or null
+   * @param {Array} levels       `priorityLevels` from the payload
+   */
+  function priorityTag(value, levels) {
+    if (value == null) return '<span class="muted">—</span>';
+    const lvl = (levels || []).find(l => l.value === Number(value)) || {};
+    const cls = lvl.key ? `prio-${esc(lvl.key)}` : `prio-p${Number(value)}`;
+    return `<span class="tag prio-tag ${cls}" title="${esc(lvl.name || '')}">${esc(lvl.label || `P${value}`)}</span>`;
+  }
+
+  /** Sorts unset last in BOTH directions — see `SORT_BLANK`. */
+  const PRIORITY_UNSET_SORT = '—';
+  const prioritySort = (value) => (value == null ? PRIORITY_UNSET_SORT : value);
+
   function drillNumber(n, attrs = {}, { zero = '—' } = {}) {
     if (!n) return `<span class="muted">${zero}</span>`;
     const data = Object.entries(attrs).map(([k, v]) => ` data-${k}="${esc(v)}"`).join('');
@@ -965,5 +1046,5 @@ const UI = (() => {
 
   return { esc, el, $, $$, num, pct, int, date, dateTime, ago, initials, avatar, personColor, workloadClass, toast, drawer, closeDrawer, api, jsonPut, jsonPost, jsonDelete, kpi, bar, mixBar, pointsFieldNote, CATEGORY_COLORS, setJiraBase, issueUrl, issueKey, issueKeys, jiraSearch, componentSearchUrl, combo, wireCombo, matchText, fitChars, sortable, sortTable, sortableTable, sortNumber,
     itemsTable, epicCell, byStatusThenPoints, statusText, statusStage, drillNumber, drillDrawer,
-    tagList, wireTagList, splitKeywords, exportPdf };
+    tagList, wireTagList, splitKeywords, exportPdf, priorityTag, prioritySort, PRIORITY_UNSET_SORT, busy };
 })();

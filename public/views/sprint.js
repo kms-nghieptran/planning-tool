@@ -486,6 +486,7 @@ const SprintView = (() => {
           <table>
             <thead><tr>
               <th>Component</th>
+              <th title="Set on the Coverage screen's component grid — this column shows it, it does not own it">Priority</th>
               <th class="num" title="Distinct parent epics of this component's Stories whose Automation Status is Automated">Automated</th>
               <th class="num" title="Parent epics of this component's Stories not yet Automated">In flight</th>
               <th class="num" title="Distinct test cases linked from this component's Bucket Stories">Maintained</th>
@@ -495,6 +496,7 @@ const SprintView = (() => {
             <tbody>${t.rows.map(r => `
               <tr>
                 <td>${UI.esc(r.component)}</td>
+                <td data-sort-value="${UI.prioritySort(r.priority)}">${UI.priorityTag(r.priority, d.priorityLevels)}</td>
                 <td class="num ${r.automated ? 'pct good' : ''}">${drill(r, 'automated')}</td>
                 <td class="num">${drill(r, 'inFlight')}</td>
                 <td class="num">${drill(r, 'maintained')}</td>
@@ -506,6 +508,7 @@ const SprintView = (() => {
             </tbody>
             <tfoot><tr>
               <td><strong>Sprint total</strong> <span class="muted" style="font-weight:400">distinct</span></td>
+              <td></td>
               <td class="num"><strong>${drill(T, 'automated')}</strong></td>
               <td class="num"><strong>${drill(T, 'inFlight')}</strong></td>
               <td class="num"><strong>${drill(T, 'maintained')}</strong></td>
