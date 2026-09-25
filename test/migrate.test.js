@@ -180,6 +180,12 @@ const PLAN = () => ({
   // is nothing in Jira to rederive it from, so losing it in a migration loses
   // it for good.
   componentPriority: { 'R&D_Sig_Regression': 1, 'KAT_Common_Maintenance': 3 },
+  // And what he wants remembered about one, in his own words — the Notes
+  // column on the Prioritization screen. Same argument as the priorities
+  // above, only more so: a note is the one thing on that page that exists
+  // nowhere else at all, so a migration that drops it cannot be repaired by
+  // re-syncing anything.
+  componentNote: { 'R&D_Sig_Regression': 'client asked us to hold until the Q3 release' },
   // Components that are not automation suites. Plan data for the same reason
   // as the priorities above: a decision, with nothing in Jira to rederive it
   // from, so a migration that drops it drops it for good.
@@ -472,6 +478,7 @@ check('ROSTER DECISIONS SURVIVE — who you put on a sprint and who you took off
   // this table knows that you decided someone belongs on the sprint anyway.
   same(plan.sprintRoster, project.plan().sprintRoster, 'sprintRoster');
   same(plan.componentPriority, project.plan().componentPriority, 'componentPriority');
+  same(plan.componentNote, project.plan().componentNote, 'componentNote');
 });
 
 check('a saved scenario survives with its numbers intact', () => {

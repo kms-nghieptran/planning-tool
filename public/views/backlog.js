@@ -5,11 +5,22 @@
 
 const BacklogView = (() => {
   let filters = { category: null, component: null, state: null, q: '' };
+  /* EVERY ITEM IS REACHABLE. This table used to draw the first 400 rows and
+     tell you to narrow the filters to see the rest — which on the Katalon
+     Automation backlog of 892 items meant 492 you could not get to at all,
+     and "narrow the filters" is no answer when what you want is to read the
+     queue rather than search it. Paged instead, through `UI.paginate`, which
+     is also what the Search screen uses. */
+  let page = 1;
+  let pageSize = 100;
   let data = null;
 
   async function render(state, mount) {
     data = await UI.api(`/api/backlog/health?team=${encodeURIComponent(state.teamId)}`);
     const d = data;
+    // A fresh payload is a fresh queue — page 7 of Titan's backlog means
+    // nothing once the team picker has moved to Ruby's 77 items.
+    page = 1;
 
     if (!d.total) {
       mount.innerHTML = `<div class="card"><div class="empty">
@@ -111,31 +122,66 @@ const BacklogView = (() => {
     }).sort((a, b) => (b.points || 0) - (a.points || 0) || String(a.key).localeCompare(b.key));
   }
 
+  /** Nothing typed, nothing chipped — the table is showing the whole queue. */
+  const unfiltered = () => !filters.q && !filters.component && !filters.state && !filters.category;
+
+  /**
+   * THE WAY OUT TO JIRA, and which of two it should be.
+   *
+   * A key list is exact but finite: it runs out of URL, and his 892-item
+   * backlog opened 393 of them. The board's backlog view has no such limit —
+   * it names the set instead of listing it — but it can only ever mean the
+   * WHOLE backlog, because a board view cannot be narrowed by a search box
+   * or a category chip that only exists in this app.
+   *
+   * So the choice follows the filters, and each link means exactly what the
+   * count beside it says:
+   *
+   *   unfiltered, board mapped → the board's backlog. Opens all of them.
+   *   filtered, or no board    → the keys, which are the only exact answer
+   *                              for a subset, truncation notice and all.
+   *
+   * The one thing that must not happen is a link that silently means a
+   * different set from the number it sits next to.
+   */
+  function jiraLink(items) {
+    const board = unfiltered() ? UI.boardBacklogUrl(data.boardId) : null;
+    if (!board) return UI.openInJira(items.map(i => i.key));
+    return `<a class="btn ghost sm" href="${UI.esc(board)}" target="_blank" rel="noopener"
+      title="Open the whole backlog — all ${UI.int(items.length)} items — on the team's Jira board">Open in Jira</a>`;
+  }
+
   function renderTable(state, mount) {
     const items = filtered();
     const blockedKeys = new Set(data.blocked.items.map(i => i.key));
     const pts = items.reduce((t, i) => t + (i.points || 0), 0);
+    /* The page is CLAMPED rather than trusted — see `UI.paginate`. Filters
+       can shrink the set under a page number that was valid a keystroke ago,
+       and `p.page` is the one actually used, so the pager and the rows below
+       it cannot disagree. */
+    const p = UI.paginate(items, page, pageSize);
+    page = p.page;
     /* OPEN IN JIRA SITS ON THE COUNT LINE, NOT IN THE SECTION HEAD.
        This line is redrawn on every filter change, so the link always opens the
        set the number beside it describes. The head holds Export CSV, which
        exports the WHOLE backlog whatever the filters say — a filtered link up
        there would read as the same scope and quietly be a different one.
 
-       It opens what the COUNT says, not the 400 rows the table draws: the row
-       cap is about what a table can usefully show, and Jira has no such
-       problem. Where the key list outgrows one URL the button says how many it
-       is opening — see `openInJira`. */
+       It opens what the COUNT says, not the rows on THIS PAGE: paging is
+       about what a screen can usefully show, and Jira has no such problem —
+       a link that opened only the hundred rows you happened to be looking at
+       would change meaning every time you pressed Next. */
     UI.$('#blTable', mount).innerHTML = items.length ? `
       <div class="muted" style="display:flex;align-items:center;gap:10px;margin-bottom:8px;font-size:12px">
         <span>${items.length} items · ${UI.num(pts)} pts</span>
         <span class="spacer"></span>
-        ${UI.openInJira(items.map(i => i.key))}
+        ${jiraLink(items)}
       </div>
       <div class="table-wrap">
         <table>
           <thead><tr><th>Key</th><th>Summary</th><th>Category</th><th>State</th><th>Component</th><th>Priority</th><th class="num">Points</th><th>Assignee</th></tr></thead>
           <tbody>
-            ${items.slice(0, 400).map(i => `
+            ${p.rows.map(i => `
               <tr>
                 <td>${UI.issueKey(i.key)}</td>
                 <td class="wrap">${UI.esc(i.summary)}</td>
@@ -151,22 +197,56 @@ const BacklogView = (() => {
           </tbody>
         </table>
       </div>
-      ${items.length > 400 ? '<div class="muted" style="margin-top:8px;font-size:12px">Showing the first 400 — narrow the filters to see the rest.</div>' : ''}
+      ${UI.pager({ ...p, pageSize, sizeId: 'blPageSize', unit: 'items' })}
     ` : '<div class="card"><div class="empty">Nothing matches these filters.</div></div>';
+
+    wirePager(state, mount);
   }
 
+  /**
+   * The pager, rewired on every draw.
+   *
+   * It is inside `#blTable`, so `renderTable` replaces these controls every
+   * time — a listener attached to the previous set of buttons is attached to
+   * nodes that are no longer on the page. Cheap to redo and impossible to
+   * get subtly wrong, which a delegated listener on a container that is
+   * itself replaced is not.
+   */
+  function wirePager(state, mount) {
+    UI.$$('[data-page]', mount).forEach(b => b.addEventListener('click', () => {
+      if (b.disabled) return;
+      page = Number(b.dataset.page);
+      renderTable(state, mount);
+    }));
+    const size = UI.$('#blPageSize', mount);
+    if (size) size.addEventListener('change', e => {
+      pageSize = Number(e.target.value) || 100;
+      // Row 250 is on a different page once the page holds 25 instead of 100,
+      // and there is no honest way to keep your place — so go back to the top
+      // rather than land somewhere arbitrary.
+      page = 1;
+      renderTable(state, mount);
+    });
+  }
+
+  /* EVERY FILTER RESETS THE PAGE. Without this, typing in the search box
+     while on page 7 leaves you on page 7 of a two-row result — the clamp in
+     `UI.paginate` saves it from rendering nothing, but landing on the last
+     page of a set you just narrowed is still not where anyone meant to be. */
+  const refilter = (state, mount) => { page = 1; renderTable(state, mount); };
+
   function wire(state, mount) {
-    UI.$('#blSearch', mount).addEventListener('input', e => { filters.q = e.target.value; renderTable(state, mount); });
-    UI.$('#blComponent', mount).addEventListener('change', e => { filters.component = e.target.value || null; renderTable(state, mount); });
+    UI.$('#blSearch', mount).addEventListener('input', e => { filters.q = e.target.value; refilter(state, mount); });
+    UI.$('#blComponent', mount).addEventListener('change', e => { filters.component = e.target.value || null; refilter(state, mount); });
     UI.$$('[data-state]', mount).forEach(b => b.addEventListener('click', () => {
       filters.state = filters.state === b.dataset.state ? null : b.dataset.state;
       UI.$$('[data-state]', mount).forEach(x => x.classList.toggle('active', x.dataset.state === filters.state));
-      renderTable(state, mount);
+      refilter(state, mount);
     }));
     UI.$$('[data-cat]', mount).forEach(b => b.addEventListener('click', () => {
       filters.category = filters.category === b.dataset.cat ? null : b.dataset.cat;
       UI.$$('[data-cat]', mount).forEach(x => x.classList.toggle('active', x.dataset.cat === filters.category));
-      renderTable(state, mount);
+      refilter(state, mount);
     }));
   }
 

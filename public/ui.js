@@ -316,6 +316,52 @@ const UI = (() => {
     return jiraSearch(`${parts.join(' AND ')} ORDER BY created DESC`);
   }
 
+  /**
+   * The same search over SEVERAL components — the shortlist on one screen.
+   *
+   * Same scope rule as the single-component version above, so the two answer
+   * the same question at two sizes rather than being two different queries
+   * that happen to agree on one row. An empty list returns null: a link that
+   * opens `component in ()` is a link to everything, which is precisely the
+   * set the reader did not ask for.
+   */
+  function componentsSearchUrl({ components = [], project = null, scope = null, includeEmpty = false }) {
+    const names = [...new Set((components || []).map(c => String(c || '').trim()).filter(Boolean))];
+    if (!names.length && !includeEmpty) return null;
+    const parts = [];
+    if (project) parts.push(`project = ${jql(project)}`);
+    if (scope) parts.push(`issuetype = ${jql(scope)}`);
+    /* THE UNTAGGED BUCKET IS A DIFFERENT CLAUSE, not another name. Epics with
+       no component cannot be named in `component in (...)` — they need
+       `component IS EMPTY`, OR'd in and BRACKETED so the project and issue
+       type still apply to both halves. Without the brackets the OR reaches
+       across the ANDs and the query returns every untagged issue in the
+       instance, which renders as a perfectly normal Jira search. */
+    const where = [];
+    if (names.length) where.push(`component in (${names.map(jql).join(', ')})`);
+    if (includeEmpty) where.push('component IS EMPTY');
+    parts.push(where.length > 1 ? `(${where.join(' OR ')})` : where[0]);
+    return jiraSearch(`${parts.join(' AND ')} ORDER BY created DESC`);
+  }
+
+  /**
+   * A board's own backlog view in Jira.
+   *
+   * WHY THIS EXISTS RATHER THAN A SEARCH. When a team has a board mapped, its
+   * backlog is read from the Agile API — the board's filter, minus anything
+   * already in a sprint or done. That is not expressible as JQL, so a key
+   * list was the only exact answer, and a key list runs out of URL: his
+   * 892-item backlog opened 393 of them and said so. This opens all of it at
+   * any size, because the set is NAMED by the board rather than enumerated.
+   *
+   * `RapidBoard.jspa` is the classic form on purpose — Jira Cloud redirects
+   * it correctly for both company-managed and team-managed projects, whereas
+   * the modern `/jira/software/...` path differs between the two and nothing
+   * in this tool knows which kind a board is.
+   */
+  const boardBacklogUrl = (boardId) =>
+    (jiraBase && boardId ? `${jiraBase}/secure/RapidBoard.jspa?rapidView=${encodeURIComponent(boardId)}&view=planning` : null);
+
   /* ── a type-to-search picker ───────────────────────────────────────────
      Built for the Coverage screen's 125 components and then wanted by the team
      and sprint pickers too, so it lives here rather than in one view. A native
@@ -1029,6 +1075,67 @@ const UI = (() => {
    * while this one keeps working. `root` is the per-render container, so the
    * listener dies with the render — the property ui-wiring.test.js pins.
    */
+  /* ── paging a list ────────────────────────────────────────────────────
+     Search has paged its results since it was built; the Backlog table used
+     to draw the first 400 rows and tell you to narrow the filters, which on
+     the Katalon Automation backlog meant 492 items you could not reach at
+     all. Both now run through here, so the two screens page identically and
+     the clamp below exists in one place rather than two.
+
+     THE CLAMP IS THE WHOLE POINT. A page number outlives the list it was
+     chosen for: you go to page 7, type into the search box, and the set is
+     suddenly nine rows long. Returning an empty slice there renders a table
+     with no rows and no explanation — the reader sees "nothing matches" for
+     a filter that matches nine things. So the page is pulled back into
+     range, and `page` in the result is the one actually used, never the one
+     that was asked for. */
+
+  /**
+   * @returns {{rows, page, pages, from, to, total}} `from`/`to` are 1-based
+   *          and inclusive, and are 0 when there is nothing to show.
+   */
+  function paginate(items, page, pageSize) {
+    const all = items || [];
+    const size = Math.max(1, Number(pageSize) || 50);
+    const pages = Math.max(1, Math.ceil(all.length / size));
+    const at = Math.min(Math.max(1, Number(page) || 1), pages);
+    const start = (at - 1) * size;
+    const rows = all.slice(start, start + size);
+    return {
+      rows, page: at, pages, total: all.length,
+      from: all.length ? start + 1 : 0,
+      to: all.length ? start + rows.length : 0,
+    };
+  }
+
+  /**
+   * The control under a paged table.
+   *
+   * Says WHERE YOU ARE IN WHAT, not just which page: "1–100 of 892" is the
+   * sentence that makes a pager trustworthy, because it names the total the
+   * filters produced. A bare "Page 1 of 9" leaves the reader multiplying.
+   *
+   * Hidden when everything fits on one page — a pager under a nine-row table
+   * is furniture.
+   *
+   * @param {string} o.sizeId  id for the per-page <select>, so a view can wire
+   *                           it; omit it to leave the size fixed.
+   */
+  function pager({ page, pages, from, to, total, pageSize, sizes = [25, 50, 100, 200], sizeId = null, unit = 'items' }) {
+    if (pages <= 1) return '';
+    return `<div class="pager">
+      <button class="btn ghost sm" data-page="1"${page === 1 ? ' disabled' : ''}>First</button>
+      <button class="btn ghost sm" data-page="${page - 1}"${page === 1 ? ' disabled' : ''}>Previous</button>
+      <span class="muted">${int(from)}–${int(to)} of ${int(total)} ${esc(unit)} · page ${page} of ${pages}</span>
+      <button class="btn ghost sm" data-page="${page + 1}"${page === pages ? ' disabled' : ''}>Next</button>
+      <button class="btn ghost sm" data-page="${pages}"${page === pages ? ' disabled' : ''}>Last</button>
+      <div class="spacer"></div>
+      ${sizeId ? `<label class="field inline"><span>Per page</span>
+        <select id="${esc(sizeId)}">${sizes.map(n => `<option${n === Number(pageSize) ? ' selected' : ''}>${n}</option>`).join('')}</select>
+      </label>` : ''}
+    </div>`;
+  }
+
   function sortable(root) {
     if (!root || !root.querySelectorAll) return;
     for (const table of root.querySelectorAll('table')) {
@@ -1225,7 +1332,7 @@ const UI = (() => {
     });
   }
 
-  return { esc, el, $, $$, num, pct, int, date, dateTime, ago, initials, avatar, personColor, workloadClass, toast, drawer, closeDrawer, api, jsonPut, jsonPost, jsonDelete, kpi, bar, mixBar, pointsFieldNote, CATEGORY_COLORS, setJiraBase, issueUrl, issueKey, issueKeys, linkKey, jiraSearch, componentSearchUrl, keysSearchUrl, openInJira, combo, wireCombo, matchText, fitChars, sortable, sortTable, sortableTable, sortNumber,
+  return { esc, el, $, $$, num, pct, int, date, dateTime, ago, initials, avatar, personColor, workloadClass, toast, drawer, closeDrawer, api, jsonPut, jsonPost, jsonDelete, kpi, bar, mixBar, pointsFieldNote, CATEGORY_COLORS, setJiraBase, issueUrl, issueKey, issueKeys, linkKey, jiraSearch, componentSearchUrl, componentsSearchUrl, boardBacklogUrl, keysSearchUrl, openInJira, combo, wireCombo, matchText, fitChars, sortable, sortTable, sortableTable, sortNumber, paginate, pager,
     itemsTable, epicCell, byStatusThenPoints, statusText, statusStage, drillNumber, drillDrawer,
     inRefinement, epicBlockerIcon, epicBlockersDrawer, testCasesDrawer,
     tagList, wireTagList, splitKeywords, exportPdf, priorityTag, prioritySort, PRIORITY_UNSET_SORT, busy };

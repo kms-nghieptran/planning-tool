@@ -12,16 +12,14 @@
    a number you cannot see the exclusions of is a number you cannot argue with. */
 
 const CoverageReport = (() => {
-  const BUCKET_COLOR = {
-    automated: 'var(--ok)',
-    maintenance: 'var(--brand-pink)',
-    ready: 'var(--brand-blue)',
-    blocked: 'var(--warn)',
-    na: 'var(--app-fg-3)',
-    obsoleted: 'var(--app-fg-3)',
-    none: 'var(--brand-purple)',
-  };
-  const TOOL_COLOR = { truetest: 'var(--brand-blue)', kse: 'var(--brand-purple)' };
+  /* THE COLOUR IS THE BUCKET'S, not this file's.
+     `BUCKETS` and `TOOLS` in lib/coverage.js now carry their own `color`, so
+     this screen and the Prioritization grid cannot paint the same status two
+     different ways — which they did until N/A and Obsoleted were split apart,
+     both of them grey. These resolve the same token the model names, by key,
+     so a bucket added there needs no second map here. */
+  const BUCKET_COLOR = new Proxy({}, { get: (_, k) => `var(--cov-${String(k)}, var(--app-fg-3))` });
+  const TOOL_COLOR = new Proxy({}, { get: (_, k) => `var(--tool-${String(k)}, var(--app-fg-3))` });
 
   // Selection lives in the module, not in the URL: this screen is a lens on one
   // dataset rather than a place you deep-link to, and App.refresh() re-renders

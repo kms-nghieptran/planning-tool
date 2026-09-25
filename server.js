@@ -28,6 +28,8 @@ const coverage = require('./lib/coverage');
 const backlogProfile = require('./lib/backlog-profile');
 const covHistory = require('./lib/coverage-history');
 const priority = require('./lib/priority');
+const componentNote = require('./lib/component-note');
+const prioritization = require('./lib/prioritization');
 const keywords = require('./lib/keywords');
 const sprintDates = require('./lib/sprint-dates');
 const reset = require('./lib/reset');
@@ -675,6 +677,67 @@ async function handleApi(req, res, url) {
     return json(res, 200, { ok: true, componentPriority: map, set: Object.keys(map).length });
   }
 
+  /* One component's note — the Notes column on the Prioritization screen.
+     Its own route for the same reason the priority beside it has one, and the
+     same two shapes: one row edited, or a whole map replaced. A blank note
+     DELETES the key, so "has a note" means one thing however the row got
+     there — see lib/component-note.js. */
+  if (p === '/api/component-note' && req.method === 'PUT') {
+    const body = await readJsonBody(req);
+    const plan = store.getPlan();
+    const current = plan.componentNote || {};
+
+    const next = body.component !== undefined
+      ? componentNote.set(current, body.component, body.note ?? null)
+      : (body.map || {});
+
+    const { map, errors } = componentNote.validate(next);
+    if (errors.length) return json(res, 400, { error: errors.map(e => e.message).join(' · '), errors });
+
+    plan.componentNote = map;
+    store.savePlan(plan);
+    store.audit('componentNote.set', {
+      component: body.component ?? null,
+      // The text itself stays out of the audit trail: it is his working note,
+      // and a log that quietly keeps every draft of it is not what a note is.
+      cleared: !map[String(body.component ?? '').trim()],
+      total: Object.keys(map).length,
+    });
+    return json(res, 200, { ok: true, componentNote: map, set: Object.keys(map).length });
+  }
+
+  /* THE PRIORITIZATION GRID — the components he has decided about, in each
+     tool, with the note he keeps on each.
+
+     Its own route rather than a slice of /api/reports/coverage: that payload
+     is the whole 125-component portfolio with movement, attention and family
+     rollups attached, and this page needs nine rows. It reads the same
+     coverage view underneath, so the two screens cannot disagree — see
+     lib/prioritization.js. */
+  if (p === '/api/prioritization' && req.method === 'GET') {
+    const snap = store.getSnapshot();
+    const m = (cfg.metrics || {});
+    const plan = store.getPlan();
+
+    /* TEAM IS OPTIONAL AND RESOLVED STRICTLY — not through `findTeam`, which
+       falls back to the first team when it does not recognise an id. That
+       fallback is right for a capacity screen that must show something; here
+       it would answer for Ruby a question asked about Titan, and the page
+       would look completely normal while doing it. An unknown id is refused,
+       and no id at all means every team. */
+    const wanted = q.get('team') || '';
+    const team = wanted ? plan.teams.find(t => t.id === wanted) : null;
+    if (wanted && !team) return json(res, 404, { error: `No team "${wanted}".` });
+
+    return json(res, 200, {
+      ...prioritization.view(snap, plan, { scope: m.coverageScope || 'Epic', team }),
+      noteMax: componentNote.MAX,
+      // So a row can open the epics it counted in Jira, against the same
+      // project and issue type the numbers came from.
+      project: cfg.jira.projectKey || null,
+    });
+  }
+
   /* How coverage MOVED. Its own route rather than more payload on
      /api/reports/coverage: that one is read on every keystroke of the component
      picker, and the movement query walks a table with a row per component per
@@ -893,7 +956,17 @@ async function handleApi(req, res, url) {
   if (p === '/api/backlog/health' && req.method === 'GET') {
     const plan = store.getPlan(), snap = store.getSnapshot();
     const team = findTeam(plan, q.get('team'));
-    return json(res, 200, { teamId: team.id, teamName: team.jiraName || team.name, ...metrics.backlogHealth(plan, snap, team) });
+    return json(res, 200, {
+      teamId: team.id, teamName: team.jiraName || team.name,
+      /* THE BOARD THE BACKLOG CAME FROM. When one is mapped these items are
+         the board's own backlog, read from the Agile API — a set no JQL can
+         reproduce, because a board is its filter plus sprint state. So the
+         only link that opens ALL of it is the board's backlog view, and the
+         screen needs the id to build one. */
+      boardId: team.boardId || null,
+      boardName: team.boardName || null,
+      ...metrics.backlogHealth(plan, snap, team),
+    });
   }
 
   if (p === '/api/risks' && req.method === 'GET') {
@@ -1393,6 +1466,25 @@ async function handleApi(req, res, url) {
       const v = insights.forecastView(plan, snap, team, { horizon: Number(q.get('horizon')) || 6 });
       name = `forecast-${team.id}`;
       rows = v.rows.map(r => ({ Sprint: r.name, Start: r.start, End: r.end, Headcount: r.headcount, 'Available days': r.availableDays, 'Capacity (hrs)': r.capacityHours, 'Capacity (pts)': r.capacityPoints, 'Committed (pts)': r.committedPoints, 'Free (pts)': r.freePoints, 'Utilisation %': r.utilisationPct }));
+    } else if (what === 'prioritization') {
+      /* THE SHEET HE ALREADY KEEPS, in the shape he keeps it — one row per
+         ranked component, the seven Automation Status columns under each tool,
+         and his note last. Built from the same `prioritization.view` the screen
+         renders, so the file and the page cannot disagree, and it exports the
+         WHOLE list whatever level chip happens to be on: a CSV of the rows that
+         survived a filter is the trap the Backlog export already avoids. */
+      /* The CSV follows the team the screen is on, so the file matches what
+         was being read when the button was pressed — but not the level chip,
+         which is a lens rather than a scope. */
+      const pzTeam = q.get('team') ? plan.teams.find(t => t.id === q.get('team')) : null;
+      const v = prioritization.view(snap, plan, { scope: (cfg.metrics || {}).coverageScope || 'Epic', team: pzTeam });
+      name = pzTeam ? `prioritization-${pzTeam.id}` : 'prioritization';
+      rows = v.rows.map(r => Object.assign(
+        { Component: r.component, Priority: r.priorityLabel },
+        ...v.tools.map(t => Object.fromEntries(
+          v.buckets.map(b => [`${t.label} — ${b.label}`, r[t.key][b.key]]))),
+        { Notes: r.note || '' },
+      ));
     } else if (what === 'risks') {
       const v = insights.riskView(plan, snap, { teamId: team.id });
       name = `risks-${team.id}`;

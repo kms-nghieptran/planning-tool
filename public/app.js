@@ -14,6 +14,17 @@ const App = (() => {
     { id: 'search', label: 'Search work items', view: () => SearchView, global: true },
     { group: 'Team' },
     { id: 'team', label: 'Overview', view: () => TeamView },
+    /* ABOVE BACKLOG. It is the shortlist the team works from — which suites
+       matter and where each stands — so it belongs before the queue rather
+       than under Reports with the readings of what already happened.
+
+       TEAM-SCOPED, through the header picker like every other team screen.
+       The priority and the note are still one per component — those are
+       global judgements and editing one here changes it everywhere — but
+       WHICH ranked components a team is carrying is a per-team question,
+       answered by the Team field on the epics inside each component. The
+       page keeps an "All teams" toggle for the portfolio reading. */
+    { id: 'prioritization', label: 'Prioritization', view: () => PrioritizationView },
     { id: 'backlog', label: 'Backlog', view: () => BacklogView, count: s => (s.teamIndex[s.teamId] || {}).backlog },
 
     { group: 'Sprints' },

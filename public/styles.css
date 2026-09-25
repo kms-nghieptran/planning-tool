@@ -62,6 +62,49 @@
   --bl-tt-maint:      #A3004A;  --bl-tt-maint-ink:  #FFFFFF;
   --bl-kse-maint:     #FF5C9B;  --bl-kse-maint-ink: #10112A;
 
+  /* COVERAGE BUCKETS — the seven Automation Status values, as one palette.
+     The model carries the var() names (see BUCKETS in lib/coverage.js) so
+     every screen that draws a bucket draws it the same colour.
+
+     Two tokens per bucket, for the same reason `--cat-*` and `--st-*` are
+     separate: `-ink` is a coloured NUMBER or WORD on a card and has to clear
+     4.5:1, while the plain token is a fill behind its own label. The inks
+     below are not new measurements — each reuses a value already proven in
+     this file, named here for the role it plays.
+
+     Hue carries STATUS and nothing else. N/A and Obsoleted were previously
+     the same grey, which made two of the seven indistinguishable; Obsoleted
+     takes purple (it is the far bigger pile) and No Status takes a neutral,
+     which is what "nobody has triaged this" should look like. */
+  --cov-automated:   var(--brand-teal);   --cov-automated-ink:   #00736A;
+  /* MAINTENANCE IS AMBER AND BLOCKED IS PINK, which is the way round they
+     should always have been: pink is this app's `--risk` colour and Blocked
+     is the state that needs someone to act, while amber is `--warn` and
+     maintenance is ongoing work rather than a problem. Swapping them is a
+     two-line edit because the model names the token and this file owns the
+     value — before the buckets carried their own colour it would have been
+     a hunt through two views. */
+  --cov-maintenance: var(--warn);         --cov-maintenance-ink: #9A5D00;
+  --cov-ready:       var(--brand-blue);   --cov-ready-ink:       #0047B3;
+  --cov-blocked:     var(--brand-pink);   --cov-blocked-ink:     #A3004A;
+  --cov-na:          var(--app-fg-3);     --cov-na-ink:          var(--app-fg-3);
+  --cov-obsoleted:   var(--brand-purple); --cov-obsoleted-ink:   #6E3AFF;
+  --cov-none:        var(--app-fg-2);     --cov-none-ink:        var(--app-fg-2);
+
+  /* THE TOOLS, on the other channel. Where a tool appears alone — a share
+     bar, an eyebrow, a legend — it takes a hue. Where it appears ALONGSIDE
+     the buckets, as on the Prioritization grid, it is a tinted band instead,
+     so the hue channel stays reserved for status. The tints are neutral on
+     purpose: a blue wash under a blue "Ready" column is a column you cannot
+     read the status off. */
+  --tool-truetest: var(--brand-blue);
+  --tool-kse:      var(--brand-purple);
+  --tool-band-a:   color-mix(in srgb, var(--brand-blue) 4%, transparent);
+  --tool-band-b:   color-mix(in srgb, var(--brand-purple) 5%, transparent);
+  /* The three columns outside the coverage ratio, dimmed as a group so the
+     four that the percentage is built from carry the eye first. */
+  --cov-outside:   color-mix(in srgb, var(--app-fg-3) 7%, transparent);
+
   /* day-grid cells */
   --day-work: transparent;
   --day-off:  color-mix(in srgb, var(--brand-pink) 16%, transparent);
@@ -92,6 +135,20 @@
   --st-doing:      #F0A93B;
   --st-review:     #A98BFF;
   --st-done:       #34D8C8;
+  /* The bucket inks, lifted off the dark card for the same reason: the
+     light-mode teal, amber, pink, blue and purple are all under 3.3:1 here,
+     and on the Prioritization grid these carry actual numbers. The fills
+     follow the brand tokens, which the block above has already lifted. */
+  --cov-automated-ink:   #34D8C8;
+  /* Swapped with Blocked here too — see the light-mode block. */
+  --cov-maintenance-ink: #F0A93B;
+  --cov-ready-ink:       #7FB3FF;
+  --cov-blocked-ink:     #FF8FB8;
+  --cov-obsoleted-ink:   #A98BFF;
+  --cov-none-ink:        var(--app-fg-2);
+  --tool-band-a:   color-mix(in srgb, var(--brand-blue) 9%, transparent);
+  --tool-band-b:   color-mix(in srgb, var(--brand-purple) 11%, transparent);
+  --cov-outside:   color-mix(in srgb, var(--app-fg-3) 10%, transparent);
   /* Lifted off the dark card, with the inks re-chosen for the new fills. */
   --bl-tt-build:      #2E5FD0;  --bl-tt-build-ink:  #FFFFFF;
   --bl-kse-build:     #7FB3FF;  --bl-kse-build-ink: #10112A;
@@ -757,6 +814,91 @@ select.prio option[value="4"] { color: var(--app-fg-3); }
 .tag.prio-tag.prio-p2 { color: var(--warn);       border-color: color-mix(in srgb, var(--warn) 55%, transparent); }
 .tag.prio-tag.prio-p3 { color: var(--brand-blue); border-color: color-mix(in srgb, var(--brand-blue) 50%, transparent); }
 .tag.prio-tag.prio-p4 { color: var(--app-fg-3);   border-color: var(--app-line); }
+
+/* ── the Prioritization grid ──────────────────────────────────────────────
+   Seventeen columns: a component, its priority, seven Automation Status
+   buckets under each of the two tools, and his note. The header is two rows,
+   so the only thing this needs beyond the base table is a rule saying where
+   one tool's block ends and the next begins — without it the fourteen number
+   columns read as one undifferentiated band and you have to count to work out
+   which tool a cell belongs to. */
+/* TWO MEANINGS, TWO CHANNELS. Hue is the STATUS — each of the seven columns
+   carries its bucket's ink on the number, so you can find Blocked down a
+   129-row grid without counting headings. Value is the TOOL — each group sits
+   on its own tint with a seam between them, which keeps the hue channel free
+   for status. Colouring both in hue means seven statuses and two tools
+   competing for one channel and neither arriving. */
+.pz th.sub { font-size: 10px; letter-spacing: .04em; font-weight: var(--font-weight-semibold, 600); }
+.pz .tool-start { border-left: 2px solid var(--app-line); }
+.pz thead tr:first-child th[colspan] { text-align: center; letter-spacing: .06em; font-size: 11px; }
+.pz tfoot td { border-top: 2px solid var(--app-line); border-bottom: none; }
+
+/* The tool bands. Tinted, not hued — see above. The header carries the
+   stronger wash so the group reads as a unit before you reach the numbers. */
+.pz td.band-a, .pz th.band-a { background: var(--tool-band-a); }
+.pz td.band-b, .pz th.band-b { background: var(--tool-band-b); }
+.pz th.tool-head { background: var(--app-subtle); }
+.pz th.tool-head.band-a { background: color-mix(in srgb, var(--tool-truetest) 12%, var(--app-subtle)); }
+.pz th.tool-head.band-b { background: color-mix(in srgb, var(--tool-kse) 12%, var(--app-subtle)); }
+
+/* The three columns outside the coverage ratio, dimmed as a group. This is
+   the most useful thing the grid can say before a single number is read:
+   the four that remain are what the percentage is built from. */
+.pz .outside { background-image: linear-gradient(var(--cov-outside), var(--cov-outside)); }
+.pz th.sub.outside { font-weight: var(--font-weight-medium, 500); }
+
+/* The number takes its bucket's ink. A zero stays muted — it is an absence,
+   and seven colours of nothing is just noise. */
+.pz td.cov-automated   .numlink { color: var(--cov-automated-ink); }
+.pz td.cov-maintenance .numlink { color: var(--cov-maintenance-ink); }
+.pz td.cov-ready       .numlink { color: var(--cov-ready-ink); }
+.pz td.cov-blocked     .numlink { color: var(--cov-blocked-ink); }
+.pz td.cov-na          .numlink { color: var(--cov-na-ink); }
+.pz td.cov-obsoleted   .numlink { color: var(--cov-obsoleted-ink); }
+.pz td.cov-none        .numlink { color: var(--cov-none-ink); }
+.pz th.sub.cov-automated   { color: var(--cov-automated-ink); }
+.pz th.sub.cov-maintenance { color: var(--cov-maintenance-ink); }
+.pz th.sub.cov-ready       { color: var(--cov-ready-ink); }
+.pz th.sub.cov-blocked     { color: var(--cov-blocked-ink); }
+.pz th.sub.cov-na          { color: var(--cov-na-ink); }
+.pz th.sub.cov-obsoleted   { color: var(--cov-obsoleted-ink); }
+.pz th.sub.cov-none        { color: var(--cov-none-ink); }
+.pz tfoot td strong { font-variant-numeric: tabular-nums; }
+
+/* NEVER COLOUR ALONE. Every heading keeps its word and its title text, and
+   this dot repeats the hue beside it — so the grid reads the same to someone
+   who cannot tell teal from blue, and the legend below names all seven. */
+.pz .pz-chip {
+  display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+  margin-right: 5px; vertical-align: middle;
+}
+
+.pz-legend {
+  display: flex; flex-wrap: wrap; gap: 6px 22px; align-items: center;
+  margin: 0 0 10px; font-size: 11px; color: var(--app-fg-2);
+}
+.pz-legend > div { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; }
+.pz-legend .outside { opacity: .75; }
+.pz-key-head {
+  text-transform: uppercase; letter-spacing: .06em; font-size: 9px;
+  color: var(--app-fg-3); margin-right: 2px;
+}
+.pz-key { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.pz-key i { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
+
+/* A ranked component with no epics at all. Dimmed rather than hidden or
+   flagged red: it is not an error, it is the gap the page exists to show. */
+.pz tr.untracked td:first-child a { color: var(--app-fg-2); }
+
+/* The note grows with what is in it and stops at a few lines, so a long one
+   cannot push the row taller than the screen. `field-sizing` does that
+   natively where it is supported; the max-height is what holds elsewhere. */
+.pz .note-col { white-space: normal; min-width: 220px; max-width: 320px; }
+.pz textarea.note {
+  min-height: 30px; max-height: 96px; padding: 5px 8px; font-size: 12px; line-height: 1.4;
+  field-sizing: content; resize: vertical;
+}
+.pz textarea.note:disabled { opacity: .6; }
 
 /* STATUS, COLOURED BY POSITION IN THE FLOW.
    Five stages, not eight statuses — "In Dev" and "In Testing" are the same

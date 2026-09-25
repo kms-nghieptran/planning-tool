@@ -225,19 +225,22 @@ const SearchView = (() => {
     return `<td class="${col.wrap ? 'wrap' : ''} ${col.mono ? 'mono' : ''} ${v ? '' : 'muted'}">${UI.esc(v == null || v === '' ? '—' : String(v))}</td>`;
   }
 
+  /**
+   * The control under the results, now `UI.pager` — the same one the Backlog
+   * table uses, so the two screens page identically rather than drifting.
+   *
+   * THIS ONE PAGES ON THE SERVER, so the rows are already the page and only
+   * the range has to be worked out here; the Backlog has the whole payload
+   * and slices it with `UI.paginate`. Different halves of the same job, one
+   * control either way.
+   */
   function pager(d) {
-    if (d.pages <= 1) return '';
-    return `<div class="pager">
-      <button class="btn ghost sm" data-page="1"${d.page === 1 ? ' disabled' : ''}>First</button>
-      <button class="btn ghost sm" data-page="${d.page - 1}"${d.page === 1 ? ' disabled' : ''}>Previous</button>
-      <span class="muted">Page ${d.page} of ${d.pages}</span>
-      <button class="btn ghost sm" data-page="${d.page + 1}"${d.page === d.pages ? ' disabled' : ''}>Next</button>
-      <button class="btn ghost sm" data-page="${d.pages}"${d.page === d.pages ? ' disabled' : ''}>Last</button>
-      <div class="spacer"></div>
-      <label class="field inline"><span>Per page</span>
-        <select id="sPageSize">${[25, 50, 100, 200].map(n => `<option${n === state.pageSize ? ' selected' : ''}>${n}</option>`).join('')}</select>
-      </label>
-    </div>`;
+    const from = d.total ? (d.page - 1) * d.pageSize + 1 : 0;
+    return UI.pager({
+      page: d.page, pages: d.pages, total: d.total, pageSize: d.pageSize,
+      from, to: d.total ? from + (d.rows || []).length - 1 : 0,
+      sizeId: 'sPageSize', unit: 'work items',
+    });
   }
 
   /** The same query, handed to Jira as JQL. Close enough to be useful, and it

@@ -542,15 +542,16 @@ check('and every view file on disk is actually loaded', () => {
  * quietly; a new table that never calls it can.
  */
 check('NO VIEW PRINTS AN ISSUE KEY WITHOUT GOING THROUGH THE HELPER', () => {
-  // `.key` is not always an issue key. Three places in the app use the name for
+  // `.key` is not always an issue key. A few places in the app use the name for
   // something else entirely, and linking those to /browse/ would 404 with
-  // confidence. Listed by the variable they read from, so adding a fourth is a
+  // confidence. Listed by the variable they read from, so adding another is a
   // deliberate act rather than a silently widened regex.
   const NOT_AN_ISSUE = {
     'backlog.js': ['c'],   // c.key — a COMPONENT name in the filter dropdown
     'fields.js': ['f'],    // f.key — a custom field's search slug
     'settings.js': ['choice'], // choice.key — a <option> value in the rule editor
     'report-coverage.js': ['lvl'], // lvl.key — a priority level's slug, not an issue
+    'prioritization.js': ['f'],    // f.key — a component family's slug: 'ps', 'rnd'
   };
 
   const offenders = [];
