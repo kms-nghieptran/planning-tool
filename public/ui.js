@@ -764,7 +764,21 @@ const UI = (() => {
    * the list shorter than the number that opened it — the one thing a drill-in
    * must never do. It is listed as itself, linked to Jira, and labelled.
    */
-  function drillDrawer({ title, meaning, keys = [], items = [], catalogue = {}, state = {} }) {
+  /**
+   * `reasons` — OPTIONAL, and why it is a parameter rather than a second drawer.
+   *
+   * One column on one table needs to say more than "here is the key": Blocked
+   * has to answer "blocked by what?", and the answer lives on a different issue
+   * from the one being listed. Every other caller passes nothing and renders
+   * exactly as before. A second drawer for the one column that needs a line of
+   * extra detail would be a second copy of the absent-key handling above, which
+   * is the part of this function worth having only once.
+   *
+   * Shape: { TEST-CASE-KEY: [{ item, summary, status, type, assignee,
+   *          waitingOn: [{ key, summary, epic }] }] } — built in the model, so
+   * the reason travels with the number instead of being re-derived here.
+   */
+  function drillDrawer({ title, meaning, keys = [], items = [], catalogue = {}, state = {}, reasons = null }) {
     const byKey = new Map((items || []).filter(Boolean).map(i => [String(i.key).toUpperCase(), i]));
     const cats = (state && state.categories) || {};
     const rows = (keys || []).map((k) => {
@@ -787,7 +801,34 @@ const UI = (() => {
         ${r.summary ? `<div style="font-size:13px">${esc(r.summary)}</div>` : ''}
         ${r.absent ? `<div class="muted" style="font-size:11.5px;margin-top:3px">Not in the local store — open it in Jira to see this ${esc(r.kind || 'item')}</div>` : ''}
         ${(r.components || []).length ? `<div class="muted" style="font-size:11.5px;margin-top:3px">${esc(r.components.join(', '))}</div>` : ''}
+        ${why(r.key)}
       </div>`;
+
+    /* THE REASON, under the thing it explains. Indented and rule-marked rather
+       than run on as another muted line, because it is about a DIFFERENT issue
+       — the sprint item holding this test case — and two keys in one flat block
+       read as one record. */
+    const why = (key) => {
+      const held = (reasons || {})[String(key).toUpperCase()] || [];
+      if (!held.length) return '';
+      return `
+        <div style="margin-top:6px;padding-left:10px;border-left:2px solid var(--app-line-soft)">
+          ${held.map(h => `
+            <div style="font-size:11.5px;margin-top:4px">
+              <span class="muted">Held by</span> ${issueKey(h.item)}
+              ${h.status ? `<span class="tag">${esc(h.status)}</span>` : ''}
+              ${h.assignee ? `<span class="muted">· ${esc(h.assignee)}</span>` : ''}
+              ${h.summary ? `<div class="muted" style="margin-top:2px">${esc(clip(h.summary, 90))}</div>` : ''}
+              <div style="margin-top:2px">
+                ${h.waitingOn && h.waitingOn.length
+                  ? `<span class="muted">waiting on</span> ${h.waitingOn.map(b =>
+                      `${issueKey(b.key)}${b.summary ? ` <span class="muted">${esc(clip(b.summary, 60))}</span>` : ''}`).join(', ')}
+                     ${h.waitingOn.some(b => b.epic) ? `<span class="muted" style="opacity:.7">— via ${issueKeys([...new Set(h.waitingOn.map(b => b.epic).filter(Boolean))])}</span>` : ''}`
+                  : '<span class="muted">nothing recorded on its epic — waiting on refinement, not on another ticket</span>'}
+              </div>
+            </div>`).join('')}
+        </div>`;
+    };
 
     /* The link opens the ROWS, not the keys handed in — they are the same set,
        but the rows are what the heading counted and what the reader is looking

@@ -247,6 +247,11 @@ const SprintView = (() => {
       items: d.items || [],
       catalogue: t.catalogue || {},
       state,
+      /* ONLY THIS COLUMN. "Automated" needs no reason — the epic's status is
+         the reason, and it is already on the row. Blocked is the one number
+         here whose explanation lives on a different issue: the sprint item
+         stuck in Refinement, and whatever THAT is waiting on. */
+      reasons: col === 'blocked' ? (t.blockedReasons || {}) : null,
     }));
   }
 
@@ -670,6 +675,7 @@ const SprintView = (() => {
     maintained: 'Test cases linked from this component’s Bucket Stories whose own Automation Status reads Automated — the suite is working again.',
     maintaining: 'Test cases linked from this component’s Bucket Stories whose own Automation Status reads Maintenance — still being fixed.',
     unclassified: 'Test cases linked from this component’s Bucket Stories whose Automation Status is neither Automated nor Maintenance — Ready for Automation, Blocked, N/A, or not set at all.',
+    blocked: 'Test cases — a Story’s parent epic, a Bucket Story’s linked suites — whose sprint item is still in Refinement, so nobody can move them yet.',
     stories: 'Sprint items of type Story.',
     buckets: 'Sprint items that are Bucket Stories — the maintenance containers.',
     items: 'Every sprint item in this component.',
@@ -679,6 +685,7 @@ const SprintView = (() => {
   const TITLE = {
     automated: 'Automated', inFlight: 'In flight',
     maintained: 'Maintained', maintaining: 'Maintaining', unclassified: 'No automation status',
+    blocked: 'Blocked — waiting on Refinement',
     stories: 'Stories', buckets: 'Bucket stories', items: 'Items', done: 'Done',
     committed: 'Committed',
   };
@@ -713,8 +720,7 @@ const SprintView = (() => {
               <th class="num" title="Parent epics of this component's Stories not yet Automated">In flight</th>
               <th class="num" title="Test cases linked from this component's Bucket Stories whose own Automation Status is Automated — working again">Maintained</th>
               <th class="num" title="Test cases linked from this component's Bucket Stories whose own Automation Status is Maintenance — still being fixed">Maintaining</th>
-              <th class="num">Stories</th><th class="num">Bucket stories</th>
-              <th class="num">Items</th><th class="num">Done</th>
+              <th class="num" title="Test cases whose Story or Bucket Story is still in Refinement — nobody can move them yet">Blocked</th>
             </tr></thead>
             <tbody>${t.rows.map(r => `
               <tr>
@@ -724,10 +730,7 @@ const SprintView = (() => {
                 <td class="num">${drill(r, 'inFlight')}</td>
                 <td class="num ${r.maintained ? 'pct good' : ''}">${drill(r, 'maintained')}</td>
                 <td class="num">${drill(r, 'maintaining')}</td>
-                <td class="num">${drill(r, 'stories')}</td>
-                <td class="num">${drill(r, 'buckets')}</td>
-                <td class="num">${drill(r, 'items')}</td>
-                <td class="num">${drill(r, 'done')}</td>
+                <td class="num ${r.blocked ? 'pct over' : ''}">${drill(r, 'blocked')}</td>
               </tr>`).join('')}
             </tbody>
             <tfoot><tr>
@@ -737,10 +740,7 @@ const SprintView = (() => {
               <td class="num"><strong>${drill(T, 'inFlight')}</strong></td>
               <td class="num"><strong>${drill(T, 'maintained')}</strong></td>
               <td class="num"><strong>${drill(T, 'maintaining')}</strong></td>
-              <td class="num">${drill(T, 'stories')}</td>
-              <td class="num">${drill(T, 'buckets')}</td>
-              <td class="num">${drill(T, 'items')}</td>
-              <td class="num">${drill(T, 'done')}</td>
+              <td class="num"><strong>${drill(T, 'blocked')}</strong></td>
             </tr></tfoot>
           </table>
         </div>
@@ -753,6 +753,11 @@ const SprintView = (() => {
             <strong>Automated</strong> means the suite is working again, <strong>Maintenance</strong> means it is
             still being fixed. Bucket Stories are excluded from Automated: every one of them hangs off the same
             maintenance container epic, which would report one epic as several automated test cases.</li>
+          ${T.blocked ? `<li class="warn"><strong>Blocked</strong> counts the same test cases as the columns beside it —
+            a Story's parent epic, a Bucket Story's linked suites — but only where that item is still in
+            <strong>Refinement</strong>. ${drill(T, 'blocked')} of them cannot move until the work in front of them is
+            refined, so they are already counted in Automated, In flight, Maintained or Maintaining as well.</li>`
+            : '<li><strong>Blocked</strong> counts test cases whose Story or Bucket Story is still in Refinement. Nothing is, this sprint.</li>'}
           ${T.unclassified ? `<li class="warn">${drill(T, 'unclassified')} linked test case${T.unclassified === 1 ? '' : 's'}
             ${T.unclassified === 1 ? 'is' : 'are'} in neither Maintained nor Maintaining — ${T.unclassified === 1 ? 'its' : 'their'}
             Automation Status is Ready for Automation, Blocked, N/A, or not set. That is a missing field in Jira, not a

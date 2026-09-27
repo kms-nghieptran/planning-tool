@@ -459,8 +459,16 @@ check('MAINTAINING IS A COLUMN OF ITS OWN, next to Maintained', async () => {
   assert.ok(at('Maintained') > 0, `Maintained is not a column header: ${order.join(' | ')}`);
   assert.strictEqual(at('Maintaining'), at('Maintained') + 1,
     `Maintaining is not straight after Maintained: ${order.join(' | ')}`);
-  assert.ok(at('Maintaining') < at('Stories'),
-    'both stay on the test-case side of the table');
+  /* The item counts — Stories, Bucket stories, Items, Done — used to sit to
+     the right of these and are no longer on the table at all; the order check
+     that referenced them would now compare against -1 and pass on anything.
+     Blocked is what follows Maintaining, and it is the last column. */
+  assert.strictEqual(at('Blocked'), at('Maintaining') + 1,
+    `Blocked is not straight after Maintaining: ${order.join(' | ')}`);
+  assert.strictEqual(at('Blocked'), order.length - 1, 'Blocked is not the last column');
+  for (const gone of ['Stories', 'Bucket stories', 'Items', 'Done']) {
+    assert.strictEqual(at(gone), -1, `${gone} is still a column on the test-case table`);
+  }
 });
 
 check('THE TABLE STILL LINES UP — header, row and footer all gained one cell', async () => {
@@ -479,7 +487,7 @@ check('THE TABLE STILL LINES UP — header, row and footer all gained one cell',
   const firstRow = body.slice(body.indexOf('<tr'), body.indexOf('</tr>'));
 
   const n = cells(head, 'th');
-  assert.ok(n >= 10, `expected the widened header, got ${n} columns`);
+  assert.ok(n >= 7, `expected the full header, got ${n} columns`);
   assert.strictEqual(cells(firstRow, 'td'), n, 'a body row is a different width from the header');
   assert.strictEqual(cells(foot, 'td'), n, 'the footer is a different width from the header');
 });
@@ -499,6 +507,33 @@ check('and the numbers on the screen are the numbers the model counted', async (
   const head = html.slice(at, html.indexOf('<table', at));
   assert.match(head, /<strong>2<\/strong>\s*maintained/, 'the headline maintained count');
   assert.match(head, /1\s*maintaining/, 'and the maintaining one beside it');
+});
+
+check('THE BLOCKED CELL SHOWS THE BLOCKED NUMBER, and drills to that set', async () => {
+  /* The cheap failure this catches: a copy-pasted cell rendering the column
+     next door. It renders perfectly, it is a plausible number, and nothing
+     else on the page contradicts it. The fixture makes the two DIFFER — with
+     Blocked and Maintaining equal, a cell reading the wrong one is invisible. */
+  const items = [
+    bucket('B-1', ['PS_A'], ['T-A', 'T-B', 'T-D'], { status: 'Refinement' }),
+    bucket('B-2', ['PS_A'], ['T-D']),
+  ];
+  const payload = payloadFor(items, MAINT_EPICS);
+  const row = payload.testCases.rows.find(r => r.component === 'PS_A');
+  assert.ok(row.blocked && row.blocked !== row.maintaining && row.blocked !== row.maintained,
+    `precondition: Blocked (${row.blocked}) must differ from the columns beside it`);
+
+  const tbl = tcTable(await renderSprint(payload));
+  const body = tbl.slice(tbl.indexOf('<tbody'), tbl.indexOf('</tbody>'));
+  const cells = [...body.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)].map(m => m[1]);
+  const last = cells[cells.length - 1];
+  assert.match(last, new RegExp(`>${row.blocked}<`),
+    `the last cell does not show the blocked count (${row.blocked}): ${last}`);
+  assert.match(last, /data-col="blocked"/, 'and it does not open the blocked set');
+
+  const foot = tbl.slice(tbl.indexOf('<tfoot'));
+  assert.match(foot, new RegExp(`data-col="blocked"[^>]*>${payload.testCases.totals.blocked}<`),
+    'the total row disagrees with the model');
 });
 
 check('THE REMAINDER IS STATED ON THE SCREEN, not silently missing', async () => {
@@ -695,6 +730,216 @@ check('and the numbers are buttons, reachable without a mouse', async () => {
   const odd = await renderSprint(payloadFor([story('A-1', 'E-1', ['R&D_"odd"'])]));
   assert.ok(!/data-scope="R&D_"odd""/.test(odd), 'a quote in a component name does not break out of the attribute');
   assert.match(odd, /data-scope="R&amp;D_&quot;odd&quot;"/, 'it is escaped');
+});
+
+/* ── BLOCKED: the test cases nobody can move ──────────────────────────── */
+
+/**
+ * A PEER OF THE COLUMNS BESIDE IT, which is the whole design of this one.
+ *
+ * Every other number on this table counts TEST CASES, resolved the same way —
+ * a Story speaks for its parent epic, a Bucket Story for the suites it relates
+ * to. Blocked counts that same set, restricted to the items still sitting in
+ * Refinement, so "3 blocked" is directly comparable with "9 automated" rather
+ * than being a count of something else that happens to share the table.
+ *
+ * The tempting implementation is to count the ITEMS in Refinement, which is a
+ * different number entirely — one bucket story in Refinement holding four
+ * suites reads as 1 there and 4 here, and 4 is the answer to "how much is
+ * held up".
+ */
+
+check("BLOCKED COUNTS A STORY'S PARENT EPIC, not the story", () => {
+  const items = [
+    story('A-1', 'E-1', ['PS_A'], { status: 'Refinement' }),
+    story('A-2', 'E-2', ['PS_A']),                            // moving along
+  ];
+  const t = insights.testCaseSummary(items, store(EPICS));
+  const row = t.rows.find(r => r.component === 'PS_A');
+  assert.strictEqual(row.blocked, 1);
+  assert.deepStrictEqual(row.keys.blocked, ['E-1'], 'the key is the epic, not the story');
+  assert.strictEqual(t.totals.blocked, 1);
+});
+
+check("AND A BUCKET STORY'S LINKED SUITES — all of them, not the one item", () => {
+  /* The number that makes the column worth having. One bucket story in
+     Refinement is one row on the board and three suites nobody can touch;
+     counting items would report 1. */
+  const items = [bucket('B-1', ['PS_A'], ['T-1', 'T-2', 'T-3'], { status: 'Refinement' })];
+  const t = insights.testCaseSummary(items, store(EPICS));
+  assert.strictEqual(t.totals.blocked, 3, 'the suites behind the item are what is held up');
+  assert.deepStrictEqual([...t.totals.keys.blocked].sort(), ['T-1', 'T-2', 'T-3']);
+});
+
+check('TWO STORIES UNDER ONE EPIC ARE ONE BLOCKED TEST CASE', () => {
+  // The same distinctness every other column on this table has. Two people
+  // refining two halves of one test case is one test case held up.
+  const items = [
+    story('A-1', 'E-1', ['PS_A'], { status: 'Refinement' }),
+    story('A-2', 'E-1', ['PS_A'], { status: 'Refinement' }),
+  ];
+  const t = insights.testCaseSummary(items, store(EPICS));
+  assert.strictEqual(t.totals.blocked, 1, 'counted the stories rather than the epic');
+});
+
+check('NOTHING ELSE IS BLOCKED — not In Dev, not Done, not Refinement-and-finished', () => {
+  const items = [
+    story('A-1', 'E-1', ['PS_A'], { status: 'In Dev' }),
+    story('A-2', 'E-2', ['PS_A'], { status: 'Done' }),
+    // Finished, still parked in the Refinement column: a workflow quirk, not
+    // work being held up. This is the case the `!isDone` guard exists for.
+    story('A-3', 'E-3', ['PS_A'], { status: 'Refinement', statusCategory: 'done' }),
+  ];
+  const t = insights.testCaseSummary(items, store(EPICS));
+  assert.strictEqual(t.totals.blocked, 0);
+});
+
+check('BLOCKED IS A SUBSET OF THE COLUMNS BESIDE IT, never a number of its own', () => {
+  /* The guarantee that makes the row readable: a blocked test case is already
+     counted under Automated, In flight, Maintained or Maintaining. If this
+     ever resolved epics its own way, the row would show a Blocked bigger than
+     the columns it is meant to qualify, and nobody could add it up. */
+  const items = [
+    story('A-1', 'E-1', ['PS_A'], { status: 'Refinement' }),
+    story('A-2', 'E-3', ['PS_A'], { status: 'Refinement' }),
+    bucket('B-1', ['PS_A'], ['T-1', 'T-100'], { status: 'Refinement' }),
+    story('A-3', 'E-2', ['PS_A']),
+  ];
+  const t = insights.testCaseSummary(items, store(EPICS));
+  const row = t.rows.find(r => r.component === 'PS_A');
+  const others = new Set([
+    ...row.keys.automated, ...row.keys.inFlight,
+    ...row.keys.maintained, ...row.keys.maintaining, ...row.keys.unclassified,
+  ]);
+  assert.ok(row.blocked > 0, 'fixture check: something has to be blocked');
+  for (const k of row.keys.blocked) {
+    assert.ok(others.has(k), `${k} is blocked but appears in none of the other columns`);
+  }
+});
+
+check('A COMPONENT WITH NOTHING IN REFINEMENT READS ZERO, and still has the key list', () => {
+  // An absent `keys.blocked` would make the drill-in throw rather than open an
+  // empty drawer — the difference between "none" and "broken".
+  const t = insights.testCaseSummary([story('A-1', 'E-1', ['PS_A'])], store(EPICS));
+  const row = t.rows.find(r => r.component === 'PS_A');
+  assert.strictEqual(row.blocked, 0);
+  assert.deepStrictEqual(row.keys.blocked, []);
+  assert.deepStrictEqual(t.totals.keys.blocked, []);
+});
+
+/* ── THE REASON, in the drawer behind Blocked ─────────────────────────── */
+
+/**
+ * A key on its own does not answer the question the column raises.
+ *
+ * "T-1 is blocked" prompts "by what?", and the answer is on a different issue
+ * entirely — the sprint item stuck in Refinement, and whatever THAT item's epic
+ * says it is waiting for. Without it the drawer sends you to Jira to find out
+ * what the screen already knew.
+ */
+
+/** An epic that names something as blocking it. */
+const heldEpic = (key, blockedBy) => ({
+  key, summary: `Epic ${key}`, issueType: 'Epic', automationStatus: 'Ready for Automation',
+  components: ['PS_A'], labels: [], blockedBy, relatesTo: [],
+});
+
+check('THE MODEL CARRIES A REASON FOR EVERY BLOCKED KEY, and for no other', () => {
+  /* The invariant that keeps the two honest: the Blocked count is the size of
+     this map's key set. A key counted with no reason opens an empty drawer; a
+     reason for a key nobody counted is a row that cannot be reached. */
+  const items = [
+    story('A-1', 'E-1', ['PS_A'], { status: 'Refinement' }),
+    bucket('M-1', ['PS_A'], ['T-1', 'T-2'], { status: 'Refinement' }),
+    story('A-2', 'E-2', ['PS_A']),
+  ];
+  const t = insights.testCaseSummary(items, store(EPICS));
+  assert.deepStrictEqual(
+    Object.keys(t.blockedReasons).sort(),
+    [...t.totals.keys.blocked].sort(),
+    'the reasons and the counted keys have parted company');
+});
+
+check('THE REASON NAMES THE ITEM HOLDING IT, with its status and owner', () => {
+  const items = [bucket('M-1', ['PS_A'], ['T-1'], { status: 'Refinement' })];
+  const t = insights.testCaseSummary(items, store(EPICS));
+  const held = t.blockedReasons['T-1'];
+  assert.strictEqual(held.length, 1);
+  assert.strictEqual(held[0].item, 'M-1');
+  assert.strictEqual(held[0].status, 'Refinement');
+  assert.strictEqual(held[0].assignee, 'Hien Phan');
+});
+
+check('TWO ITEMS HOLDING ONE TEST CASE BOTH APPEAR', () => {
+  // One test case, one Blocked count — but two people to talk to, and the
+  // drawer is where you find out there are two.
+  const items = [
+    story('A-1', 'E-1', ['PS_A'], { status: 'Refinement' }),
+    story('A-2', 'E-1', ['PS_A'], { status: 'Refinement', assignee: 'Anh Truong' }),
+  ];
+  const t = insights.testCaseSummary(items, store(EPICS));
+  assert.strictEqual(t.totals.blocked, 1, 'precondition: still one test case');
+  assert.deepStrictEqual(t.blockedReasons['E-1'].map(h => h.item), ['A-1', 'A-2']);
+});
+
+check("AND WHAT THAT ITEM IS WAITING ON, read from ITS EPIC", () => {
+  /* The link is on the epic, never on the story — the finding this whole
+     screen was rebuilt around. Reading the item's own `blockedBy` gives an
+     empty list on every real story in his sprints. */
+  const items = [story('A-1', 'E-HELD', ['PS_A'], { status: 'Refinement' })];
+  const epics = [...EPICS, heldEpic('E-HELD', [{ key: 'CLICMNTIGO-11567', summary: 'Env down' }])];
+  /* Through the REAL route, not `testCaseSummary` on its own: `epicBlockers`
+     is attached by `activeSprintView` when it decorates the items, so a bare
+     call here would hand the summary undecorated items and the waiting-on list
+     would be empty for a reason that has nothing to do with the data. */
+  const t = payloadFor(items, epics).testCases;
+  const held = t.blockedReasons['E-HELD'];
+  assert.ok(held, 'E-HELD was not counted as blocked at all');
+  assert.deepStrictEqual(held[0].waitingOn.map(b => b.key), ['CLICMNTIGO-11567']);
+  assert.strictEqual(held[0].waitingOn[0].summary, 'Env down',
+    'the summary Jira sent inside the link is the only description this will ever have');
+});
+
+check('AN ITEM WAITING ON NOTHING SAYS SO, rather than showing an empty list', () => {
+  const items = [story('A-1', 'E-1', ['PS_A'], { status: 'Refinement' })];
+  const t = insights.testCaseSummary(items, store(EPICS));
+  assert.deepStrictEqual(t.blockedReasons['E-1'][0].waitingOn, [],
+    'an absent key and an empty list are different things to the drawer');
+});
+
+check('THE DRAWER PRINTS THE REASON — held by, and waiting on', async () => {
+  const items = [story('A-1', 'E-HELD', ['PS_A'], { status: 'Refinement' })];
+  const epics = [...EPICS, heldEpic('E-HELD', [{ key: 'CLICMNTIGO-11567', summary: 'Env down' }])];
+  const r = await renderSprintClickable(payloadFor(items, epics));
+  const drawn = r.click({ act: 'drill', scope: 'PS_A', col: 'blocked' });
+  assert.ok(drawn, 'the Blocked cell opened nothing');
+  assert.match(drawn, /E-HELD/, 'the test case itself');
+  assert.match(drawn, /Held by/, 'the drawer does not say what is holding it');
+  assert.match(drawn, /A-1/, 'and does not name the item');
+  assert.match(drawn, /waiting on/, 'nor what that item is waiting for');
+  assert.match(drawn, /CLICMNTIGO-11567/, 'nor name the blocker');
+});
+
+check('and prints the unexplained case in words, not as a blank', async () => {
+  const items = [story('A-1', 'E-1', ['PS_A'], { status: 'Refinement' })];
+  const r = await renderSprintClickable(payloadFor(items));
+  const drawn = r.click({ act: 'drill', scope: 'PS_A', col: 'blocked' });
+  assert.match(drawn, /Held by/);
+  assert.match(drawn, /waiting on refinement, not on another ticket/,
+    'a blocked row with nothing recorded rendered as an empty gap');
+});
+
+check('NO OTHER COLUMN GROWS A REASON, however blocked the sprint is', async () => {
+  /* `reasons` is passed for one column. If it leaked to the others, every
+     in-flight epic under a refining story would sprout a "Held by" line and
+     the drawer would stop being a list of what the number counted. */
+  const items = [story('A-1', 'E-3', ['PS_A'], { status: 'Refinement' })];
+  const r = await renderSprintClickable(payloadFor(items));
+  const blocked = r.click({ act: 'drill', scope: 'PS_A', col: 'blocked' });
+  assert.match(blocked, /Held by/, 'precondition: this fixture does produce a reason');
+  const inFlight = r.click({ act: 'drill', scope: 'PS_A', col: 'inFlight' });
+  assert.match(inFlight, /E-3/, 'precondition: the same epic is in this column');
+  assert.ok(!/Held by/.test(inFlight), 'the reason leaked into a column that did not ask for it');
 });
 
 /* ── run ───────────────────────────────────────────────────────────── */

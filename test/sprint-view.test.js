@@ -1015,6 +1015,28 @@ check('THE COLUMN IS READ-ONLY — the Coverage grid owns the value', async () =
   assert.ok(!/data-prio|data-set-priority/.test(sec), 'and no write handler');
 });
 
+check('THE TABLE IS TEST CASES ONLY — the item counts are gone', async () => {
+  /* Stories, Bucket stories, Items and Done were sprint-item counts sitting in
+     a table about test cases, and they pushed the columns that answer the
+     question off the right-hand edge. The model still carries them — other
+     readers use the same payload — so this is a check on the SCREEN, and the
+     payload assertion underneath it is what stops the columns being deleted
+     from the model by way of "cleaning up". */
+  const { html, payload } = await renderHtml(SNAP, PRIORITISED);
+  const sec = testCaseSection(html);
+  // `<th(?=[\s>])` and not `<th`, or `<thead>` is read as a column with an
+  // empty label — the same guard the parity check below uses.
+  const heads = [...sec.matchAll(/<th(?=[\s>])[^>]*>([^<]*)</g)].map(m => m[1].trim());
+  assert.deepStrictEqual(heads,
+    ['Component', 'Priority', 'Automated', 'In flight', 'Maintained', 'Maintaining', 'Blocked'],
+    `the columns are not the ones asked for: ${heads.join(' | ')}`);
+
+  const row = payload.testCases.rows[0];
+  for (const k of ['stories', 'buckets', 'items', 'done']) {
+    assert.ok(k in row, `${k} was removed from the model, not just from the table`);
+  }
+});
+
 check('EVERY ROW AND THE FOOTER MATCH THE HEADER, column for column', async () => {
   /* The failure adding this column risks: a `<th>` with no matching `<td>` in
      the body or the FOOTER shifts every number one place left and still
@@ -1022,7 +1044,7 @@ check('EVERY ROW AND THE FOOTER MATCH THE HEADER, column for column', async () =
      once, far from the rows. */
   const sec = testCaseSection((await renderHtml(SNAP, PRIORITISED)).html);
   const cols = (sec.match(/<th(?=[\s>])[^>]*>/g) || []).length;
-  assert.ok(cols >= 9, `expected the full table, saw ${cols} columns`);
+  assert.ok(cols >= 7, `expected the full table, saw ${cols} columns`);
 
   const body = sec.slice(sec.indexOf('<tbody>'), sec.indexOf('</tbody>'));
   const rows = body.split('<tr>').slice(1);
