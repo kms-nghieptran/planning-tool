@@ -1229,6 +1229,15 @@ const theRow = (tbl, key) => {
 
 const refined = () => renderHtml(REFINE_SNAP);
 
+/* `UI` on its own, for checks that need a predicate rather than a render —
+   loaded from the same file the app loads, so it cannot drift from it. */
+const ctx0 = (() => {
+  const c = { console };
+  vm.createContext(c);
+  vm.runInContext(`${fs.readFileSync(path.join(__dirname, '..', 'public', 'ui.js'), 'utf8')}\n;globalThis.UI = UI;`, c);
+  return c.UI;
+})();
+
 check('A STORY IN REFINEMENT WHOSE EPIC IS BLOCKED GETS THE ICON', async () => {
   const { html } = await refined();
   const tbl = itemTable(html);
@@ -1461,6 +1470,92 @@ check('DUPLICATE BLOCKERS ACROSS EPICS COLLAPSE, so the count is a set', async (
   assert.match(icon, /blocked by 3 issues/, `counted the links, not the set: ${icon}`);
   const html = ctx.UI.epicBlockersDrawer(item, payload.items, {}, {});
   assert.match(html, /3 items/, 'the drawer heading disagrees with the icon');
+});
+
+/* ── THE BLOCKED NUMBER, AND THE SET BEHIND IT ────────────────────────── */
+
+/**
+ * The KPI card with this label, cut out so a match cannot come from elsewhere.
+ *
+ * BOUNDED BY THE NEXT CARD, not by a closing tag. `</div></div>` only occurs
+ * where two of them happen to be adjacent in the source, which in this markup
+ * is hundreds of lines further down the page: the first version of this helper
+ * handed back the KPI row, both cards under it and the Refinement note, so a
+ * check for the wording on the Blocked card passed on wording that lives in a
+ * different section entirely. A mutation that reverted the foot line to its old
+ * text walked straight through it.
+ */
+const kpiCard = (html, label) => {
+  const row = html.indexOf('<div class="kpis"');
+  assert.ok(row > 0, 'the KPI row did not render');
+  const section = html.slice(row, html.indexOf('</section>', row));
+  const card = section.split('<div class="kpi ').find(c => c.includes(`>${label}</div>`));
+  assert.ok(card, `no KPI labelled ${label}`);
+  // The last card in the row has no next card to stop at, so bound it on the
+  // row instead of on a closing tag and let the size assertion catch a slice
+  // that has quietly swallowed the rest of the page.
+  assert.ok(card.length < 1200, `the KPI slice ran past its card (${card.length} chars)`);
+  return card;
+};
+
+check('THE BLOCKED KPI COUNTS THE REFINEMENT COLUMN, not "is blocked by" links', async () => {
+  /* The reason this screen exists in its current form: on his sprints not one
+     Story in Refinement carries a blocker of its own, so the old reading put a
+     confident 0 above sixteen items nobody could start. R-4 is the fixture's
+     proof — it names its OWN blocker and is in Refinement; N-1 sits under a
+     blocked epic but is In Dev. Only the column decides. */
+  const { html, payload } = await refined();
+  const blocked = payload.progress.blocked;
+  const refine = payload.items.filter(i => ctx0.inRefinement(i));
+  assert.ok(refine.length >= 3, 'fixture check: several items have to be in Refinement');
+  assert.deepStrictEqual(blocked.items.map(i => i.key).sort(), refine.map(i => i.key).sort(),
+    'the KPI set is not the Refinement column');
+  assert.ok(!blocked.items.some(i => i.key === 'N-1'),
+    'an In Dev item under a blocked epic was counted');
+
+  const card = kpiCard(html, 'Blocked');
+  assert.match(card, /data-act="blocked"/, 'the number does not open anything');
+  assert.match(card, new RegExp(`>${blocked.items.length}</button>`),
+    `the card shows a different number from the payload: ${card}`);
+  assert.match(card, /in Refinement/, 'the foot line still describes the old definition');
+});
+
+check('THE DRAWER LISTS EVERY ITEM THE NUMBER COUNTED, none dropped', async () => {
+  // The one rule a drill-in cannot break: shorter than the number that opened
+  // it. R-3 names nothing at all and is exactly the row a filter would eat.
+  const { payload, ctx, mount } = await refined();
+  let drawn = '';
+  ctx.UI.drawer = (h) => { drawn = h; };
+  mount.click('blocked');
+  for (const i of payload.progress.blocked.items) {
+    assert.ok(drawn.includes(i.key), `${i.key} is in the number but not in the drawer`);
+  }
+  assert.match(drawn, new RegExp(`Blocked — ${payload.progress.blocked.items.length} items`),
+    `the heading disagrees with the KPI: ${drawn.slice(0, 200)}`);
+});
+
+check('and it says what each one is waiting on, or that nothing is recorded', async () => {
+  const { ctx, mount } = await refined();
+  let drawn = '';
+  ctx.UI.drawer = (h) => { drawn = h; };
+  mount.click('blocked');
+  // R-1's epic names CLICMNTIGO-11567; R-3's names nothing.
+  assert.match(drawn, /CLICMNTIGO-11567/, 'the blocker on the epic is not shown');
+  assert.match(drawn, /No blocker recorded/,
+    'an item with nothing behind it was shown as though it were held by a ticket');
+  assert.match(drawn, /via/, 'the drawer does not say which epic carried the block');
+});
+
+check('A SPRINT WITH NOTHING IN REFINEMENT SHOWS A ZERO THAT DOES NOT OPEN', async () => {
+  // `drillNumber` renders 0 as inert text, so this is really a check that the
+  // fixture can reach the empty case at all — and that the card does not go
+  // on advertising a drawer with nothing in it.
+  const { html, payload } = await renderHtml();
+  assert.strictEqual(payload.progress.blocked.count, 0,
+    'the base fixture has something in Refinement — this check proves nothing');
+  const card = kpiCard(html, 'Blocked');
+  assert.ok(!/data-act="blocked"/.test(card), 'an empty Blocked number still offered a drawer');
+  assert.match(card, />0</, 'the zero vanished instead of being shown');
 });
 
 /* ── editing Points, which writes to Jira ─────────────────────────────── */

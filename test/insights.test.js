@@ -76,9 +76,14 @@ const SNAP = {
     issue({ key: 'A-1', assignee: 'Thuan Dinh Cong Ngoc', points: 11, sprint: 'Katalon Titan Sprint 40', status: 'Done', components: ['R&D_iGO_E2E'] }),
     issue({ key: 'A-2', assignee: 'Hien Phan', points: 30, sprint: 'Katalon Titan Sprint 40', components: ['R&D_iGO_E2E'] }),
     issue({ key: 'A-3', assignee: 'Anh Truong', points: 5, sprint: 'Katalon Titan Sprint 40', labels: ['Maintenance'] }),
-    issue({ key: 'A-4', assignee: null, points: 4, sprint: 'Katalon Titan Sprint 40' }),
+    issue({ key: 'A-4', assignee: null, points: 4, sprint: 'Katalon Titan Sprint 40', blockedBy: ['A-9'] }),
     issue({ key: 'A-5', assignee: 'Anh Truong', points: null, sprint: 'Katalon Titan Sprint 40' }),
-    issue({ key: 'A-6', assignee: 'Hien Phan', points: 3, sprint: 'Katalon Titan Sprint 40', blockedBy: ['A-9'] }),
+    /* BLOCKED MEANS REFINEMENT NOW, so the fixture has to be able to tell the
+       two readings apart: A-6 is in Refinement and names nothing, A-4 names a
+       blocker of its own but is not in Refinement. Under the old definition
+       the count would land on A-4; under this one it lands on A-6. A fixture
+       where the same item satisfied both could not fail either way. */
+    issue({ key: 'A-6', assignee: 'Hien Phan', points: 3, sprint: 'Katalon Titan Sprint 40', status: 'Refinement' }),
     // Sprint 39 — history
     issue({ key: 'B-1', assignee: 'Thuan Dinh Cong Ngoc', points: 10, sprint: 'Katalon Titan Sprint 39', status: 'Done' }),
     issue({ key: 'B-2', assignee: 'Hien Phan', points: 18, sprint: 'Katalon Titan Sprint 39', status: 'Done' }),
@@ -333,7 +338,7 @@ await check('but someone with only a leave grid and no work stays "planned"', ()
 /* ── progress by component ────────────────────────────────────────────── */
 
 const comp = (o) => ({ points: o.points, components: o.components || [], blockedBy: o.blockedBy || [],
-  status: o.done ? 'Done' : 'Open', statusCategory: o.done ? 'done' : 'new' });
+  status: o.status || (o.done ? 'Done' : 'Open'), statusCategory: o.done ? 'done' : 'new' });
 
 await check('COMPONENT PROGRESS COUNTS DELIVERED AGAINST COMMITTED', () => {
   const r = insights.componentProgress([
@@ -382,12 +387,23 @@ await check('an item with no component gets a row rather than vanishing', () => 
 
 await check('and the rows flag what needs attention', () => {
   const r = insights.componentProgress([
-    comp({ points: 5, components: ['A_One'], blockedBy: ['X-1'] }),
+    comp({ points: 5, components: ['A_One'], status: 'Refinement' }),
+    comp({ points: 6, components: ['A_One'], status: 'Refinement' }),
     comp({ points: null, components: ['A_One'] }),
-    comp({ points: 4, components: ['A_One'], blockedBy: ['X-2'], done: true }),
+    // Finished, and still sitting in a Refinement-named column — a workflow
+    // quirk, not work being held up.
+    comp({ points: 4, components: ['A_One'], status: 'Refinement', done: true }),
+    // Names a blocker of its own but is NOT in Refinement. The tag counts the
+    // column, so this one is not blocked — and the tag has to agree with the
+    // KPI above it or the screen contradicts itself.
+    comp({ points: 2, components: ['A_One'], blockedBy: ['X-1'] }),
   ]);
   const row = r.rows[0];
-  assert.strictEqual(row.blocked, 1, 'a finished item is not still blocked');
+  /* TWO, deliberately. With one Refinement item the old reading — the item's
+     own "is blocked by" — produces a 1 as well, and a count-only check cannot
+     tell the two definitions apart. It did not, until a mutation walked
+     straight through it. */
+  assert.strictEqual(row.blocked, 2, 'the tag is not counting the Refinement column');
   assert.strictEqual(row.unestimated, 1);
 });
 
@@ -451,6 +467,37 @@ await check('blocked and unestimated items are both called out', () => {
   const v = insights.activeSprintView(PLAN, SNAP, TEAM, SPRINT, { today: MID_SPRINT });
   assert.strictEqual(v.progress.blocked.count, 1);
   assert.strictEqual(v.progress.unestimated.count, 1);
+});
+
+await check('BLOCKED IS THE REFINEMENT COLUMN, not the item\'s own "is blocked by"', () => {
+  // The two readings disagree on this fixture by design. A-6 sits in
+  // Refinement with nothing linked; A-4 names a blocker but is in progress.
+  // Reading the links instead would produce a count of the same SIZE — which
+  // is how a wrong definition survives a count-only check.
+  const v = insights.activeSprintView(PLAN, SNAP, TEAM, SPRINT, { today: MID_SPRINT });
+  const keys = v.progress.blocked.items.map(i => i.key);
+  assert.deepStrictEqual(keys, ['A-6'], `blocked on the wrong reading: ${keys.join(', ')}`);
+  assert.strictEqual(v.progress.blocked.points, 3, 'the points must follow the same set');
+});
+
+await check('and finished work in Refinement is not blocked', () => {
+  /* STILL IN THE REFINEMENT COLUMN, and finished. Moving it to a Done status
+     as well made this check green against a predicate that ignored `isDone`
+     entirely — the item was no longer in Refinement, so there was nothing for
+     the done-guard to do. Both have to be true at once or it proves nothing. */
+  const snap = { ...SNAP, issues: { ...SNAP.issues,
+    'A-6': { ...SNAP.issues['A-6'], statusCategory: 'done', resolved: '2026-09-22T00:00:00.000Z' } } };
+  const v = insights.activeSprintView(PLAN, snap, TEAM, SPRINT, { today: MID_SPRINT });
+  assert.strictEqual(v.progress.blocked.count, 0, 'a done item was still counted as held up');
+});
+
+await check('the health score says Refinement in so many words', () => {
+  // The reason line is what he reads first. "1 blocked item" sent him looking
+  // for an "is blocked by" link that does not exist.
+  const v = insights.activeSprintView(PLAN, SNAP, TEAM, SPRINT, { today: MID_SPRINT });
+  const line = v.health.reasons.map(r => r.text).find(t => /refinement/i.test(t));
+  assert.ok(line, `no reason named Refinement: ${v.health.reasons.map(r => r.text).join(' | ')}`);
+  assert.match(line, /3 pts/, 'the reason must carry the points the KPI shows');
 });
 
 await check('health is red with reasons, never a bare number', () => {
@@ -536,6 +583,32 @@ await check('risk signals cover overload, blocked work and unestimated commitmen
   assert.ok(/loaded to/.test(titles), `missing overload signal: ${titles}`);
   assert.ok(/blocked/i.test(titles), `missing blocked signal: ${titles}`);
   assert.ok(/no estimate/i.test(titles), `missing estimate signal: ${titles}`);
+});
+
+await check('THE BLOCKED SIGNAL NAMES WHAT IS HOLDING EACH ITEM, from the epic', () => {
+  /* The block is recorded on the EPIC. Reading the item's own `blockedBy` —
+     the obvious implementation, and the one this signal shipped with — printed
+     "A-6 ← " for every row: an arrow pointing at nothing, in the one line he
+     reads before deciding who to chase. */
+  const snap = { ...SNAP, issues: { ...SNAP.issues,
+    'E-HELD': { key: 'E-HELD', summary: 'Epic E-HELD', issueType: 'Epic', status: 'Open',
+      components: [], labels: [], blockedBy: ['CLICMNTIGO-11567'], relatesTo: [] },
+    'A-6': { ...SNAP.issues['A-6'], parentKey: 'E-HELD' } } };
+  const v = insights.riskView(PLAN, snap, { teamId: 'titan', sprintId: 'S40', today: MID_SPRINT });
+  const sig = v.signals.find(x => /blocked/i.test(x.title));
+  assert.ok(sig, 'no blocked signal at all');
+  assert.match(sig.detail, /A-6 ← CLICMNTIGO-11567/,
+    `the signal read the item's own links, not its epic's: ${sig.detail}`);
+});
+
+await check('and says so plainly when nothing is recorded', () => {
+  // A-6 is in Refinement under no epic at all. "A-6 ← " reads as a missing
+  // value; "A-6 (no blocker recorded)" is the actual finding, and a different
+  // conversation — that item needs refining, not escalating.
+  const v = insights.riskView(PLAN, SNAP, { teamId: 'titan', sprintId: 'S40', today: MID_SPRINT });
+  const sig = v.signals.find(x => /blocked/i.test(x.title));
+  assert.match(sig.detail, /A-6 \(no blocker recorded\)/, `detail was: ${sig.detail}`);
+  assert.ok(!/←/.test(sig.detail), 'an arrow was printed with nothing after it');
 });
 
 await check('every risk signal carries a concrete action', () => {

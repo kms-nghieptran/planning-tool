@@ -85,7 +85,7 @@ const SprintView = (() => {
           ${UI.kpi({ label: 'Done', value: UI.int(p.done), unit: 'pts', foot: `${p.donePct}% of commitment`, tone: p.donePct >= w.timeElapsedPct ? 'ok' : '' })}
           ${UI.kpi({ label: 'Sprint elapsed', value: `${w.timeElapsedPct}`, unit: '%', foot: `Day ${w.elapsed} of ${w.workingDays} working days` })}
           ${UI.kpi({ label: 'Projected landing', value: p.projected == null ? '—' : UI.int(p.projected), unit: 'pts', foot: p.projectedVsCommitted == null ? 'Not enough of the sprint elapsed' : (p.projectedVsCommitted >= 0 ? `${UI.num(p.projectedVsCommitted)} pts above commitment` : `${UI.num(Math.abs(p.projectedVsCommitted))} pts short`), tone: p.projectedVsCommitted == null ? '' : p.projectedVsCommitted < -2 ? 'risk' : 'ok' })}
-          ${UI.kpi({ label: 'Blocked', value: UI.int(p.blocked.count), unit: 'items', foot: `${UI.num(p.blocked.points)} pts held up`, tone: p.blocked.count ? 'risk' : 'ok' })}
+          ${UI.kpi({ label: 'Blocked', value: UI.drillNumber(p.blocked.count, { act: 'blocked' }, { zero: '0' }), unit: 'items', foot: `${UI.num(p.blocked.points)} pts in Refinement`, tone: p.blocked.count ? 'risk' : 'ok' })}
         </div>
       </section>
 
@@ -149,7 +149,7 @@ const SprintView = (() => {
 
       ${p.blocked.count || p.unestimated.count ? `
       <section class="section grid-2">
-        ${p.blocked.count ? card('Blocked items', 'These will become carryover unless the blockers move', p.blocked.items, state) : ''}
+        ${p.blocked.count ? card('Blocked in Refinement', 'Not ready to work yet — these become carryover unless they move', p.blocked.items, state) : ''}
         ${p.unestimated.count ? card('Committed without an estimate', 'The commitment number is only as good as these', p.unestimated.items, state) : ''}
       </section>` : ''}
 
@@ -201,6 +201,9 @@ const SprintView = (() => {
 
       const rb = e.target.closest('[data-act="refinement-blockers"]');
       if (rb) { e.preventDefault(); openRefinementDrawer(d, state); return; }
+
+      const bk = e.target.closest('[data-act="blocked"]');
+      if (bk) { e.preventDefault(); openBlockedDrawer(d, state); return; }
 
       const eb = e.target.closest('[data-act="epic-blockers"]');
       if (eb) {
@@ -276,6 +279,83 @@ const SprintView = (() => {
         <span><strong>${UI.int(held.length)}</strong> of ${UI.int(inRefinement)} in Refinement
           ${held.length === 1 ? 'is' : 'are'} waiting on ${UI.int(n)} ${n === 1 ? 'blocker' : 'blockers'}</span>
       </div>`;
+  }
+
+  /**
+   * THE SET BEHIND THE BLOCKED NUMBER.
+   *
+   * `p.blocked.items` is the list the KPI counted, handed over whole — the one
+   * rule every drill-in in this app follows, because a drawer that re-derives
+   * its own list is a drawer that can disagree with the figure that opened it.
+   * Nothing here filters, sorts by a different key, or looks at `d.items`.
+   *
+   * BY ITEM, NOT BY BLOCKER. The panel under the status chart already groups
+   * the other way round — one blocker, the items it holds — which answers
+   * "what is the one conversation to have today". This one answers "what is in
+   * my Blocked number", so it lists the items, in the order the board shows
+   * them, and puts what each is waiting on underneath.
+   *
+   * AN ITEM WITH NO RECORDED BLOCKER STILL APPEARS, labelled. Dropping it
+   * would make the list shorter than the number above it; and on this data the
+   * unexplained ones are the interesting half — an item in Refinement with
+   * nothing linked is not blocked so much as unrefined, which is a different
+   * conversation with a different person.
+   */
+  function openBlockedDrawer(d, state) {
+    const items = (d.progress.blocked || {}).items || [];
+    const cats = state.categories || {};
+    const waiting = (i) => {
+      const seen = new Map();
+      for (const g of i.epicBlockers || []) {
+        for (const b of g.blockers || []) {
+          const k = UI.linkKey(b);
+          if (k && !seen.has(k)) seen.set(k, { key: k, summary: (b && b.summary) || null, epic: g.epic });
+        }
+      }
+      return [...seen.values()];
+    };
+    const held = items.filter(i => waiting(i).length);
+    const blockers = new Set(items.flatMap(i => waiting(i).map(b => b.key)));
+
+    UI.drawer(`
+      <div class="drawer-head">
+        <div style="display:flex;align-items:center;gap:10px">
+          <h3 style="margin:0">Blocked — ${UI.int(items.length)} ${items.length === 1 ? 'item' : 'items'}</h3>
+          <span class="spacer"></span>
+          ${UI.openInJira(items.map(i => i.key))}
+        </div>
+        <div class="muted" style="font-size:12px;margin-top:4px">
+          ${UI.num(d.progress.blocked.points)} pts sitting in <strong>Refinement</strong> —
+          committed to this sprint but not ready to work.
+        </div>
+        <div class="muted" style="font-size:11.5px;margin-top:6px">
+          ${held.length
+            ? `${UI.int(held.length)} of them name what they are waiting on, across
+               ${UI.int(blockers.size)} ${blockers.size === 1 ? 'blocker' : 'blockers'}. The block is
+               recorded on the <strong>epic</strong>, not on the item, which is why the board shows nothing.`
+            : 'None of them names a blocker on its epic — these are waiting on refinement, not on another ticket.'}
+        </div>
+      </div>
+      ${items.map((i) => {
+        const on = waiting(i);
+        return `
+        <div style="padding:11px 0;border-bottom:1px solid var(--app-line-soft)">
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:4px">
+            ${UI.issueKey(i.key)}
+            ${i.category ? `<span class="tag">${UI.esc((cats[i.category] || {}).label || i.category)}</span>` : ''}
+            ${UI.statusText(i)}
+            <span class="spacer"></span>
+            ${i.assignee ? `<span class="muted" style="font-size:11.5px">${UI.esc(i.assignee)}</span>` : ''}
+            ${i.points == null ? '<span class="tag risk">no estimate</span>' : `<strong>${UI.num(i.points)} pts</strong>`}
+          </div>
+          ${i.summary ? `<div style="font-size:13px">${UI.esc(i.summary)}</div>` : ''}
+          ${on.length
+            ? `<div class="muted" style="font-size:11.5px;margin-top:4px">Waiting on ${on.map(b =>
+                `${UI.issueKey(b.key)}${b.summary ? ` <span>${UI.esc(b.summary)}</span>` : ''}`).join(', ')}
+                <span style="opacity:.7">— via ${UI.issueKeys([...new Set(on.map(b => b.epic))])}</span></div>`
+            : '<div class="muted" style="font-size:11.5px;margin-top:4px">No blocker recorded on its epic — waiting on refinement</div>'}
+        </div>`;
+      }).join('')}`);
   }
 
   /**
