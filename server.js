@@ -44,7 +44,11 @@ const repo = require('./lib/repo');
 const dbLib = require('./lib/db');
 
 const PUBLIC = path.join(__dirname, 'public');
-const CONFIG_FILE = path.join(__dirname, 'config.json');
+/* Overridable for the same reason STORE_DIR and DB_FILE are: a test that
+   needs a Jira to talk to must be able to point this at a stub, and the
+   alternative is either writing the real config.json or leaving the one
+   route that edits live issues without an end-to-end check. */
+const CONFIG_FILE = process.env.CONFIG_FILE || path.join(__dirname, 'config.json');
 
 const MIME = {
   '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8',
@@ -362,6 +366,105 @@ async function handleApi(req, res, url) {
     return json(res, 200, insights.capacityView(plan, snap, team, sprint));
   }
 
+  /* ── THE ONE ROUTE THAT WRITES TO JIRA ────────────────────────────────
+     Every other route in this file reads Jira and writes locally. This one
+     changes a real issue in a real Jira, so it is the most careful thing
+     here, and each guard below is for a failure that would otherwise be
+     silent:
+
+       · The closed-sprint rule fires for free, because the body names a team
+         AND a sprint — see `readJsonBody`. Re-estimating a finished sprint
+         rewrites history that velocity is computed from.
+
+       · THE KEY MUST BE IN THAT SPRINT. Without it this is an open endpoint
+         for editing any issue in the instance by key, which is not what a
+         capacity grid is.
+
+       · IT READS JIRA BEFORE WRITING. The local value came from the last
+         sync and someone may have re-estimated since; writing blind would
+         silently discard their number. `was` is what the screen showed, and
+         a mismatch is refused with both values rather than resolved by
+         guessing. This is the same rule as the mtime guard on committing a
+         file back to his machine.
+
+       · THE LOCAL COPY IS UPDATED FIELD-BY-FIELD, not by saving the whole
+         snapshot — that would upsert 9,543 issues and run a soft-delete
+         sweep for one number. */
+  if (p === '/api/sprint/points' && req.method === 'PUT') {
+    const body = await readJsonBody(req);           // closed-sprint guard runs here
+    const plan = store.getPlan(), snap = store.getSnapshot();
+    const key = String(body.key || '').trim().toUpperCase();
+    if (!key) return json(res, 400, { error: 'Which issue?' });
+
+    const team = (plan.teams || []).find(t => t.id === body.teamId);
+    if (!team) return json(res, 404, { error: `No team "${body.teamId}".` });
+    const sprint = (plan.sprints || []).find(s => s.id === body.sprintId);
+    if (!sprint) return json(res, 404, { error: `No sprint "${body.sprintId}".` });
+
+    const inSprint = new Set(insights.sprintIssueKeys(snap, team, sprint) || []);
+    if (!inSprint.has(key)) {
+      return json(res, 400, { error: `${key} is not in ${sprint.name || sprint.id} for ${team.name}.` });
+    }
+
+    /* A number or nothing. Clearing is a real edit — "nobody has estimated
+       this" is not the same as "this is a zero" — so null is allowed and an
+       empty string means null. Negative or non-numeric is refused rather
+       than coerced into something Jira would accept. */
+    const raw = body.points;
+    /* A NUMBER, A NUMERIC STRING, OR NOTHING — and nothing else. The type
+       check is not pedantry: `String([]).trim()` is the empty string, so an
+       array would have read as "clear the estimate" and quietly wiped a
+       number. Anything that is not a primitive is refused outright rather
+       than coerced into whatever it stringifies to. */
+    let points = null;
+    const blank = raw === null || raw === undefined || (typeof raw === 'string' && raw.trim() === '');
+    if (!blank) {
+      if (typeof raw !== 'number' && typeof raw !== 'string') {
+        return json(res, 400, { error: `${JSON.stringify(raw)} is not a points value.` });
+      }
+      points = Number(raw);
+      if (!Number.isFinite(points) || points < 0) {
+        return json(res, 400, { error: `"${raw}" is not a points value.` });
+      }
+    }
+
+    const jira = new Jira(cfg.jira || {});
+    if (!jira.configured) return json(res, 400, { error: 'Jira is not configured — add credentials in Settings.' });
+    const field = jira.storyPointsField || (snap.fields || {}).storyPointsField;
+    if (!field) return json(res, 400, { error: 'No Story Points field is known yet — run a sync first.' });
+    jira.storyPointsField = field;
+
+    try {
+      const live = await jira.fieldValue(key, field);
+      const liveNum = live == null ? null : Number(live);
+      const wasNum = body.was == null || String(body.was).trim() === '' ? null : Number(body.was);
+      if (liveNum !== wasNum) {
+        return json(res, 409, {
+          error: `${key} is ${liveNum == null ? 'unestimated' : `${liveNum} pts`} in Jira, not ${wasNum == null ? 'unestimated' : `${wasNum} pts`} as this screen showed. Somebody changed it — refresh and try again.`,
+          jira: liveNum, expected: wasNum,
+        });
+      }
+      if (liveNum === points) return json(res, 200, { ok: true, key, points, unchanged: true });
+
+      await jira.setStoryPoints(key, points);
+      /* JIRA FIRST, LOCAL SECOND. If the write fails the local copy still
+         matches Jira, which is the state a reader can act on; the reverse
+         order would leave this tool confidently showing a number Jira never
+         accepted. */
+      repo.writeField(key, 'points', points);
+      /* The snapshot projection is CACHED — without this the grid, the
+         capacity totals and the velocity all keep serving the old number
+         until something else happens to invalidate it, which is exactly the
+         "screen shows a number the database no longer holds" failure the
+         cache's own comment warns about. */
+      store.invalidate();
+      store.audit('jira.points.set', { key, from: liveNum, to: points, team: team.id, sprint: sprint.id });
+      return json(res, 200, { ok: true, key, points, from: liveNum });
+    } catch (err) {
+      return json(res, 502, { error: err.message });
+    }
+  }
+
   if (p === '/api/backlog' && req.method === 'GET') {
     const plan = store.getPlan(), snap = store.getSnapshot();
     return json(res, 200, insights.backlogView(plan, snap, { teamId: q.get('team') || null }));
@@ -396,6 +499,12 @@ async function handleApi(req, res, url) {
         rows: priority.decorate(view.testCases.rows, plan),
       } : view.testCases,
       priorityLevels: priority.LEVELS,
+      /* WHETHER THIS SPRINT CAN STILL BE WRITTEN TO. The Points cells on this
+         screen edit real Jira issues, and the server refuses a closed sprint
+         — so the page needs to know before it renders, or it offers boxes
+         that can only fail. The capacity route has carried this for the same
+         reason; this screen only needed it once it gained an editable cell. */
+      lock: lock.status(sprint, team.id),
     });
   }
 

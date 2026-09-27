@@ -204,7 +204,19 @@ const CapacityView = (() => {
            meant holding the grid in your head while you looked. Last on the
            page, because you come to it after the numbers, and sortable like
            every other grid, so "who has the big ones" is one click. */ ''}
-      ${UI.itemsTable(data.items, state, { sub: UI.esc(sprint.name || state.sprintId) })}
+      ${/* POINTS ARE EDITABLE HERE, and an edit goes to real Jira. This is
+           the screen where you balance a sprint against people's capacity,
+           which is exactly when a wrong estimate gets noticed — and having to
+           leave for Jira to fix it is how it stays wrong.
+
+           Never on a closed sprint: the server refuses those writes, and a
+           box that always fails is worse than no box. `editPoints` is opt-in
+           per caller, so the Active sprint screen keeps its read-only
+           table rather than silently becoming writable too. */ ''}
+      ${UI.itemsTable(data.items, state, {
+        sub: UI.esc(sprint.name || state.sprintId),
+        editPoints: !ro,
+      })}
     `;
 
     wire(state, mount);
@@ -435,6 +447,17 @@ const CapacityView = (() => {
       UI.$$('input', mount).forEach(i => { i.disabled = true; });
       UI.$$('#sprintNote', mount).forEach(i => { i.readOnly = true; });
     }
+
+    /* POINTS → JIRA, through the shared wiring — the Active sprint screen
+       offers the same edit and the two must behave identically. `onSaved`
+       reloads the page because the numbers ABOVE this table are derived from
+       these points: capacity used, per-person load, the over/under warnings.
+       Leaving those stale beside an edited row is a screen disagreeing with
+       itself. */
+    UI.wirePointsEdit(mount, {
+      teamId: state.teamId, sprintId: state.sprintId, readOnly: ro,
+      onSaved: () => App.refresh(),
+    });
 
     // Day cells cycle; weekends are fixed so a stray click cannot invent a working Saturday.
     UI.$$('.daygrid .day', mount).forEach(cell => {

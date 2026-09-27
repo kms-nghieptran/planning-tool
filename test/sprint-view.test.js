@@ -171,7 +171,7 @@ const VIEW = fs.readFileSync(path.join(__dirname, '..', 'public', 'views', 'spri
  * payload it was given so the checks can compare the page against the model
  * rather than against numbers typed into this file.
  */
-async function renderHtml(snap = SNAP, plan = PLAN) {
+async function renderHtml(snap = SNAP, plan = PLAN, opts = {}) {
   const view = insights.activeSprintView(plan, snap, TEAM, SPRINT, { today: MID_SPRINT });
   /* Assembled the way `/api/sprint` assembles it, risks included — the bare
      view is no longer what the page receives, and a harness that renders a
@@ -187,8 +187,13 @@ async function renderHtml(snap = SNAP, plan = PLAN) {
       ? { ...view.testCases, rows: priority.decorate(view.testCases.rows, plan) }
       : view.testCases,
     priorityLevels: priority.LEVELS,
+    /* The lock the route now sends. The Points cells on this screen edit real
+       Jira issues, so the page has to know before it renders whether this
+       sprint still accepts writes. */
+    lock: opts.lock || { readOnly: false },
   };
   let html = '';
+  const puts = [];
   const el = () => ({
     addEventListener() {}, value: '', hidden: false, dataset: {}, setAttribute() {},
     classList: { toggle() {}, contains: () => false }, select() {},
@@ -198,12 +203,32 @@ async function renderHtml(snap = SNAP, plan = PLAN) {
   // while it does, so both have to be observable.
   const printed = [];
   const ctx = {
-    console, Promise, setTimeout, encodeURIComponent, CSS: { escape: String },
+    console, Promise, setTimeout, clearTimeout, encodeURIComponent, CSS: { escape: String },
     App: { refresh() {} },
     Charts: new Proxy({}, { get: () => () => '' }),
+    /* THE SEAM IS THE NETWORK, not `UI.jsonPut`. `jsonPut` and `toast` are
+       module-private inside ui.js; the Points boxes call those bindings, not
+       the exports, so assigning `ctx.UI.jsonPut` stubs nothing — the save path
+       runs the real code all the way down to `fetch`. A stub on the export
+       bought a check that passed for the wrong reason: the save "failed"
+       because there was no `fetch` in the context at all. */
+    fetch: async (url, options = {}) => {
+      const sent = JSON.parse(options.body || '{}');
+      puts.push({ url, method: options.method, body: sent });
+      if (opts.failSave) {
+        return { ok: false, status: 409, statusText: 'Conflict',
+          text: async () => JSON.stringify({ error: opts.failSave }) };
+      }
+      return { ok: true, status: 200, statusText: 'OK',
+        text: async () => JSON.stringify({ ok: true, key: sent.key, points: sent.points }) };
+    },
+    /* Enough document for the toast. `UI.toast` is module-private — the Points
+       boxes call it directly, not through `UI.toast`, so stubbing the export
+       stubs nothing and the save path dies on a missing `#toast`. */
     document: {
       title: 'Planning Tool',
       createElement: () => ({ set innerHTML(_) {}, content: { firstElementChild: null } }),
+      querySelector: () => el(), querySelectorAll: () => [],
     },
     window: {
       print() { printed.push(ctx.document.title); },
@@ -220,9 +245,13 @@ async function renderHtml(snap = SNAP, plan = PLAN) {
 
   vm.runInContext(`${VIEW}\n;globalThis.__v = SprintView;`, ctx);
   const clicks = [];
+  const handlers = {};
   const mount = {
     style: {},
-    addEventListener: (t, fn) => { if (t === 'click') clicks.push(fn); },
+    addEventListener: (t, fn) => {
+      if (t === 'click') clicks.push(fn);
+      (handlers[t] = handlers[t] || []).push(fn);
+    },
     querySelector: () => el(), querySelectorAll: () => [],
     set innerHTML(v) { html = v; }, get innerHTML() { return html; },
     /** Fire a click as the browser would, with a target that can be `closest`ed.
@@ -233,13 +262,18 @@ async function renderHtml(snap = SNAP, plan = PLAN) {
       const target = { closest: (sel) => (sel.includes(act) ? { dataset: { act, ...data } } : null) };
       for (const fn of clicks.slice()) fn({ target, preventDefault() {} });
     },
+    /** Fire a non-click event at a specific element — the points boxes save
+        on `change`, which the click-only harness could not deliver at all. */
+    fire(type, target) {
+      for (const fn of (handlers[type] || []).slice()) fn({ target, preventDefault() {} });
+    },
   };
   await ctx.__v.render({
     teamId: 'titan', sprintId: 'S40', categories: {},
     teams: [{ id: 'titan', name: 'Katalon Titan', jiraName: 'Katalon Auto Titan' }],
     syncedAt: '2026-09-24T09:00:00.000Z',
   }, mount);
-  return { html, payload, mount, ctx, printed };
+  return { html, payload, mount, ctx, printed, puts };
 }
 
 const CAPACITY_VIEW = fs.readFileSync(path.join(__dirname, '..', 'public', 'views', 'capacity.js'), 'utf8');
@@ -1427,6 +1461,108 @@ check('DUPLICATE BLOCKERS ACROSS EPICS COLLAPSE, so the count is a set', async (
   assert.match(icon, /blocked by 3 issues/, `counted the links, not the set: ${icon}`);
   const html = ctx.UI.epicBlockersDrawer(item, payload.items, {}, {});
   assert.match(html, /3 items/, 'the drawer heading disagrees with the icon');
+});
+
+/* ── editing Points, which writes to Jira ─────────────────────────────── */
+
+/**
+ * The one control in this app that changes somebody else's data.
+ *
+ * These checks are about the SCREEN's half of that: that the boxes appear only
+ * when the sprint still accepts writes, that what they send names the issue the
+ * user typed into, and that a refusal is visible rather than silently discarded.
+ * The server's half — the read-before-write, the staleness 409 — is checked over
+ * real HTTP against a stub Jira in points-write.test.js.
+ */
+
+const boxFor = (html, key) => {
+  const at = html.indexOf(`data-points-key="${key}"`);
+  if (at < 0) return null;
+  const from = html.lastIndexOf('<input', at);
+  return html.slice(from, html.indexOf('>', at) + 1);
+};
+
+check('POINTS ARE EDITABLE ON AN OPEN SPRINT, carrying the value they started at', async () => {
+  // `data-was` is not decoration: it is what the server compares against Jira
+  // before it writes. A box that renders without it, or with the wrong value,
+  // turns every save into either a false conflict or a silent overwrite.
+  const { html, payload } = await renderHtml();
+  const withPoints = payload.items.find(i => i.points != null);
+  assert.ok(withPoints, 'fixture has no estimated item — this check proves nothing');
+  const box = boxFor(html, withPoints.key);
+  assert.ok(box, `no Points box for ${withPoints.key}`);
+  assert.match(box, new RegExp(`data-was="${withPoints.points}"`),
+    `the box would tell Jira it started at something else: ${box}`);
+  assert.match(box, new RegExp(`value="${withPoints.points}"`));
+});
+
+check('A CLOSED SPRINT RENDERS NO POINTS BOXES, because the estimate is history', async () => {
+  const { html, payload } = await renderHtml(SNAP, PLAN, { lock: { readOnly: true, reason: 'closed' } });
+  assert.ok(payload.items.length, 'no items at all — the check is vacuous');
+  assert.ok(!html.includes('data-points-key'),
+    'a closed sprint still offered editable estimates');
+  // ...and the numbers are still THERE. Read-only is not blank.
+  const withPoints = payload.items.find(i => i.points != null);
+  assert.match(itemsSection(html), new RegExp(`>${withPoints.points}<`),
+    'read-only dropped the numbers instead of just the inputs');
+});
+
+check('CHANGING A BOX SAVES THAT ISSUE, with the team and sprint on screen', async () => {
+  const { payload, mount, puts } = await renderHtml();
+  const item = payload.items.find(i => i.points != null);
+  mount.fire('change', {
+    closest: (sel) => (sel.includes('data-points-key')
+      ? { dataset: { pointsKey: item.key, was: String(item.points) }, value: '13', disabled: false }
+      : null),
+  });
+  await new Promise(r => setTimeout(r, 0));
+  assert.equal(puts.length, 1, 'the edit reached Jira zero times, or more than once');
+  assert.equal(puts[0].url, '/api/sprint/points');
+  assert.equal(puts[0].method, 'PUT');
+  assert.deepStrictEqual(puts[0].body,
+    { teamId: 'titan', sprintId: 'S40', key: item.key, points: 13, was: item.points });
+});
+
+check('A BOX THAT DID NOT CHANGE SAVES NOTHING, so a blur is not a write', async () => {
+  const { payload, mount, puts } = await renderHtml();
+  const item = payload.items.find(i => i.points != null);
+  mount.fire('change', {
+    closest: () => ({ dataset: { pointsKey: item.key, was: String(item.points) },
+      value: String(item.points), disabled: false }),
+  });
+  await new Promise(r => setTimeout(r, 0));
+  assert.equal(puts.length, 0, `tabbing through a box wrote to Jira: ${JSON.stringify(puts)}`);
+});
+
+check('A REFUSED SAVE PUTS THE OLD NUMBER BACK, rather than showing a lie', async () => {
+  // The failure that matters is not the error: it is the box left showing the
+  // number you typed, which reads exactly like a box that saved.
+  const { payload, mount } = await renderHtml(SNAP, PLAN, { failSave: 'Jira refused the edit' });
+  const item = payload.items.find(i => i.points != null);
+  const box = { dataset: { pointsKey: item.key, was: String(item.points) }, value: '99', disabled: false };
+  mount.fire('change', { closest: () => box });
+  await new Promise(r => setTimeout(r, 0));
+  assert.equal(box.value, String(item.points), 'the refused value stayed on screen');
+  assert.equal(box.dataset.was, String(item.points), 'a failed save moved the baseline');
+  assert.equal(box.disabled, false, 'the box was left disabled — the row is now unusable');
+});
+
+check('A CLOSED SPRINT WIRES NO SAVE HANDLER, belt as well as braces', async () => {
+  // Not the same guarantee as "renders no boxes". Something else on the page
+  // could carry `data-points-key` one day; the handler must not be listening
+  // at all when the sprint is shut.
+  const open = await renderHtml();
+  const shut = await renderHtml(SNAP, PLAN, { lock: { readOnly: true } });
+  const item = open.payload.items.find(i => i.points != null);
+  const target = { closest: () => ({ dataset: { pointsKey: item.key, was: '1' }, value: '8', disabled: false }) };
+  shut.mount.fire('change', target);
+  await new Promise(r => setTimeout(r, 0));
+  assert.equal(shut.puts.length, 0, 'a closed sprint still saved an edit to Jira');
+  // And the same event on an OPEN sprint does save — otherwise the line above
+  // passes because `fire` reaches nothing on either screen.
+  open.mount.fire('change', target);
+  await new Promise(r => setTimeout(r, 0));
+  assert.equal(open.puts.length, 1, 'the harness cannot deliver a change event at all');
 });
 
 /* ── run ──────────────────────────────────────────────────────────────── */

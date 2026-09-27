@@ -263,6 +263,17 @@ check('AND SO DOES THE CAPACITY GRID ITSELF, not just the roster endpoint', asyn
     'three people must not be given four people\'s capacity');
 });
 
+check('THE ACTIVE SPRINT SCREEN IS TOLD WHETHER IT MAY WRITE', async () => {
+  // Its own check, on its own route. /api/capacity carries a lock too, and its
+  // check above stays green even when this one forgets — which would leave the
+  // sprint page offering Points boxes on a closed sprint that can only fail at
+  // the server. The boxes are rendered from THIS field.
+  const shut = await call('GET', '/api/sprint?team=titan&sprint=S38');
+  assert.strictEqual(shut.body.lock.readOnly, true, 'a closed sprint said it was writable');
+  const open = await call('GET', '/api/sprint?team=titan&sprint=S39');
+  assert.strictEqual(open.body.lock.readOnly, false, 'an open sprint said it was read-only');
+});
+
 check('the active sprint shows all four, and says which have work', async () => {
   const r = await call('GET', '/api/sprint/roster?team=titan&sprint=S39');
   assert.strictEqual(r.body.counts.total, 4);

@@ -897,6 +897,30 @@ select.prio option[value="4"] { color: var(--app-fg-3); }
    say which column each switch governs. A column that is ON reads as an
    ordinary chip carrying its bucket's colour; one that is OFF is dimmed and
    struck through, the same treatment the legend gives it. */
+/* ── the editable Points cell ─────────────────────────────────────────────
+   QUIET UNTIL YOU APPROACH IT. Forty rows of visible form boxes turns a
+   table you read into a form you fill in, and the Points column is read far
+   more often than it is edited. So it sits flush — right-aligned, tabular,
+   no border — and only looks like an input on hover or focus, which is the
+   moment you are actually going to type.
+
+   It still has to be findable, so the hover state covers the whole cell
+   rather than just the text, and an unestimated row shows its placeholder. */
+input.pts-edit {
+  width: 100%; min-width: 48px; padding: 3px 6px; text-align: right;
+  font: inherit; font-size: 13px; font-variant-numeric: tabular-nums;
+  background: transparent; border: 1px solid transparent; border-radius: var(--radius-sm);
+  color: inherit; -moz-appearance: textfield;
+}
+input.pts-edit::-webkit-outer-spin-button,
+input.pts-edit::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+input.pts-edit:hover:not(:disabled) { border-color: var(--app-line); background: var(--app-surface); }
+input.pts-edit:focus { border-color: var(--brand-blue); background: var(--app-surface); outline: none; }
+/* Unestimated: the same warning colour the read-only cell used for its dash,
+   so a missing estimate still reads as missing rather than as an empty box. */
+input.pts-edit::placeholder { color: var(--risk); opacity: 1; }
+input.pts-edit:disabled { opacity: .55; cursor: default; }
+
 .chip.col-chip.active { background: transparent; border-color: var(--app-line); color: var(--app-fg); }
 .chip.col-chip:not(.active) { opacity: .5; text-decoration: line-through; }
 .chip.col-chip:disabled { cursor: default; opacity: 1; border-style: dashed; }

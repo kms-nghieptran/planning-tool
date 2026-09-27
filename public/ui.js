@@ -889,6 +889,91 @@ const UI = (() => {
    * @param {object} state  the app state, for category labels
    * @param {object} o      `title` and `sub` override the heading
    */
+  /**
+   * The Points cell — a number, or a box you can type in.
+   *
+   * OPT-IN PER CALLER, and deliberately so. This table is shared by the
+   * Capacity planning screen and the Active sprint screen, and an edit here
+   * writes to REAL JIRA. A shared table that quietly became writable
+   * everywhere it is used is not a feature anyone asked for; the caller that
+   * wants it says `editPoints: true` and takes responsibility for the
+   * context — chiefly that the sprint is still open.
+   *
+   * `data-was` carries what the screen is showing. The server compares it
+   * against Jira before writing, so an estimate somebody else changed since
+   * the last sync is refused rather than silently overwritten.
+   *
+   * An unestimated item still shows its warning tag when read-only; when
+   * editable it is simply an empty box, because "—" you can type into reads
+   * as a value rather than an absence.
+   */
+  function pointsCell(i, o = {}) {
+    if (!o.editPoints) return i.points == null ? '<span class="tag risk">—</span>' : num(i.points);
+    const v = i.points == null ? '' : String(i.points);
+    return `<input class="pts-edit" type="number" min="0" step="0.5" inputmode="decimal"
+      value="${esc(v)}" data-points-key="${esc(i.key)}" data-was="${esc(v)}"
+      title="Story points for ${esc(i.key)} — saves to Jira"
+      aria-label="Story points for ${esc(i.key)}"${i.points == null ? ' placeholder="—"' : ''}>`;
+  }
+
+  /**
+   * MAKE THOSE CELLS SAVE. One definition, because two screens now offer
+   * this edit — Capacity planning and Active sprint — and it is the only
+   * control in the app that changes a real Jira issue. Thirty lines of
+   * staleness handling and failure recovery copied into two views is two
+   * places for it to drift, on the one interaction where drift means an
+   * estimate silently not saved.
+   *
+   * Delegated to the mount, because the table is redrawn by sorting and by
+   * every refresh.
+   *
+   * SAVES ON `change`, not on input — for a number box that means blur or
+   * Enter. Every save is a round trip to Jira, and a "3" on the way to "13"
+   * is a real edit to a real issue.
+   *
+   * `onSaved` is how a screen refreshes the numbers DERIVED from points —
+   * capacity used, per-person load, the sprint's committed total. Leaving
+   * those stale beside an edited row is a screen disagreeing with itself.
+   *
+   * @param {object} o.readOnly  closed sprint: wire nothing at all
+   */
+  function wirePointsEdit(mount, { teamId, sprintId, readOnly = false, onSaved = null } = {}) {
+    if (!mount || !mount.addEventListener || readOnly) return;
+    mount.addEventListener('change', async (e) => {
+      const box = e.target.closest && e.target.closest('[data-points-key]');
+      if (!box) return;
+      const key = box.dataset.pointsKey;
+      const was = box.dataset.was == null ? '' : box.dataset.was;
+      const value = String(box.value || '').trim();
+      if (value === was.trim()) return;               // blur with nothing changed
+
+      box.disabled = true;
+      try {
+        const r = await jsonPut('/api/sprint/points', {
+          teamId, sprintId, key,
+          points: value === '' ? null : Number(value),
+          // What this screen was showing. The server checks it against Jira
+          // and refuses if somebody re-estimated since the last sync.
+          was: was === '' ? null : Number(was),
+        });
+        box.dataset.was = value;
+        toast(r.unchanged ? `${key} was already ${value === '' ? 'unestimated' : `${value} pts`}`
+          : value === '' ? `${key} — estimate cleared in Jira`
+            : `${key} — ${value} pts saved to Jira`);
+        if (onSaved) onSaved(r);
+      } catch (err) {
+        /* PUT THE ROW BACK. A box left showing a value the server refused
+           looks exactly like one that saved, and the next refresh replaces
+           it without a word — which is how you come to believe an estimate
+           is in Jira when it never was. */
+        box.value = was;
+        toast(err.message, true);
+      } finally {
+        box.disabled = false;
+      }
+    });
+  }
+
   function itemsTable(items, state, o = {}) {
     const list = (items || []).slice().sort(byStatusThenPoints);
     const cats = (state && state.categories) || {};
@@ -927,7 +1012,7 @@ const UI = (() => {
                 <td><span class="tag"><i class="dot" style="background:${CATEGORY_COLORS[i.category]}"></i>${esc((cats[i.category] || {}).label || i.category)}</span></td>
                 <td>${i.assignee ? `<div class="name-cell">${avatar(i.assignee)}${esc(i.assignee)}</div>` : '<span class="tag warn">unassigned</span>'}</td>
                 <td>${statusText(i)}${epicBlockerIcon(i)}</td>
-                <td class="num">${i.points == null ? '<span class="tag risk">—</span>' : num(i.points)}</td>
+                <td class="num">${pointsCell(i, o)}</td>
                 <td class="muted">${esc((i.components || [])[0] || '—')}</td>
                 <td>${epicCell(i)}</td>
                 <td class="num">${testCasesCell(i)}</td>
@@ -1356,7 +1441,7 @@ const UI = (() => {
   }
 
   return { esc, el, $, $$, num, pct, int, date, dateTime, ago, initials, avatar, personColor, workloadClass, toast, drawer, closeDrawer, api, jsonPut, jsonPost, jsonDelete, kpi, bar, mixBar, pointsFieldNote, CATEGORY_COLORS, setJiraBase, issueUrl, issueKey, issueKeys, linkKey, jiraSearch, componentSearchUrl, componentsSearchUrl, boardBacklogUrl, backlogSearchUrl, keysSearchUrl, openInJira, combo, wireCombo, matchText, fitChars, sortable, sortTable, sortableTable, sortNumber, paginate, pager,
-    itemsTable, epicCell, byStatusThenPoints, statusText, statusStage, drillNumber, drillDrawer,
+    itemsTable, wirePointsEdit, epicCell, byStatusThenPoints, statusText, statusStage, drillNumber, drillDrawer,
     inRefinement, epicBlockerIcon, epicBlockersDrawer, testCasesDrawer,
     tagList, wireTagList, splitKeywords, exportPdf, priorityTag, prioritySort, PRIORITY_UNSET_SORT, busy };
 })();

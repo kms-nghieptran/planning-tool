@@ -10,6 +10,10 @@ const SprintView = (() => {
   async function render(state, mount) {
     const d = await UI.api(`/api/sprint?team=${encodeURIComponent(state.teamId)}&sprint=${encodeURIComponent(state.sprintId)}`);
     const p = d.progress, w = d.window, h = d.health, t = d.totals || {};
+    /* A closed sprint is read-only: the Points cells below edit real Jira
+       issues and the server refuses a sprint that has finished, so the boxes
+       are simply not offered rather than offered and always failing. */
+    const ro = !!(d.lock && d.lock.readOnly);
 
     const byStatus = groupBy(d.items, i => i.status || '—');
     const byMember = d.rows.filter(r => r.status !== 'Released' && (r.planned || r.actual));
@@ -153,10 +157,23 @@ const SprintView = (() => {
 
       ${testCaseSection(d)}
 
-      ${UI.itemsTable(d.items, state)}
+      ${/* POINTS ARE EDITABLE HERE TOO, and an edit goes to real Jira. This
+           is where you sit during standup with the estimates in front of you,
+           which is exactly when a wrong one gets spotted — the same argument
+           as on Capacity planning, and the same shared wiring below. */ ''}
+      ${UI.itemsTable(d.items, state, { editPoints: !ro })}
 
       ${riskSection(d, state)}
     `;
+
+    /* POINTS → JIRA, the same shared wiring the Capacity screen uses, so the
+       two behave identically down to the wording of the failures. `onSaved`
+       reloads because the figures above this table — committed points,
+       progress, the per-person split — are all derived from these numbers. */
+    UI.wirePointsEdit(mount, {
+      teamId: state.teamId, sprintId: state.sprintId, readOnly: ro,
+      onSaved: () => App.refresh(),
+    });
 
     /* One delegated listener on the render container — the property
        ui-wiring.test.js pins. `window.print()` is the whole export: the
