@@ -20,12 +20,35 @@ const PrioritizationView = (() => {
      is visible, since a component nobody has written an epic for belongs to
      no team and would otherwise be on nobody's page. */
   let allTeams = false;
+  /* WHAT HAS NOT BEEN PICKED UP YET. An epic already planned into the
+     active sprint — as a Story's parent, or as a suite a Bucket Story is
+     maintaining — is somebody's job this fortnight, so leaving those out
+     turns the page into "what should we pull in next".
+
+     Work in a FUTURE sprint or in the backlog is a plan, not progress, and
+     still counts normally.
+
+     A SCOPE, NOT A LENS: it changes what the server counts, because the
+     answer depends on sprint membership the browser does not hold. */
+  let excludeActiveSprint = false;
   let data = null;
 
   async function render(state, mount) {
+    loadCols();
     const team = allTeams ? '' : (state.teamId || '');
-    data = await UI.api(`/api/prioritization${team ? `?team=${encodeURIComponent(team)}` : ''}`);
+    const qs = [team ? `team=${encodeURIComponent(team)}` : '',
+      excludeActiveSprint ? 'excludeActiveSprint=1' : ''].filter(Boolean).join('&');
+    data = await UI.api(`/api/prioritization${qs ? `?${qs}` : ''}`);
     const d = data;
+    /* WHAT WAS STORED IS NOT NECESSARILY WHAT EXISTS. The remembered column
+       list outlives the model: a bucket renamed or dropped in lib/coverage.js
+       leaves a key here that hides nothing, and a stored list covering every
+       bucket — from an older build, or a hand-edited value — would render two
+       empty groups and a `colspan="0"`. Checked against the payload once,
+       here, rather than defended against at every read. */
+    const known = new Set((d.buckets || []).map(b => b.key));
+    hiddenCols = new Set([...hiddenCols].filter(k => known.has(k)));
+    if (hiddenCols.size >= known.size) hiddenCols = new Set();
 
     if (!d.rows.length) {
       mount.innerHTML = `<div class="card">
@@ -110,6 +133,40 @@ const PrioritizationView = (() => {
           return `<button class="chip${level === l.value ? ' active' : ''}${n ? '' : ' muted'}"
             data-level="${l.value}" title="${UI.esc(l.name)}">${UI.esc(l.label)} <strong>${n}</strong></button>`;
         }).join('')}
+      </div></div>
+      ${columnChips()}`;
+  }
+
+  /**
+   * The column switches.
+   *
+   * A chip per status, showing in BOTH tool groups at once — see the note on
+   * `hiddenCols`. On rather than off is the active state, so the row reads as
+   * "these are the columns you are looking at" rather than as a list of
+   * things you have suppressed.
+   *
+   * The last visible column's chip is disabled: a grid with no status columns
+   * is two empty tool groups and a `colspan="0"`, which is broken markup for
+   * a view nobody wants. Turning one off is a lens; turning them all off is a
+   * mistake the control should not let you make.
+   */
+  function columnChips() {
+    const visible = visibleBuckets();
+    const last = visible.length === 1 ? visible[0].key : null;
+    return `
+      <div class="field"><span>Status columns</span><div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+        ${data.buckets.map(b => {
+          const on = !hiddenCols.has(b.key);
+          const stuck = b.key === last;
+          return `<button class="chip col-chip${on ? ' active' : ''}${b.inRatio ? '' : ' outside'}"
+            data-col="${UI.esc(b.key)}"${stuck ? ' disabled' : ''}
+            title="${UI.esc(stuck ? `${b.label} — the last column showing` : `${on ? 'Hide' : 'Show'} ${b.label} in both groups`)}"
+            ><i class="pz-chip" style="background:${on ? b.color : 'transparent'};border:1px solid ${b.color}"></i>${UI.esc(shortLabel(b))}</button>`;
+        }).join('')}
+        ${hiddenCols.size
+          ? `<button class="chip" data-col="__all" title="Show every status column again">Show all</button>
+             <span class="muted" style="font-size:11px">${hiddenCols.size} hidden · totals and the CSV are unaffected</span>`
+          : ''}
       </div></div>`;
   }
 
@@ -136,6 +193,17 @@ const PrioritizationView = (() => {
         ${d.team && d.team.jiraTeams.length
           ? `<span class="muted" style="font-size:11px">Team field: ${d.team.jiraTeams.map(UI.esc).join(', ')}</span>`
           : ''}
+      </div></div>
+      <div class="field"><span>Show</span><div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+        <!-- "All epics", NOT "Everything". This chip sits one control away
+             from "This team", and "Everything" beside it reads as the whole
+             portfolio — which it is not: it means every epic WITHIN the
+             current scope. That wording cost a real misreading, a Titan-
+             scoped 9 taken for a portfolio 25. -->
+        <button class="chip${excludeActiveSprint ? '' : ' active'}" data-sprint="all"
+          title="Every ${UI.esc(d.scope.toLowerCase())} in scope, whether or not it is in a sprint">All ${UI.esc(d.scope.toLowerCase())}s</button>
+        <button class="chip${excludeActiveSprint ? ' active' : ''}" data-sprint="exclude"
+          title="Leave out ${UI.esc(d.scope.toLowerCase())}s already planned into the active sprint — a Story's parent, or a suite a Bucket Story is maintaining. Future sprints and the backlog still count.">Exclude active sprint items</button>
       </div></div>`;
   }
 
@@ -170,7 +238,10 @@ const PrioritizationView = (() => {
      does not use. The two groups are split because that split IS the
      coverage ratio: the four on the left are its denominator. */
   function legend(d) {
-    const swatch = (b) => `<span class="pz-key"><i style="background:${b.color}"></i>${UI.esc(b.label)}</span>`;
+    // A hidden column is dimmed rather than dropped: the legend describes the
+    // scheme, and a key that vanished would read as a bucket that no longer
+    // exists rather than one you turned off.
+    const swatch = (b) => `<span class="pz-key${hiddenCols.has(b.key) ? ' off' : ''}"><i style="background:${b.color}"></i>${UI.esc(b.label)}</span>`;
     const inRatio = d.buckets.filter(b => b.inRatio);
     const outside = d.buckets.filter(b => !b.inRatio);
     return `
@@ -213,11 +284,39 @@ const PrioritizationView = (() => {
     const other = d.elsewhere.length
       ? `<li>${d.elsewhere.length} ranked component${d.elsewhere.length === 1 ? '' : 's'} ${d.elsewhere.length === 1 ? 'has no' : 'have no'} ${UI.esc(d.scope.toLowerCase())} owned by ${UI.esc(d.team ? d.team.name : 'this team')} — switch to All teams to see ${d.elsewhere.length === 1 ? 'it' : 'them'}.</li>`
       : '';
-    if (!bits.length && !clash && !gap && !other) return '';
+    /* THE ONE LINE THAT EXPLAINS A DISAGREEMENT WITH ANOTHER SCREEN.
+       Every other number here is the Coverage screen's own reading. This
+       option removes epics, so the two pages will differ — and a reader who
+       cannot see why will conclude one of them is broken. It names the
+       count, the sprints it read, and what it looked for. */
+    const a = d.activeSprint || {};
+    /* NAMES BOTH PATHS, because they are not the same kind of work and the
+       difference is the whole reason the number is what it is: `viaParent`
+       is new automation a Story is writing, `viaLinks` is maintenance a
+       Bucket Story is carrying. Following only the first is the mistake this
+       line exists to make impossible to miss. */
+    const sprintNames = (a.sprints || []).length
+      ? a.sprints.map(s => `${UI.esc(s.label)} <span class="muted">(${UI.esc(s.team)})</span>`).join(', ')
+      : 'the active sprint';
+    const flight = a.excluded && a.epics
+      ? `<li class="warn">${UI.int(a.epics)} ${UI.esc(d.scope.toLowerCase())}${a.epics === 1 ? '' : 's'}
+          left out — already planned into ${sprintNames}
+          <span class="muted">(${UI.int(a.viaParent)} as a story's parent, ${UI.int(a.viaLinks)} linked from a bucket story;
+          ${UI.int(a.items)} sprint item${a.items === 1 ? '' : 's'} read)</span>.
+          Future sprints and the backlog still count.
+          These totals will not match the Overall Coverage screen while this is on.</li>`
+      : '';
+    /* Asked for and nothing to exclude is worth saying too — otherwise the
+       option looks broken when every ranked suite is untouched. */
+    const noFlight = a.excluded && !a.epics
+      ? `<li>Nothing on this list is in ${(a.sprints || []).length ? sprintNames : 'an active sprint'} yet${(a.sprints || []).length ? '' : ' — no team in scope has one running'}.</li>`
+      : '';
+    if (!bits.length && !clash && !gap && !other && !flight && !noFlight) return '';
     return `<section class="section"><div class="card">
       <h3>What this counts</h3>
       <div class="sub">Every ${UI.esc(d.scope.toLowerCase())} ${d.team ? `whose Team field is ${d.team.jiraTeams.map(UI.esc).join(' or ')}` : 'in the project'}, by Automation Status, split by tool — the same reading the Overall Coverage screen uses.</div>
       <ul class="reasons" style="margin-top:12px">
+        ${flight}${noFlight}
         ${bits.map(b => `<li>${b}</li>`).join('')}
         ${clash}${gap}${other}
       </ul>
@@ -236,6 +335,41 @@ const PrioritizationView = (() => {
     na: 'N/A', obsoleted: 'Obs', none: 'None',
   };
   const shortLabel = (b) => SHORT[b.key] || b.label;
+
+  /* ── which status columns are showing ──────────────────────────────────
+     Fourteen number columns is a lot when the question is narrower than the
+     grid — "where is the maintenance load" needs two of them. So each status
+     can be hidden, and the choice persists, because a column you turned off
+     should still be off tomorrow.
+
+     HIDDEN IN BOTH GROUPS AT ONCE, never one tool at a time. The entire point
+     of the side-by-side is that TrueTest Automated sits beside KSE Automated;
+     letting the two groups hold different columns would leave them aligned by
+     position but not by meaning, which is worse than either arrangement on
+     its own.
+
+     THIS IS A LENS, NOT A SCOPE. Hiding a column changes what is drawn, never
+     what is counted: the row totals, the footer and the Export CSV all stay
+     whole. A hidden column is a column you are not looking at, not one whose
+     epics have stopped existing. */
+  const COLS_KEY = 'pt-pz-cols';
+  let hiddenCols = new Set();
+
+  /* localStorage throws in a few browser contexts and can come back empty,
+     and a remembered column layout is a convenience rather than data — so a
+     failure here shows every column rather than breaking the page. */
+  function loadCols() {
+    try {
+      const raw = localStorage.getItem(COLS_KEY);
+      hiddenCols = new Set(raw ? JSON.parse(raw) : []);
+    } catch { hiddenCols = new Set(); }
+  }
+  function saveCols() {
+    try { localStorage.setItem(COLS_KEY, JSON.stringify([...hiddenCols])); } catch { /* not worth a message */ }
+  }
+
+  /** The buckets actually drawn, in the model's own order. */
+  const visibleBuckets = () => (data.buckets || []).filter(b => !hiddenCols.has(b.key));
 
   /**
    * TWO MEANINGS, TWO CHANNELS — the rule the whole grid is coloured by.
@@ -270,7 +404,7 @@ const PrioritizationView = (() => {
     const d = data;
     const rows = shown();
     const tools = d.tools;
-    const buckets = d.buckets;
+    const buckets = visibleBuckets();
 
     /* THE LINK SITS ON THE COUNT LINE, NOT IN THE SECTION HEAD — the same
        call the Backlog Items table makes, for the same reason. This line is
@@ -287,7 +421,12 @@ const PrioritizationView = (() => {
           .filter(Boolean).join(' at ') || 'these filters'}.</div></div>`
       : `
       <div class="muted" style="display:flex;align-items:center;gap:10px;margin-bottom:8px;font-size:12px">
-        <span>${rows.length} component${rows.length === 1 ? '' : 's'} · ${UI.int(rows.reduce((n, r) => n + r.total, 0))} ${UI.esc(d.scope.toLowerCase())}s</span>
+        <!-- THE NUMBERS SAY WHOSE THEY ARE. The team scope lives in a chip
+             row above and in the header picker, and neither is beside the
+             figures — so a team-scoped 9 was read as a portfolio 25. The
+             scope belongs on the line the numbers are on. -->
+        <span>${rows.length} component${rows.length === 1 ? '' : 's'} · ${UI.int(rows.reduce((n, r) => n + r.total, 0))} ${UI.esc(d.scope.toLowerCase())}s
+          · <strong>${d.team ? UI.esc(d.team.name) : 'all teams'}</strong>${excludeActiveSprint ? ' · active sprint excluded' : ''}</span>
         <span class="spacer"></span>
         ${jiraAll(d) ? `<a class="btn ghost sm" href="${jiraAll(d)}" target="_blank" rel="noopener">Open in Jira</a>` : ''}
       </div>
@@ -434,6 +573,15 @@ const PrioritizationView = (() => {
      it cannot be done from a payload that was already narrowed. A full
      re-render is the honest way to say that. */
   function wireTeamBar(state, mount) {
+    UI.$$('[data-sprint]', mount).forEach(b => b.addEventListener('click', () => {
+      const want = b.dataset.sprint === 'exclude';
+      if (want === excludeActiveSprint) return;
+      excludeActiveSprint = want;
+      // Both lenses counted the old population; neither survives it changing.
+      level = null;
+      family = null;
+      App.refresh();
+    }));
     UI.$$('[data-scope]', mount).forEach(b => b.addEventListener('click', () => {
       const wantAll = b.dataset.scope === 'all';
       if (wantAll === allTeams) return;
@@ -468,6 +616,18 @@ const PrioritizationView = (() => {
         if (fam.disabled) return;
         const v = fam.dataset.family || null;
         family = family === v ? null : v;
+        return redraw(state, mount);
+      }
+
+      const col = close('[data-col]');
+      if (col) {
+        if (col.disabled) return;      // the last visible column — see columnChips
+        const key = col.dataset.col;
+        if (key === '__all') hiddenCols.clear();
+        else if (hiddenCols.has(key)) hiddenCols.delete(key);
+        else if (visibleBuckets().length > 1) hiddenCols.add(key);
+        else return;                   // belt and braces: never empty the grid
+        saveCols();
         return redraw(state, mount);
       }
 
@@ -570,11 +730,18 @@ const PrioritizationView = (() => {
    * under the page and saying so beats quietly showing the other figure.
    */
   async function openEpics(ds, shownCount) {
+    /* THE DRAWER IS NARROWED EXACTLY AS THE NUMBER WAS. The team scope and
+       the in-flight option both change which epics were counted, so both
+       travel with the request — a drawer that listed epics the cell had
+       excluded would make the number uncheckable, which was its whole
+       point. The server recomputes the same set from the same function. */
     const qs = [
       `row=${encodeURIComponent(ds.row)}`,
       `tool=${encodeURIComponent(ds.tool)}`,
       `bucket=${encodeURIComponent(ds.bucket)}`,
-    ].join('&');
+      data.team ? `team=${encodeURIComponent(data.team.id)}` : '',
+      excludeActiveSprint ? 'excludeActiveSprint=1' : '',
+    ].filter(Boolean).join('&');
     UI.drawer('<div class="empty">Reading…</div>');
     try {
       const r = await UI.api(`/api/reports/coverage/epics?${qs}`);

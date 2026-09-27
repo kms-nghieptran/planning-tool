@@ -551,7 +551,9 @@ check('NO VIEW PRINTS AN ISSUE KEY WITHOUT GOING THROUGH THE HELPER', () => {
     'fields.js': ['f'],    // f.key — a custom field's search slug
     'settings.js': ['choice'], // choice.key — a <option> value in the rule editor
     'report-coverage.js': ['lvl'], // lvl.key — a priority level's slug, not an issue
-    'prioritization.js': ['f'],    // f.key — a component family's slug: 'ps', 'rnd'
+    // f.key — a component family's slug ('ps', 'rnd'); b.key — a coverage
+    // bucket's slug ('automated', 'blocked'), on the column switches.
+    'prioritization.js': ['f', 'b'],
   };
 
   const offenders = [];

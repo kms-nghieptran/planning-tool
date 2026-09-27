@@ -885,6 +885,21 @@ select.prio option[value="4"] { color: var(--app-fg-3); }
 }
 .pz-key { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
 .pz-key i { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
+/* A column switched off. Dimmed and struck through rather than removed: the
+   legend describes the SCHEME, and a key that disappeared would read as a
+   bucket that no longer exists rather than one you are not looking at. */
+.pz-key.off { opacity: .45; text-decoration: line-through; }
+
+/* The column switches. ON is the active state, so the row reads as "these are
+   the columns you are looking at" rather than as a list of suppressions. */
+/* NOT THE BLUE `active` FILL. Seven solid blue pills is the loudest thing on
+   a page whose whole point is seven colours, and it hides the very dots that
+   say which column each switch governs. A column that is ON reads as an
+   ordinary chip carrying its bucket's colour; one that is OFF is dimmed and
+   struck through, the same treatment the legend gives it. */
+.chip.col-chip.active { background: transparent; border-color: var(--app-line); color: var(--app-fg); }
+.chip.col-chip:not(.active) { opacity: .5; text-decoration: line-through; }
+.chip.col-chip:disabled { cursor: default; opacity: 1; border-style: dashed; }
 
 /* A ranked component with no epics at all. Dimmed rather than hidden or
    flagged red: it is not an error, it is the gap the page exists to show. */

@@ -719,5 +719,43 @@ check('LINKED-BUT-IDLE IS REPORTED DIFFERENTLY FROM NOT-MATCHED-AT-ALL', () => {
   assert.strictEqual(by['Ghost Person'].linked, false, 'for an entirely different reason');
 });
 
+/* ── which sprint is in flight ───────────────────────────────────────────
+   A team can be running several at once — his Titan is in "TT Week 14Sep"
+   AND "Katalon Titan Sprint 40", and Katalon Automation in three. Two
+   questions, two answers, and confusing them is how a whole sprint of work
+   becomes invisible to something that only asked for one. */
+
+const twoActive = () => ({
+  sprints: [
+    { id: 'wk', name: 'TT Week 14Sep', byTeam: { titan: { jiraId: '900', name: 'TT Week 14Sep', state: 'active' } } },
+    { id: 's40', name: 'Sprint 40', byTeam: { titan: { jiraId: '901', name: 'Titan Sprint 40', state: 'active' } } },
+    { id: 'old', name: 'Sprint 39', byTeam: { titan: { jiraId: '899', name: 'Sprint 39', state: 'closed' } } },
+    { id: 'next', name: 'Sprint 41', byTeam: { titan: { jiraId: '902', name: 'Sprint 41', state: 'future' } } },
+  ],
+});
+
+check('activeSprints RETURNS EVERY SPRINT IN FLIGHT, and only those', () => {
+  const plan = twoActive();
+  assert.deepStrictEqual(r.activeSprints(plan, 'titan').map(s => s.id), ['wk', 's40'],
+    'a team running two sprints must report both — anything asking "is this work in the active sprint" needs all of them');
+  assert.deepStrictEqual(r.activeSprints(plan, 'nobody'), [], 'an unknown team has none');
+  assert.deepStrictEqual(r.activeSprints({}, 'titan'), [], 'a plan with no sprints should not throw');
+});
+
+check('and activeSprint STAYS SINGULAR — the FIRST, which other screens depend on', () => {
+  /* The Active sprint screen, the capacity grid and the risk signals are each
+     about one sprint, and which one they get is a contract. Returning the
+     last — or a different one after a refactor — silently moves every one of
+     those screens to another fortnight's work. Nothing pinned it until now,
+     which is how a mutation swapping it survived a full run. */
+  const plan = twoActive();
+  const picked = r.activeSprint(plan, 'titan');
+  assert.ok(picked, 'a team with two active sprints must still get one');
+  assert.strictEqual(picked.id, 'wk', 'it must be the FIRST in flight, not the last');
+  assert.strictEqual(r.activeSprint(plan, 'titan'), r.activeSprints(plan, 'titan')[0],
+    'the singular answer has to be the head of the plural one');
+  assert.strictEqual(r.activeSprint({ sprints: [] }, 'titan'), null, 'and null when nothing is running');
+});
+
 console.log(`\n${passed} passed, ${failed} failed\n`);
 process.exit(failed ? 1 : 0);

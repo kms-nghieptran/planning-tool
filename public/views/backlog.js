@@ -129,26 +129,35 @@ const BacklogView = (() => {
    * THE WAY OUT TO JIRA, and which of two it should be.
    *
    * A key list is exact but finite: it runs out of URL, and his 892-item
-   * backlog opened 393 of them. The board's backlog view has no such limit —
-   * it names the set instead of listing it — but it can only ever mean the
-   * WHOLE backlog, because a board view cannot be narrowed by a search box
-   * or a category chip that only exists in this app.
+   * backlog opened 393 of them. Two things name the set instead of listing
+   * it, and both can only mean the WHOLE backlog — neither a saved filter
+   * nor a board view can be narrowed by a search box or a category chip
+   * that exists only in this app.
    *
    * So the choice follows the filters, and each link means exactly what the
    * count beside it says:
    *
-   *   unfiltered, board mapped → the board's backlog. Opens all of them.
-   *   filtered, or no board    → the keys, which are the only exact answer
-   *                              for a subset, truncation notice and all.
+   *   unfiltered, filter known → a JQL SEARCH on the board's saved filter.
+   *                              Opens all of them in the issue navigator,
+   *                              which is where you can sort, export and
+   *                              bulk-edit — the reason to prefer it.
+   *   unfiltered, no filter yet → the board's own backlog view. Same set,
+   *                              read-only-ish, and available before the
+   *                              next sync has read a filter id.
+   *   filtered, or neither      → the keys, the only exact answer for a
+   *                              subset, truncation notice and all.
    *
    * The one thing that must not happen is a link that silently means a
    * different set from the number it sits next to.
    */
   function jiraLink(items) {
-    const board = unfiltered() ? UI.boardBacklogUrl(data.boardId) : null;
-    if (!board) return UI.openInJira(items.map(i => i.key));
-    return `<a class="btn ghost sm" href="${UI.esc(board)}" target="_blank" rel="noopener"
-      title="Open the whole backlog — all ${UI.int(items.length)} items — on the team's Jira board">Open in Jira</a>`;
+    if (!unfiltered()) return UI.openInJira(items.map(i => i.key));
+    const search = UI.backlogSearchUrl(data.boardFilter);
+    const href = search || UI.boardBacklogUrl(data.boardId);
+    if (!href) return UI.openInJira(items.map(i => i.key));
+    const where = search ? 'as a Jira filter' : "on the team's Jira board";
+    return `<a class="btn ghost sm" href="${UI.esc(href)}" target="_blank" rel="noopener"
+      title="Open the whole backlog — all ${UI.int(items.length)} items — ${where}">Open in Jira</a>`;
   }
 
   function renderTable(state, mount) {

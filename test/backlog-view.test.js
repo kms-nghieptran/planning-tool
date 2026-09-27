@@ -359,53 +359,88 @@ check('A BIG QUEUE OPENS WHAT THE COUNT SAYS, not the rows on this page', async 
 
 const boardUrlIn = (html) => (html.match(/href="([^"]*RapidBoard[^"]*)"/) || [])[1] || null;
 
-check('UNFILTERED, IT OPENS THE WHOLE BACKLOG — not the 393 keys that fit a URL', async () => {
-  const b = await renderBacklog({ ...BIG(892), boardId: 1961 });
-  const html = b.table();
-  const said = Number((html.match(/>(\d+) items ·/) || [])[1]);
-  assert.strictEqual(said, 892, 'fixture check');
+const jqlIn = (html) => {
+  const href = (html.match(/href="([^"]*issues\/\?jql=[^"]*)"/) || [])[1] || '';
+  return decodeURIComponent(href.split('jql=')[1] || '');
+};
+const FILTER = { filterId: 12345, type: 'scrum', boardId: 1961 };
 
-  const url = boardUrlIn(html);
-  assert.ok(url, 'an 892-item backlog still links by key, so it cannot open all of them');
-  assert.match(url, /rapidView=1961/, 'the link does not name this team\'s board');
-  assert.match(url, /view=planning/, 'the link opens the board, not its backlog');
-  assert.ok(!/issues\/\?jql=/.test(html), 'both links are on the line — only one can be the answer');
+check('UNFILTERED, IT OPENS A JIRA FILTER FOR THE WHOLE BACKLOG', async () => {
+  /* What a key list could never do. 892 keys is roughly 11,600 characters,
+     so the link truncated to the 393 that fit; naming the board's saved
+     filter instead is 159 characters at any size. */
+  const b = await renderBacklog({ ...BIG(892), boardId: 1961, boardFilter: FILTER });
+  const html = b.table();
+  assert.strictEqual(Number((html.match(/>(\d+) items ·/) || [])[1]), 892, 'fixture check');
+
+  const jql = jqlIn(html);
+  assert.match(jql, /filter = 12345/, 'the link does not name the board\'s saved filter');
+  assert.match(jql, /sprint IS EMPTY/, 'the search would include work already in a sprint');
+  assert.match(jql, /statusCategory != Done/, 'the search would include finished work');
+  assert.match(jql, /ORDER BY Rank ASC/, 'a backlog opened out of rank order is not a backlog');
+  assert.ok(!/key in \(/.test(jql), 'it is still enumerating keys');
   assert.match(html, /all 892 items/, 'nothing tells the reader the link opens the whole backlog');
   // The truncation notice belongs to the key list and must not survive.
-  assert.ok(!/Open \d+ in Jira/.test(html), 'a board link should never say it opens only some');
+  assert.ok(!/Open \d+ in Jira/.test(html), 'a whole-backlog link should never say it opens only some');
+});
+
+check('and the URL stays short however big the backlog gets', async () => {
+  /* The property that makes this the right answer rather than a bigger URL
+     budget: the length does not depend on the number of items at all. */
+  const small = await renderBacklog({ ...BIG(10), boardId: 1961, boardFilter: FILTER });
+  const huge = await renderBacklog({ ...BIG(892), boardId: 1961, boardFilter: FILTER });
+  const href = (html) => (html.match(/href="([^"]*issues\/\?jql=[^"]*)"/) || [])[1] || '';
+  assert.strictEqual(href(small.table()), href(huge.table()),
+    'the link changes with the number of items, so it is describing them rather than the set');
+  assert.ok(href(huge.table()).length < 400, `the link is ${href(huge.table()).length} characters`);
+});
+
+check('BEFORE A SYNC HAS READ A FILTER ID, it falls back to the board view', async () => {
+  /* `boardFilter` is null until the next full sync. That must not put the
+     screen back to a truncated key list — the board's own backlog view is
+     still the whole set. */
+  const b = await renderBacklog({ ...BIG(892), boardId: 1961 });      // no boardFilter
+  const html = b.table();
+  assert.ok(!jqlIn(html), 'it built a filter search with no filter id');
+  const url = boardUrlIn(html);
+  assert.ok(url, 'an 892-item backlog fell back to keys, so it cannot open all of them');
+  assert.match(url, /rapidView=1961/, "the link does not name this team's board");
+  assert.match(url, /view=planning/, 'the link opens the board, not its backlog');
+  assert.match(html, /all 892 items/);
 });
 
 check('FILTERED, IT GOES BACK TO KEYS — the only exact answer for a subset', async () => {
   /* A board view cannot be narrowed by a search box or a category chip that
      only exists in this app, so keeping the board link while filtered would
      open 892 items beside a count saying 10. */
-  const b = await renderBacklog({ ...BIG(892), boardId: 1961 });
-  assert.ok(boardUrlIn(b.table()), 'fixture check: unfiltered starts on the board link');
+  const b = await renderBacklog({ ...BIG(892), boardId: 1961, boardFilter: FILTER });
+  assert.ok(jqlIn(b.table()).includes('filter = 12345'), 'fixture check: unfiltered starts on the filter search');
 
   b.search.value = 'BIG-01';
   b.search.fire('input');
   const html = b.table();
-  assert.ok(!boardUrlIn(html), 'a filtered table still points at the whole board backlog');
+  assert.ok(!/filter = 12345/.test(jqlIn(html)), 'a filtered table still points at the whole backlog');
+  assert.ok(!boardUrlIn(html), 'a filtered table still points at the board backlog view');
   assert.strictEqual(keysOf(html).length, 10, 'the filtered link does not open the filtered set');
   assert.strictEqual(Number((html.match(/>(\d+) items ·/) || [])[1]), 10);
 
   b.search.value = '';
   b.search.fire('input');
-  assert.ok(boardUrlIn(b.table()), 'clearing the filter did not restore the whole-backlog link');
+  assert.ok(jqlIn(b.table()).includes('filter = 12345'), 'clearing the filter did not restore the whole-backlog link');
 });
 
 check('every filter counts as a filter, not just the search box', async () => {
-  const mixed = { ...BIG(500), boardId: 1961 };
+  const mixed = { ...BIG(500), boardId: 1961, boardFilter: FILTER };
   mixed.items = mixed.items.map((i, n) => (n < 300 ? i : { ...i, category: 'maintenance' }));
   const b = await renderBacklog(mixed);
-  assert.ok(boardUrlIn(b.table()), 'fixture check');
+  assert.ok(jqlIn(b.table()).includes('filter = 12345'), 'fixture check');
 
   b.cats.find(c => c.dataset.cat === 'new').fire('click');
-  assert.ok(!boardUrlIn(b.table()), 'a category chip left the board link in place');
+  assert.ok(!/filter = 12345/.test(jqlIn(b.table())), 'a category chip left the whole-backlog link in place');
   assert.strictEqual(Number((b.table().match(/>(\d+) items ·/) || [])[1]), 300);
 });
 
-check('WITH NO BOARD MAPPED it stays on keys, whatever the size', async () => {
+check('WITH NO BOARD AND NO FILTER it stays on keys, whatever the size', async () => {
   /* Without a board the backlog is a guess from ownership rules — there is no
      Jira view that means the same thing, so the keys remain the honest answer
      even though they truncate. */

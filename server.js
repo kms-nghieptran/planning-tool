@@ -568,11 +568,29 @@ async function handleApi(req, res, url) {
       return json(res, 400, { error: `Unknown tool "${tool}".` });
     }
 
+    /* THE DRILL-IN HAS TO BE NARROWED THE SAME WAY THE NUMBER WAS.
+       The Prioritization screen can exclude epics already planned into the
+       active sprint, and it opens its cells through this route — so the same
+       set is computed here, from the same function, rather than this route
+       listing epics the count had excluded. `scopeTeam` is that screen's
+       team scope, which also decides whose active sprint counts; the
+       Coverage screen passes neither and is unaffected. */
+    const scopeTeam = q.get('team') ? plan.teams.find(t => t.id === q.get('team')) : null;
+    if (q.get('team') && !scopeTeam) return json(res, 404, { error: `No team "${q.get('team')}".` });
+    const planned = q.get('excludeActiveSprint') === '1'
+      ? prioritization.activeSprintEpics(plan, snap, scopeTeam ? [scopeTeam] : (plan.teams || []))
+      : null;
+
     const opts = {
       components: q.getAll('component').filter(Boolean),
       scope: m.coverageScope || 'Epic',
       exclude: plan.excludedComponents || [],
-      teams: plan.coverageTeams || [],
+      /* A team on THIS route means the Prioritization screen's scope, so the
+         allow-list narrows to that team's Jira Team values — otherwise a
+         drawer opened from a team-scoped page would list another team's
+         epics under a number that never counted them. */
+      teams: scopeTeam ? (scopeTeam.jiraTeams || []) : (plan.coverageTeams || []),
+      omit: planned ? planned.keys : null,
     };
     const epics = coverage.epicsIn(snap, opts, { component: q.get('row') || null, buckets, tool });
 
@@ -730,7 +748,12 @@ async function handleApi(req, res, url) {
     if (wanted && !team) return json(res, 404, { error: `No team "${wanted}".` });
 
     return json(res, 200, {
-      ...prioritization.view(snap, plan, { scope: m.coverageScope || 'Epic', team }),
+      ...prioritization.view(snap, plan, {
+        scope: m.coverageScope || 'Epic', team,
+        /* "What is NOT yet being picked up" — leaves out epics that already
+           have Stories or Bucket Stories in the active sprint. */
+        excludeActiveSprint: q.get('excludeActiveSprint') === '1',
+      }),
       noteMax: componentNote.MAX,
       // So a row can open the epics it counted in Jira, against the same
       // project and issue type the numbers came from.

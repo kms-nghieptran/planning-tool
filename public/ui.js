@@ -362,6 +362,29 @@ const UI = (() => {
   const boardBacklogUrl = (boardId) =>
     (jiraBase && boardId ? `${jiraBase}/secure/RapidBoard.jspa?rapidView=${encodeURIComponent(boardId)}&view=planning` : null);
 
+  /**
+   * That same backlog as a JQL SEARCH, in Jira's issue navigator.
+   *
+   * THE SAVED FILTER IS THE DEFINITION. A board's backlog is its filter,
+   * minus anything in a sprint, minus anything done — and the filter is the
+   * part that no field on an issue records. Rebuilding it by hand from
+   * project, team and status returns 2,194 issues for a Titan backlog of
+   * 604, so this names the filter instead of guessing at it:
+   * `filter = 12345 AND sprint IS EMPTY AND statusCategory != Done`, which
+   * fits any URL at any backlog size.
+   *
+   * `ORDER BY Rank ASC` because rank is the order a backlog IS in; Jira's
+   * default sort returns the same issues in an order that means nothing.
+   *
+   * Returns null when no filter id has been read yet — the state before the
+   * next full sync — and the caller falls back to listing keys.
+   */
+  function backlogSearchUrl(boardFilter) {
+    const id = boardFilter && boardFilter.filterId;
+    if (!jiraBase || !id) return null;
+    return jiraSearch(`filter = ${Number(id)} AND sprint IS EMPTY AND statusCategory != Done ORDER BY Rank ASC`);
+  }
+
   /* ── a type-to-search picker ───────────────────────────────────────────
      Built for the Coverage screen's 125 components and then wanted by the team
      and sprint pickers too, so it lives here rather than in one view. A native
@@ -1332,7 +1355,7 @@ const UI = (() => {
     });
   }
 
-  return { esc, el, $, $$, num, pct, int, date, dateTime, ago, initials, avatar, personColor, workloadClass, toast, drawer, closeDrawer, api, jsonPut, jsonPost, jsonDelete, kpi, bar, mixBar, pointsFieldNote, CATEGORY_COLORS, setJiraBase, issueUrl, issueKey, issueKeys, linkKey, jiraSearch, componentSearchUrl, componentsSearchUrl, boardBacklogUrl, keysSearchUrl, openInJira, combo, wireCombo, matchText, fitChars, sortable, sortTable, sortableTable, sortNumber, paginate, pager,
+  return { esc, el, $, $$, num, pct, int, date, dateTime, ago, initials, avatar, personColor, workloadClass, toast, drawer, closeDrawer, api, jsonPut, jsonPost, jsonDelete, kpi, bar, mixBar, pointsFieldNote, CATEGORY_COLORS, setJiraBase, issueUrl, issueKey, issueKeys, linkKey, jiraSearch, componentSearchUrl, componentsSearchUrl, boardBacklogUrl, backlogSearchUrl, keysSearchUrl, openInJira, combo, wireCombo, matchText, fitChars, sortable, sortTable, sortableTable, sortNumber, paginate, pager,
     itemsTable, epicCell, byStatusThenPoints, statusText, statusStage, drillNumber, drillDrawer,
     inRefinement, epicBlockerIcon, epicBlockersDrawer, testCasesDrawer,
     tagList, wireTagList, splitKeywords, exportPdf, priorityTag, prioritySort, PRIORITY_UNSET_SORT, busy };

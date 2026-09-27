@@ -318,6 +318,313 @@ check('THE TOTALS AND THE CHIPS FOLLOW THE TEAM TOO', () => {
   }
 });
 
+/* ── 2c. epics already in flight ─────────────────────────────────────────
+   An epic with Stories or Bucket Stories in the active sprint is already
+   somebody's job. Hiding those turns the page from "where does every ranked
+   suite stand" into "what should we pull in next". It is the only option
+   here that makes this screen legitimately disagree with Overall Coverage,
+   which is why it has to report exactly what it removed. */
+
+const SPRINT_PLAN = () => ({
+  ...PLAN(),
+  teams: [{ id: 'ruby', name: 'Katalon Ruby', jiraTeams: ['Katalon PS Squad'] }],
+  sprints: [{
+    id: 's40', name: 'Sprint 40',
+    byTeam: { ruby: { jiraId: '900', name: 'Ruby Sprint 40', state: 'active' } },
+  }],
+});
+
+/**
+ * A snapshot whose active sprint holds `items`.
+ *
+ * `epic` is the PARENT — how a Story names the epic it is writing.
+ * `relates` are "relates to" LINKS — how a Bucket Story names the suites it
+ * is maintaining. Both have to be expressible here, because following only
+ * the first is precisely the bug these checks are about.
+ */
+function withSprint(items) {
+  const snap = { issues: { ...SNAP.issues }, byTeam: { ruby: { sprintIssues: { 900: [] } } } };
+  for (const it of items) {
+    snap.issues[it.key] = {
+      key: it.key, summary: it.key, issueType: it.type, status: 'In Dev',
+      parentKey: it.epic, components: [], labels: [], team: 'Katalon PS Squad',
+      relatesTo: (it.relates || []).map(k => ({ key: k, summary: `linked ${k}`, type: 'Epic' })),
+    };
+    snap.byTeam.ruby.sprintIssues['900'].push(it.key);
+  }
+  return snap;
+}
+
+check('AN EPIC WITH SPRINT WORK IS LEFT OUT when the option is on', () => {
+  /* A-1 is PS_iGO_NLG / TrueTest / Automated. Put a Story for it in the
+     active sprint and that column should drop by one — because somebody is
+     already on it, which is the whole point of the option. */
+  const snap = withSprint([{ key: 'S-1', type: 'Story', epic: 'A-1' }]);
+  const plan = SPRINT_PLAN();
+
+  const all = pz.view(snap, plan, { excludeActiveSprint: false });
+  const hidden = pz.view(snap, plan, { excludeActiveSprint: true });
+
+  assert.strictEqual(rowFor(all, 'PS_iGO_NLG').truetest.automated, 1, 'fixture check');
+  assert.strictEqual(rowFor(hidden, 'PS_iGO_NLG').truetest.automated, 0,
+    'the epic with a Story in the active sprint was still counted');
+  assert.strictEqual(hidden.activeSprint.epics, 1, 'the page cannot say how many it removed');
+  assert.strictEqual(hidden.activeSprint.excluded, true);
+  assert.strictEqual(all.activeSprint.excluded, false, 'it should be off unless asked for');
+  assert.strictEqual(all.activeSprint.epics, 0);
+});
+
+check('A BUCKET STORY REACHES ITS EPICS BY LINK, not by parent', () => {
+  /* THE BUG THIS CHECK EXISTS FOR, and the one the first version shipped
+     with. A Story names its epic as its PARENT; a Bucket Story names the
+     suites it is MAINTAINING through "relates to" links — which is exactly
+     how the Active sprint screen counts Maintained and Maintaining.
+
+     Follow only the parent and the whole maintenance half of a sprint is
+     invisible: on his data Ruby's active sprint reaches 18 epics by parent
+     and 35 by both, and Katalon Automation 9 against 49. The page looked
+     entirely normal while excluding almost nothing. */
+  const plan = SPRINT_PLAN();
+  const snap = withSprint([{ key: 'B-9', type: 'Bucket Story', epic: null, relates: ['A-2', 'A-3'] }]);
+
+  const v = pz.view(snap, plan, { excludeActiveSprint: true });
+  assert.strictEqual(v.activeSprint.epics, 2,
+    'the suites a Bucket Story is maintaining were not treated as planned work');
+  assert.strictEqual(v.activeSprint.viaLinks, 2, 'the link path is not reported');
+  assert.strictEqual(v.activeSprint.viaParent, 0, 'fixture check: this Bucket Story has no parent');
+
+  // A-2 is Maintenance on TrueTest, A-3 is Ready on KSE — both must drop.
+  const row = rowFor(v, 'PS_iGO_NLG');
+  assert.strictEqual(row.truetest.maintenance, 0, 'the maintained suite was still counted');
+  assert.strictEqual(row.kse.ready, 0, 'the second linked suite was still counted');
+  assert.strictEqual(row.kse.blocked, 1, 'an epic with no sprint work should be untouched');
+});
+
+check('A BUCKET STORY WITH BOTH A PARENT AND LINKS YIELDS BOTH', () => {
+  /* THE SHAPE THE BUG ACTUALLY HID BEHIND, and the one every earlier fixture
+     here missed. `epicsFor`'s default rule reads the parent and only falls
+     back to the links if it found nothing — so a Bucket Story carrying both
+     surrenders its maintenance links in silence.
+
+     This is not a corner case: 64 of the 99 Bucket Stories in his active
+     sprints have a parent AND relates-to links. A fixture without a parent
+     passes whether or not the fix is there, because the fallback finds the
+     links anyway — which is why three mutations survived until this. */
+  const plan = SPRINT_PLAN();
+  const snap = withSprint([
+    { key: 'B-9', type: 'Bucket Story', epic: 'A-1', relates: ['A-2', 'A-3'] },
+  ]);
+  const v = pz.view(snap, plan, { excludeActiveSprint: true });
+
+  assert.strictEqual(v.activeSprint.epics, 3,
+    'a Bucket Story with a parent lost the suites it is maintaining');
+  assert.strictEqual(v.activeSprint.viaParent, 1, 'the parent was not counted');
+  assert.strictEqual(v.activeSprint.viaLinks, 2, 'the maintenance links were not counted');
+
+  const row = rowFor(v, 'PS_iGO_NLG');
+  assert.strictEqual(row.truetest.automated, 0, 'the parent epic was still counted');
+  assert.strictEqual(row.truetest.maintenance, 0, 'the maintained suite was still counted');
+  assert.strictEqual(row.kse.ready, 0, 'the second linked suite was still counted');
+  assert.strictEqual(row.kse.blocked, 1, 'an epic with no sprint work should be untouched');
+});
+
+check('and the two paths ADD UP rather than one replacing the other', () => {
+  const plan = SPRINT_PLAN();
+  const snap = withSprint([
+    { key: 'S-1', type: 'Story', epic: 'A-1' },                        // parent
+    { key: 'B-9', type: 'Bucket Story', epic: null, relates: ['A-2'] }, // link
+  ]);
+  const v = pz.view(snap, plan, { excludeActiveSprint: true });
+  assert.strictEqual(v.activeSprint.epics, 2, 'the two paths did not combine');
+  assert.strictEqual(v.activeSprint.viaParent, 1);
+  assert.strictEqual(v.activeSprint.viaLinks, 1);
+
+  // An epic reached BOTH ways is excluded once, not counted twice.
+  const both = withSprint([
+    { key: 'S-1', type: 'Story', epic: 'A-1' },
+    { key: 'B-9', type: 'Bucket Story', epic: 'A-1', relates: ['A-1'] },
+  ]);
+  assert.strictEqual(pz.view(both, plan, { excludeActiveSprint: true }).activeSprint.epics, 1,
+    'an epic reached by both paths was double-counted');
+});
+
+check('only a BUCKET STORY follows its links — a Story does not', () => {
+  /* A Story's "relates to" is an ordinary cross-reference, not a claim that
+     it is maintaining that suite. Treating it as one would exclude epics
+     nobody has planned. */
+  const plan = SPRINT_PLAN();
+  const snap = withSprint([{ key: 'S-1', type: 'Story', epic: 'A-1', relates: ['A-4'] }]);
+  const v = pz.view(snap, plan, { excludeActiveSprint: true });
+  assert.strictEqual(v.activeSprint.epics, 1, "a Story's cross-reference was treated as maintenance");
+  assert.strictEqual(v.activeSprint.viaLinks, 0);
+  assert.strictEqual(rowFor(v, 'PS_iGO_NLG').kse.blocked, 1, 'A-4 should still be counted');
+});
+
+check('BUCKET STORIES COUNT TOO — and Defects and Tests do not', () => {
+  /* His two planning types are Story and Bucket Story. A Defect in the sprint
+     says something is being FIXED, not that the epic's automation is under
+     way, and treating it as in-flight would hide suites nobody has started. */
+  const plan = SPRINT_PLAN();
+  const bucket = pz.view(withSprint([{ key: 'S-1', type: 'Bucket Story', epic: 'A-1' }]), plan, { excludeActiveSprint: true });
+  assert.strictEqual(bucket.activeSprint.epics, 1, 'a Bucket Story did not count as planned work');
+
+  for (const type of ['Defect', 'Test', 'Sub-task', 'Epic']) {
+    const v = pz.view(withSprint([{ key: 'S-1', type, epic: 'A-1' }]), plan, { excludeActiveSprint: true });
+    assert.strictEqual(v.activeSprint.epics, 0, `a ${type} in the sprint was treated as planned work`);
+  }
+});
+
+check('the match is case- and space-insensitive, as Jira keys reach us', () => {
+  /* A parent key arrives as whatever was stored — from a link, a changelog
+     or a hand-typed field — while the epic's own key is canonical. Matching
+     the two literally means an epic that IS in flight quietly stays counted,
+     and nothing on the page looks wrong. */
+  const snap = withSprint([{ key: 'S-1', type: 'Story', epic: ' a-1 ' }]);
+  const v = pz.view(snap, SPRINT_PLAN(), { excludeActiveSprint: true });
+  assert.strictEqual(v.activeSprint.epics, 1,
+    'a parent key differing only by case or padding was not matched to its epic');
+  assert.strictEqual(rowFor(v, 'PS_iGO_NLG').truetest.automated, 0);
+});
+
+check('A TEAM WITH TWO ACTIVE SPRINTS HAS BOTH READ', () => {
+  /* HIS ACTUAL BUG, reported against AUTOKAT-7465: still counted as Ready
+     for Automation with the option on, because its Story sat in Titan's
+     SECOND active sprint.
+
+     Titan runs "TT Week 14Sep" and "Katalon Titan Sprint 40" at the same
+     time; Katalon Automation runs three. `reconcile.activeSprint` is
+     singular by design — the Active sprint screen shows one — and using it
+     here read the first and silently ignored the rest. Every fixture in this
+     file had exactly one active sprint, so the suite passed throughout. */
+  const plan = {
+    ...PLAN(),
+    teams: [{ id: 'ruby', name: 'Katalon Ruby', jiraTeams: ['Katalon PS Squad'] }],
+    sprints: [
+      { id: 'wk', name: 'TT Week 14Sep', byTeam: { ruby: { jiraId: '900', name: 'TT Week 14Sep', state: 'active' } } },
+      { id: 's40', name: 'Sprint 40', byTeam: { ruby: { jiraId: '901', name: 'Titan Sprint 40', state: 'active' } } },
+    ],
+  };
+  const snap = { issues: { ...SNAP.issues }, byTeam: { ruby: { sprintIssues: { 900: ['S-1'], 901: ['S-2'] } } } };
+  const story = (key, epic) => ({
+    key, summary: key, issueType: 'Story', status: 'In Dev', parentKey: epic,
+    components: [], labels: [], team: 'Katalon PS Squad', relatesTo: [],
+  });
+  snap.issues['S-1'] = story('S-1', 'A-1');   // first active sprint
+  snap.issues['S-2'] = story('S-2', 'A-3');   // SECOND — the one that was skipped
+
+  const v = pz.view(snap, plan, { excludeActiveSprint: true });
+  assert.strictEqual(v.activeSprint.epics, 2,
+    'only one of the two active sprints was read — work in the second stayed counted');
+  assert.strictEqual(v.activeSprint.items, 2, 'it looked at only one sprint of items');
+  assert.deepStrictEqual(v.activeSprint.sprints.map(s => s.label), ['TT Week 14Sep', 'Titan Sprint 40'],
+    'the page must name every sprint it read, not just the first');
+
+  const row = rowFor(v, 'PS_iGO_NLG');
+  assert.strictEqual(row.truetest.automated, 0, 'the epic from the first sprint was still counted');
+  assert.strictEqual(row.kse.ready, 0,
+    'the epic from the SECOND active sprint was still counted — this is the reported bug');
+});
+
+check('ONLY THE ACTIVE SPRINT COUNTS, not a closed or future one', () => {
+  const snap = withSprint([{ key: 'S-1', type: 'Story', epic: 'A-1' }]);
+  for (const state of ['closed', 'future']) {
+    const plan = SPRINT_PLAN();
+    plan.sprints[0].byTeam.ruby.state = state;
+    assert.strictEqual(pz.view(snap, plan, { excludeActiveSprint: true }).activeSprint.epics, 0,
+      `work in a ${state} sprint was treated as in flight`);
+  }
+  // And a team with no active sprint at all is not an error.
+  const none = { ...SPRINT_PLAN(), sprints: [] };
+  const v = pz.view(snap, none, { excludeActiveSprint: true });
+  assert.strictEqual(v.activeSprint.epics, 0);
+  assert.deepStrictEqual(v.activeSprint.sprints, [], 'it named a sprint it never read');
+});
+
+check('IT NAMES THE SPRINTS IT READ, rather than asking to be trusted', () => {
+  const v = pz.view(withSprint([{ key: 'S-1', type: 'Story', epic: 'A-1' }]), SPRINT_PLAN(), { excludeActiveSprint: true });
+  assert.deepStrictEqual(v.activeSprint.sprints, [{ team: 'Katalon Ruby', label: 'Ruby Sprint 40' }],
+    'the page cannot say which sprint it called "active"');
+  assert.strictEqual(v.activeSprint.items, 1, 'it should report how many sprint items it looked at');
+});
+
+check('A ROW WHOSE EPICS ARE ALL IN FLIGHT GOES TO ZERO, not away', () => {
+  /* The component is still ranked, so it is still a row — with nothing left
+     in it. Dropping the row would say "this suite does not matter", when
+     what happened is that all of its work is already under way. */
+  const snap = withSprint([
+    { key: 'S-1', type: 'Story', epic: 'A-1' },
+    { key: 'S-2', type: 'Story', epic: 'A-2' },
+    { key: 'S-3', type: 'Story', epic: 'A-3' },
+    { key: 'S-4', type: 'Story', epic: 'A-4' },
+  ]);
+  const v = pz.view(snap, SPRINT_PLAN(), { excludeActiveSprint: true });
+  const row = rowFor(v, 'PS_iGO_NLG');
+  assert.ok(row, 'the row vanished when all of its epics were in flight');
+  assert.strictEqual(row.total, 0, 'the row should be empty');
+  assert.strictEqual(row.tracked, false, 'and marked as carrying nothing right now');
+  assert.strictEqual(v.activeSprint.epics, 4);
+});
+
+check('THE TOTALS AND THE CHIPS FOLLOW IT, so nothing on the page disagrees', () => {
+  const snap = withSprint([{ key: 'S-1', type: 'Story', epic: 'A-1' }]);
+  const v = pz.view(snap, SPRINT_PLAN(), { excludeActiveSprint: true });
+  const sum = (t, b) => v.rows.reduce((n, r) => n + r[t][b], 0);
+  for (const t of ['truetest', 'kse']) {
+    for (const b of v.buckets) assert.strictEqual(v.totals[t][b.key], sum(t, b.key));
+  }
+  assert.strictEqual(v.totals.total, v.rows.reduce((n, r) => n + r.total, 0));
+});
+
+check('AND THE DRILL-IN IS NARROWED THE SAME WAY — the number stays checkable', () => {
+  /* The cardinal rule of every drill-in in this app. `view` counts and
+     `epicsIn` lists; both run `coverage.classify`, so passing `omit` once
+     covers both. If it did not, a cell reading 0 would open a drawer listing
+     the epic it had just excluded. */
+  const snap = withSprint([{ key: 'S-1', type: 'Story', epic: 'A-1' }]);
+  const plan = SPRINT_PLAN();
+  const flight = pz.activeSprintEpics(plan, snap, plan.teams);
+  assert.ok(flight.keys.has('A-1'), 'fixture check: A-1 is in flight');
+
+  const opts = { scope: 'Epic', exclude: plan.excludedComponents, teams: [], omit: flight.keys };
+  const listed = coverage.epicsIn(snap, opts, { component: 'PS_iGO_NLG', buckets: ['automated'], tool: 'truetest' });
+  const counted = rowFor(pz.view(snap, plan, { excludeActiveSprint: true }), 'PS_iGO_NLG').truetest.automated;
+  assert.strictEqual(listed.length, counted,
+    `the cell says ${counted} and the drawer would list ${listed.length}`);
+  assert.ok(!listed.some(e => e.key === 'A-1'), 'the drawer lists the epic the count excluded');
+
+  // Without the omit, both go back up together — neither one alone.
+  const wide = coverage.epicsIn(snap, { ...opts, omit: null }, { component: 'PS_iGO_NLG', buckets: ['automated'], tool: 'truetest' });
+  assert.strictEqual(wide.length, rowFor(pz.view(snap, plan, { excludeActiveSprint: false }), 'PS_iGO_NLG').truetest.automated);
+});
+
+check('`omit` normalises what it is GIVEN too, not just what we give it', () => {
+  /* Tested against `coverage.classify` directly, because through this page it
+     cannot fail: `inFlightEpics` already uppercases on the way in, and Jira
+     keys arrive canonical. But `omit` is now a documented option on a shared
+     module, and the next caller to pass one will not necessarily normalise
+     first — at which point an epic silently stays counted and the page looks
+     entirely correct. Both ends normalise on purpose. */
+  const snap = { issues: { ...SNAP.issues } };
+  const lower = coverage.view(snap, { scope: 'Epic', exclude: [], teams: [], omit: new Set([' a-1 ']) });
+  assert.strictEqual(lower.omitted, 1, 'a lowercase, padded key in `omit` matched nothing');
+  const row = lower.byTool.find(r => r.component === 'PS_iGO_NLG');
+  assert.strictEqual(row.truetest.automated, 0, 'and the epic was still counted');
+
+  // An array works as well as a Set — callers should not have to guess.
+  assert.strictEqual(coverage.view(snap, { scope: 'Epic', exclude: [], teams: [], omit: ['A-1'] }).omitted, 1,
+    'an array of keys was not accepted');
+});
+
+check('and the Coverage screen is untouched by any of it', () => {
+  /* `omit` defaults to nothing, so the shared classifier behaves exactly as
+     it did for every caller that does not pass one. */
+  const snap = withSprint([{ key: 'S-1', type: 'Story', epic: 'A-1' }]);
+  const before = coverage.view(snap, { scope: 'Epic', exclude: [], teams: [] });
+  assert.strictEqual(before.omitted, 0, 'a caller passing no omit should have nothing omitted');
+  const row = before.byTool.find(r => r.component === 'PS_iGO_NLG');
+  assert.strictEqual(row.truetest.automated, 1, 'the Coverage reading changed');
+});
+
 /* ── 3. the note ─────────────────────────────────────────────────────── */
 
 check('A BLANK NOTE DELETES THE KEY — it does not store an empty string', () => {
@@ -442,10 +749,21 @@ function boot() {
   const puts = [];
   const urls = [];
   let payload = null;
+  /* A localStorage the view can actually use. Without one the column
+     switches fall into their try/catch and every column shows — which is the
+     safe failure, and also a suite that tests nothing about them. It is
+     shared across renders on purpose: "the columns you turned off are still
+     off tomorrow" is the thing being checked. */
+  const store = new Map();
   const ctx = {
     console, Promise, setTimeout, clearTimeout, encodeURIComponent,
     Charts: new Proxy({}, { get: () => () => '' }),
     App: { refresh() {} },
+    localStorage: {
+      getItem: (k) => (store.has(k) ? store.get(k) : null),
+      setItem: (k, v) => store.set(k, String(v)),
+      removeItem: (k) => store.delete(k),
+    },
     document: { createElement: () => fakeEl('x'), querySelector: () => fakeEl('x'), querySelectorAll: () => [] },
   };
   vm.createContext(ctx);
@@ -456,7 +774,7 @@ function boot() {
   ctx.UI.toast = () => {};
   ctx.UI.drawer = () => {};
   vm.runInContext(`${fs.readFileSync(path.join(PUBLIC, 'views', 'prioritization.js'), 'utf8')}\n;globalThis.__v = PrioritizationView;`, ctx);
-  return { ctx, puts, urls, setPayload: (p) => { payload = p; } };
+  return { ctx, puts, urls, store, setPayload: (p) => { payload = p; } };
 }
 
 /** One render, onto a FRESH mount — the node App hands a view each time. */
@@ -500,7 +818,7 @@ async function mountOnce(app, state = {}) {
      listener in this harness would quietly not be testing. */
   const chip = (attr, value, o = {}) => {
     const node = { dataset: { [attr]: String(value) }, disabled: !!o.disabled };
-    node.closest = (sel) => (sel === `[data-${attr === 'family' ? 'family' : 'level'}]` ? node : null);
+    node.closest = (sel) => (sel === `[data-${attr}]` ? node : null);
     fire('click', { target: { closest: node.closest } });
   };
 
@@ -510,6 +828,7 @@ async function mountOnce(app, state = {}) {
     table: () => get('#pzTable').innerHTML,
     clickLevel: (v) => chip('level', v),
     clickFamily: (v, o) => chip('family', v == null ? '' : v, o),
+    clickCol: (v, o) => chip('col', v, o),
     scopes: getAll('[data-scope]'),
     puts: app.puts,
     urls: app.urls,
@@ -645,6 +964,133 @@ check('the grid opts OUT of the shared sorter, which cannot read a two-row heade
   return renderPage(PAYLOAD()).then(p => {
     assert.match(p.table(), /<table class="pz" data-nosort>/,
       'the grid is still offered to a sorter that would map its columns wrongly');
+  });
+});
+
+/* ── hiding status columns ───────────────────────────────────────────────
+   Fourteen number columns is a lot when the question is narrower than the
+   grid. Each status can be switched off — in BOTH tool groups at once, so
+   TrueTest Automated always sits beside KSE Automated — and the choice is
+   remembered. The failure modes are an empty grid, groups that stop lining
+   up, and numbers quietly changing because a column went away. */
+
+/** What the header promises and what a row delivers. */
+const shape = (html) => {
+  const head = html.slice(html.indexOf('<thead'), html.indexOf('</thead>'));
+  const body = html.slice(html.indexOf('<tbody'), html.indexOf('</tbody>'));
+  const grouped = [...head.matchAll(/colspan="(\d+)"/g)].map(m => Number(m[1]));
+  return {
+    subs: (head.match(/class="[^"]*\bsub\b/g) || []).length,
+    grouped,
+    columns: (head.match(/rowspan="2"/g) || []).length + grouped.reduce((a, b) => a + b, 0),
+    cells: (body.split('<tr').slice(1)[0].match(/<td/g) || []).length,
+  };
+};
+
+check('A STATUS COLUMN CAN BE HIDDEN, in both groups at once', () => {
+  return renderPage(PAYLOAD()).then(p => {
+    assert.deepStrictEqual(shape(p.table()).grouped, [7, 7], 'fixture check: seven columns per tool');
+
+    p.clickCol('obsoleted');
+    const after = shape(p.table());
+    assert.deepStrictEqual(after.grouped, [6, 6],
+      'hiding a status did not remove it from BOTH groups — the two stop lining up by meaning');
+    assert.strictEqual(after.subs, 12, 'the sub-headers did not follow');
+    assert.strictEqual(after.cells, after.columns, 'the body no longer matches the header');
+    assert.ok(!/title="Obsoleted"/.test(p.table()), 'the hidden column still has a heading');
+    assert.match(p.table(), /title="Automated"/, 'a column that was not hidden went missing');
+  });
+});
+
+check('HIDING A COLUMN CHANGES WHAT IS DRAWN, never what is counted', () => {
+  /* The line between a lens and a scope. A column you are not looking at is
+     not a column whose epics stopped existing, so the counts above the grid
+     are untouched. */
+  return renderPage(PAYLOAD()).then(p => {
+    // The line now also names the scope, so match up to the separator.
+    const line = () => (p.table().match(/>(\d+) components? · ([\d,]+) \w+/) || []).slice(1, 3).join('/');
+    const was = line();
+    assert.ok(was, 'fixture check: the count line is readable');
+    p.clickCol('automated');
+    p.clickCol('maintenance');
+    assert.strictEqual(line(), was, 'hiding columns changed the counts above the grid');
+  });
+});
+
+check('THE LAST COLUMN CANNOT BE HIDDEN — that is a broken table, not a view', () => {
+  /* Two empty tool groups and a colspan of 0. The chip is disabled AND the
+     handler refuses: a rule enforced only by a disabled attribute is a rule
+     that holds until something dispatches the event another way. */
+  return renderPage(PAYLOAD()).then(p => {
+    const keys = coverage.BUCKETS.map(b => b.key);
+    for (const k of keys.slice(0, keys.length - 1)) p.clickCol(k);
+    assert.deepStrictEqual(shape(p.table()).grouped, [1, 1], 'fixture check: one column left per group');
+
+    const html = p.table();
+    p.clickCol(keys[keys.length - 1]);
+    assert.strictEqual(p.table(), html, 'the last column was hidden, leaving an empty grid');
+    assert.match(p.chipsHtml(), new RegExp(`data-col="${keys[keys.length - 1]}"[^>]*disabled`),
+      "the last column's chip is still clickable");
+  });
+});
+
+check('SHOW ALL BRINGS THEM BACK', () => {
+  return renderPage(PAYLOAD()).then(p => {
+    p.clickCol('na');
+    p.clickCol('obsoleted');
+    assert.deepStrictEqual(shape(p.table()).grouped, [5, 5]);
+    assert.match(p.chipsHtml(), /2 hidden/, 'the control does not say how many are hidden');
+
+    p.clickCol('__all');
+    assert.deepStrictEqual(shape(p.table()).grouped, [7, 7], 'Show all did not restore every column');
+    assert.ok(!/hidden/.test(p.chipsHtml()), 'it still claims something is hidden');
+  });
+});
+
+check('THE CHOICE IS REMEMBERED across a fresh visit', () => {
+  /* A column you switched off should still be off tomorrow. Same module and
+     same storage, a new mount — which is what returning to the page is. */
+  const app = boot();
+  app.setPayload(PAYLOAD());
+  return mountOnce(app).then(p => {
+    p.clickCol('none');
+    p.clickCol('na');
+    assert.deepStrictEqual(shape(p.table()).grouped, [5, 5]);
+    assert.ok(app.store.get('pt-pz-cols'), 'nothing was written to storage');
+    return mountOnce(app);
+  }).then(p2 => {
+    assert.deepStrictEqual(shape(p2.table()).grouped, [5, 5],
+      'the hidden columns came back on the next visit');
+    assert.ok(!/title="No Status"/.test(p2.table()));
+  });
+});
+
+check('a stored list that no longer makes sense is ignored, not obeyed', () => {
+  /* The remembered list outlives the model. A key for a renamed bucket hides
+     nothing; a list covering EVERY bucket — an older build, or a hand-edited
+     value — would render two empty groups and a colspan of 0. */
+  const app = boot();
+  app.setPayload(PAYLOAD());
+  app.store.set('pt-pz-cols', JSON.stringify(['ghost_bucket', 'obsoleted']));
+  return mountOnce(app).then(p => {
+    assert.deepStrictEqual(shape(p.table()).grouped, [6, 6], 'the unknown key hid a real column');
+
+    app.store.set('pt-pz-cols', JSON.stringify(coverage.BUCKETS.map(b => b.key)));
+    return mountOnce(app);
+  }).then(p2 => {
+    assert.deepStrictEqual(shape(p2.table()).grouped, [7, 7],
+      'a stored list hiding everything emptied the grid instead of being discarded');
+  });
+});
+
+check('and unreadable storage just shows every column', () => {
+  // localStorage throws in some contexts. A remembered layout is a
+  // convenience; losing it must not cost the page.
+  const app = boot();
+  app.setPayload(PAYLOAD());
+  app.ctx.localStorage.getItem = () => { throw new Error('denied'); };
+  return mountOnce(app).then(p => {
+    assert.deepStrictEqual(shape(p.table()).grouped, [7, 7], 'a storage failure broke the grid');
   });
 });
 
@@ -994,6 +1440,37 @@ check('THE EDIT CONTROLS SURVIVE A SECOND VISIT — a fresh mount is a fresh wir
       assert.strictEqual(p.puts.length, 1,
         'the second render of this page has dead controls — the wiring was bound to the first mount');
     });
+  });
+});
+
+check('THE NUMBERS SAY WHOSE THEY ARE — the scope sits on the count line', () => {
+  /* THE MISREADING THIS EXISTS TO PREVENT, and it was a real one: a Titan-
+     scoped Maintenance count of 9 taken for the portfolio's 25. The figures
+     were correct — 25 is 16 Ruby plus 9 Titan — but the only things naming
+     the scope were a chip row above and the header picker, neither of them
+     beside the numbers. And the chip reading "Everything" sat one control
+     away from "This team", which made it look global.
+
+     So the scope goes on the same line as the totals, and the wider chip
+     never claims more than the scope it sits inside. */
+  const team = { id: 'ruby', name: 'Katalon Ruby', jiraTeams: ['Katalon PS Squad'] };
+  const scoped = pz.view(SNAP, { ...PLAN(), teams: [team] }, { team });
+  return renderPage({ ...scoped, noteMax: notes.MAX, project: 'AUTOKAT' },
+    { teamId: 'ruby', teams: [team] }).then(p => {
+    const line = p.table().slice(0, p.table().indexOf('<div class="table-wrap"'));
+    assert.match(line, /Katalon Ruby/, 'the count line does not say which team these numbers are for');
+
+    const page = p.page();
+    assert.ok(!/>Everything</.test(page),
+      '"Everything" beside "This team" reads as every team — it means every epic in scope');
+    assert.match(page, />All epics</, 'the wider option should name what it actually widens');
+  });
+});
+
+check('and an unscoped page says so too, rather than saying nothing', () => {
+  return renderPage(PAYLOAD()).then(p => {
+    const line = p.table().slice(0, p.table().indexOf('<div class="table-wrap"'));
+    assert.match(line, /all teams/, 'the portfolio view should name itself on the count line');
   });
 });
 

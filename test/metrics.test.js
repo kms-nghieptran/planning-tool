@@ -253,6 +253,39 @@ check('ready to plan means estimated AND not blocked', () => {
   assert.strictEqual(b.blocked.count, 1);
 });
 
+check('THE BOARD FILTER REACHES THE BACKLOG PAYLOAD, index and all', () => {
+  /* The Backlog screen opens the whole queue as a Jira search on the board's
+     saved filter, because a key list runs out of URL — 892 keys opened 393.
+     That link exists only if the filter id survives two hops nobody watches:
+     the sync writes `boardFilterByTeam` onto the snapshot, `buildTeamIndex`
+     copies it to the team, and `backlogHealth` passes it out. Break either
+     hop and the screen falls back to a board view or a truncated key list,
+     which is a downgrade with nothing on screen to show for it. */
+  const { plan, snap } = delivery([{ number: 1, committed: 10, delivered: 10 }]);
+  snap.issues['B-1'] = { key: 'B-1', summary: 'x', issueType: 'Story', status: 'Open', statusCategory: 'new', points: 3, components: [], labels: [], sprints: [], sprintNames: [], blockedBy: [] };
+  snap.boardBacklogByTeam = { t1: ['B-1'] };
+  snap.boardFilterByTeam = { t1: { filterId: 12345, type: 'scrum', boardId: 1961 } };
+  snap.byTeam = r.buildTeamIndex(plan, snap);
+
+  assert.deepStrictEqual(snap.byTeam.t1.boardFilter, { filterId: 12345, type: 'scrum', boardId: 1961 },
+    'buildTeamIndex dropped the board filter');
+  const b = m.backlogHealth(plan, snap, TEAM);
+  assert.ok(b.boardFilter, 'backlogHealth did not pass the board filter out');
+  assert.strictEqual(b.boardFilter.filterId, 12345);
+});
+
+check('and a team with no filter read yet reports null, not a broken one', () => {
+  /* The state before the next full sync. It has to be a clean absence so the
+     screen falls back, rather than something that builds `filter = undefined`
+     and returns a Jira error page. */
+  const { plan, snap } = delivery([{ number: 1, committed: 10, delivered: 10 }]);
+  snap.issues['B-1'] = { key: 'B-1', summary: 'x', issueType: 'Story', status: 'Open', statusCategory: 'new', points: 3, components: [], labels: [], sprints: [], sprintNames: [], blockedBy: [] };
+  snap.boardBacklogByTeam = { t1: ['B-1'] };
+  snap.byTeam = r.buildTeamIndex(plan, snap);
+  assert.strictEqual(snap.byTeam.t1.boardFilter, null, 'a missing filter should be null, not undefined');
+  assert.strictEqual(m.backlogHealth(plan, snap, TEAM).boardFilter, null);
+});
+
 check('runway is points ÷ velocity, and null without velocity history', () => {
   const { plan, snap } = delivery([{ number: 1, committed: 10, delivered: 10 }]);
   snap.issues['B-1'] = { key: 'B-1', summary: 'x', issueType: 'Story', status: 'Open', statusCategory: 'new', points: 20, components: [], labels: [], sprints: [], sprintNames: [], blockedBy: [] };
