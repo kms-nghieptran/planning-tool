@@ -79,13 +79,20 @@ const SprintView = (() => {
       </section>
 
       <section class="section">
-        <div class="kpis">
-          ${UI.kpi({ label: 'Capacity', value: UI.int(t.predicted), unit: 'pts', foot: `${UI.num(t.capacityHours)} h across ${t.headcount} ${t.headcount === 1 ? 'person' : 'people'}`, tone: 'brand' })}
-          ${UI.kpi({ label: 'Committed', value: UI.drillNumber(p.committed, { act: 'drill', scope: '__sprint', col: 'committed' }, { zero: UI.int(p.committed) }), unit: 'pts', foot: `${UI.drillNumber(d.items.length, { act: 'drill', scope: '__sprint', col: 'items' })} items · ${headroom(t, p)}`, tone: t.predicted && p.committed > t.predicted ? 'risk' : '' })}
-          ${UI.kpi({ label: 'Done', value: UI.int(p.done), unit: 'pts', foot: `${p.donePct}% of commitment`, tone: p.donePct >= w.timeElapsedPct ? 'ok' : '' })}
-          ${UI.kpi({ label: 'Sprint elapsed', value: `${w.timeElapsedPct}`, unit: '%', foot: `Day ${w.elapsed} of ${w.workingDays} working days` })}
-          ${UI.kpi({ label: 'Projected landing', value: p.projected == null ? '—' : UI.int(p.projected), unit: 'pts', foot: p.projectedVsCommitted == null ? 'Not enough of the sprint elapsed' : (p.projectedVsCommitted >= 0 ? `${UI.num(p.projectedVsCommitted)} pts above commitment` : `${UI.num(Math.abs(p.projectedVsCommitted))} pts short`), tone: p.projectedVsCommitted == null ? '' : p.projectedVsCommitted < -2 ? 'risk' : 'ok' })}
-          ${UI.kpi({ label: 'Blocked', value: UI.drillNumber(p.blocked.count, { act: 'blocked' }, { zero: '0' }), unit: 'items', foot: `${UI.num(p.blocked.points)} pts in Refinement`, tone: p.blocked.count ? 'risk' : 'ok' })}
+        ${/* ACCENTED: one hue per measure, status on the card's edge. Six cards
+             whose colour meant only "good or bad" came out as four cards in
+             two colours — Committed and Projected landing both pink, Done and
+             Sprint elapsed both black — so the strip said nothing about WHICH
+             number you were looking at. `styles.css` carries the palette and
+             the argument; the tones below are unchanged and now draw the
+             edge rather than the number. */ ''}
+        <div class="kpis accented">
+          ${UI.kpi({ label: 'Capacity', accent: 'capacity', value: UI.int(t.predicted), unit: 'pts', foot: `${UI.num(t.capacityHours)} h across ${t.headcount} ${t.headcount === 1 ? 'person' : 'people'}` })}
+          ${UI.kpi({ label: 'Committed', accent: 'committed', value: UI.drillNumber(p.committed, { act: 'drill', scope: '__sprint', col: 'committed' }, { zero: UI.int(p.committed) }), unit: 'pts', foot: `${UI.drillNumber(d.items.length, { act: 'drill', scope: '__sprint', col: 'items' })} items · ${headroom(t, p)}`, tone: t.predicted && p.committed > t.predicted ? 'risk' : '' })}
+          ${UI.kpi({ label: 'Done', accent: 'done', value: UI.int(p.done), unit: 'pts', foot: `${p.donePct}% of commitment`, tone: p.donePct >= w.timeElapsedPct ? 'ok' : '' })}
+          ${UI.kpi({ label: 'Sprint elapsed', accent: 'elapsed', value: `${w.timeElapsedPct}`, unit: '%', foot: `Day ${w.elapsed} of ${w.workingDays} working days` })}
+          ${UI.kpi({ label: 'Projected landing', accent: 'projected', value: p.projected == null ? '—' : UI.int(p.projected), unit: 'pts', foot: p.projectedVsCommitted == null ? 'Not enough of the sprint elapsed' : (p.projectedVsCommitted >= 0 ? `${UI.num(p.projectedVsCommitted)} pts above commitment` : `${UI.num(Math.abs(p.projectedVsCommitted))} pts short`), tone: p.projectedVsCommitted == null ? '' : p.projectedVsCommitted < -2 ? 'risk' : 'ok' })}
+          ${UI.kpi({ label: 'Blocked', accent: 'blocked', value: UI.drillNumber(p.blocked.count, { act: 'blocked' }, { zero: '0' }), unit: 'items', foot: `${UI.num(p.blocked.points)} pts in Refinement`, tone: p.blocked.count ? 'risk' : 'ok' })}
         </div>
       </section>
 

@@ -91,6 +91,31 @@
   --cov-obsoleted:   var(--brand-purple); --cov-obsoleted-ink:   #6E3AFF;
   --cov-none:        var(--app-fg-2);     --cov-none-ink:        var(--app-fg-2);
 
+  /* THE SPRINT KPI STRIP, one hue per measure.
+     Six cards side by side, and until now their colour carried STATUS alone:
+     Committed and Projected landing were both pink because both were bad,
+     Done and Sprint elapsed both black because neither was — so the strip had
+     four cards in two colours and you had to read the label to know which
+     number you were looking at. The same mistake the coverage grid made with
+     its two greys.
+
+     So hue carries IDENTITY here, and status moves to the card's left edge
+     (see `.kpis.accented`), which is the two-channel rule this file already
+     follows for the buckets and the tools. The foot line was already saying
+     "1 pts over capacity" in red; nothing about the warning is lost.
+
+     The hues are picked to mean something rather than to be merely different:
+     blue for supply, purple for what was promised against it, teal for work
+     finished, neutral for the clock — a strip where every number shouts has
+     nothing left to raise its voice — amber for a forecast rather than a
+     fact, and pink, this app's `--risk`, for what is held up. */
+  --kpi-capacity:  var(--brand-blue);
+  --kpi-committed: var(--brand-purple);
+  --kpi-done:      #00736A;
+  --kpi-elapsed:   var(--app-fg);
+  --kpi-projected: #9A5D00;
+  --kpi-blocked:   var(--brand-pink);
+
   /* THE TOOLS, on the other channel. Where a tool appears alone — a share
      bar, an eyebrow, a legend — it takes a hue. Where it appears ALONGSIDE
      the buckets, as on the Prioritization grid, it is a tinted band instead,
@@ -146,6 +171,17 @@
   --cov-blocked-ink:     #FF8FB8;
   --cov-obsoleted-ink:   #A98BFF;
   --cov-none-ink:        var(--app-fg-2);
+  /* The KPI hues that do not survive the dark card. Teal and amber are the
+     obvious ones — both under 3.3:1 here, as everywhere else in this block.
+     PURPLE IS THE ONE THAT NEARLY SHIPPED WRONG: `--brand-purple` is the only
+     brand hue this theme never lifted, because until now nothing rendered it
+     as large text on the dark surface. At #6E3AFF, Committed came out at
+     2.98:1 — under the floor for its own size, in one theme only, which is
+     exactly the defect a screenshot of the other theme cannot show. #A98BFF
+     is the lift the status and bucket inks above already use. */
+  --kpi-done:      #34D8C8;
+  --kpi-projected: #F0A93B;
+  --kpi-committed: #A98BFF;
   --tool-band-a:   color-mix(in srgb, var(--brand-blue) 9%, transparent);
   --tool-band-b:   color-mix(in srgb, var(--brand-purple) 11%, transparent);
   --cov-outside:   color-mix(in srgb, var(--app-fg-3) 10%, transparent);
@@ -516,6 +552,30 @@ tr.exempt .name-cell { font-style: italic; }
 .kpi.t-warn .value  { color: var(--warn); }
 .kpi.t-risk .value  { color: var(--risk); }
 .kpi.t-brand .value { color: var(--brand-blue); }
+
+/* ── THE ACCENTED KPI STRIP ──────────────────────────────────────────────
+   Opt-in, on the container. Every other KPI row in the app has one or two
+   cards and no identity problem, and colouring their values by position
+   would be decoration; this is for the row of six on the Active sprint.
+
+   SCOPED RATHER THAN MORE SPECIFIC BY ACCIDENT: `.kpi.k-done .value` and
+   `.kpi.t-risk .value` have identical specificity, so which one won would
+   depend on the order of these two blocks — a rule nobody would think to
+   preserve while tidying. Prefixing with the container settles it. */
+.kpis.accented .kpi.k-capacity  .value { color: var(--kpi-capacity); }
+.kpis.accented .kpi.k-committed .value { color: var(--kpi-committed); }
+.kpis.accented .kpi.k-done      .value { color: var(--kpi-done); }
+.kpis.accented .kpi.k-elapsed   .value { color: var(--kpi-elapsed); }
+.kpis.accented .kpi.k-projected .value { color: var(--kpi-projected); }
+.kpis.accented .kpi.k-blocked   .value { color: var(--kpi-blocked); }
+
+/* STATUS, on the edge instead of on the number. An inset shadow rather than
+   a border: a border would move the text of the cards that have one three
+   pixels right of the cards that do not, and a row of six where half the
+   labels are out of line is worse than the problem being solved. */
+.kpis.accented .kpi.t-ok   { box-shadow: inset 3px 0 0 var(--ok); }
+.kpis.accented .kpi.t-warn { box-shadow: inset 3px 0 0 var(--warn); }
+.kpis.accented .kpi.t-risk { box-shadow: inset 3px 0 0 var(--risk); }
 
 /* ───────── tables ───────── */
 
@@ -1429,6 +1489,12 @@ svg text { font-family: var(--font-family-sans, Poppins, system-ui, sans-serif);
 
   /* Shadows and hovers are screen effects; on paper they are grey smudges. */
   .card, .kpi, .featured { box-shadow: none !important; }
+  /* ...except the status edge, which is not decoration: it is the only mark
+     on the card that says this number is a problem, and the printed sprint
+     report is read by people who were not at the standup. */
+  .kpis.accented .kpi.t-ok   { box-shadow: inset 3px 0 0 var(--ok) !important; }
+  .kpis.accented .kpi.t-warn { box-shadow: inset 3px 0 0 var(--warn) !important; }
+  .kpis.accented .kpi.t-risk { box-shadow: inset 3px 0 0 var(--risk) !important; }
   tbody tr:hover { background: transparent !important; }
 
   /* A link's colour means nothing in a PDF, and the key itself is what you

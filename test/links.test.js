@@ -815,6 +815,148 @@ check('EVERY DRAWER THAT LISTS ISSUES OFFERS THE BUTTON', () => {
     'drillDrawer lost its button');
 });
 
+/* ── THE SPRINT KPI STRIP'S COLOURS ───────────────────────────────────────
+   Colour here is not decoration: six cards sat side by side in two colours
+   because hue carried STATUS alone, so the strip could not say which measure
+   you were reading. Hue now carries identity and status moved to the card's
+   edge — which only works if every accent the view asks for actually has a
+   hue, and if that hue can be read on both themes. Neither is visible in a
+   screenshot of the theme you happen to be using. */
+
+/** Resolve a CSS custom property through however many `var()` hops, per theme. */
+const tokens = (css, selector) => {
+  const at = css.indexOf(selector);
+  assert.ok(at >= 0, `no ${selector} block in styles.css`);
+  const block = css.slice(at, css.indexOf('\n}', at));
+  const map = new Map();
+  for (const m of block.matchAll(/(--[\w-]+):\s*([^;]+);/g)) map.set(m[1], m[2].trim());
+  return map;
+};
+const resolve = (name, ...maps) => {
+  let v = null;
+  for (const m of maps) if (m.has(name)) { v = m.get(name); break; }
+  for (let hop = 0; v && hop < 8; hop++) {
+    const m = /^var\(\s*(--[\w-]+)\s*(?:,\s*(#[0-9a-fA-F]{3,8})\s*)?\)$/.exec(v);
+    if (!m) break;
+    let next = null;
+    for (const mm of maps) if (mm.has(m[1])) { next = mm.get(m[1]); break; }
+    v = next || m[2] || null;
+  }
+  return /^#[0-9a-fA-F]{6}$/.test(v || '') ? v.toUpperCase() : null;
+};
+const lum = (hex) => {
+  const c = hex.slice(1).match(/../g).map(x => parseInt(x, 16) / 255)
+    .map(v => (v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4));
+  return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+};
+const contrast = (a, b) => {
+  const x = lum(a), y = lum(b);
+  return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05);
+};
+
+/** The accents the Active sprint view actually asks for, in the order it asks. */
+const accentsUsed = () => {
+  const view = read(VIEWS, 'sprint.js');
+  const strip = view.slice(view.indexOf('<div class="kpis accented">'), view.indexOf('</div>', view.indexOf('<div class="kpis accented">')));
+  assert.ok(strip, 'the accented KPI strip is not in the view');
+  return [...strip.matchAll(/accent:\s*'([\w-]+)'/g)].map(m => m[1]);
+};
+
+check('EVERY KPI IN THE SPRINT STRIP ASKS FOR AN ACCENT, and no two ask for the same one', () => {
+  const view = read(VIEWS, 'sprint.js');
+  const from = view.indexOf('<div class="kpis accented">');
+  const strip = view.slice(from, view.indexOf('</div>', from));
+  const cards = (strip.match(/UI\.kpi\(\{/g) || []).length;
+  const used = accentsUsed();
+  assert.ok(cards >= 6, `expected the full strip, found ${cards} cards`);
+  assert.strictEqual(used.length, cards,
+    `${cards} cards but ${used.length} accents — one would fall back to plain text and read as a seventh meaning`);
+  assert.strictEqual(new Set(used).size, used.length,
+    `two cards share an accent, which is the problem this was meant to fix: ${used.join(', ')}`);
+});
+
+check('AND EVERY ACCENT HAS A HUE AND A RULE — a typo is a silent no-op', () => {
+  /* `accent: 'commited'` renders `class="kpi k-commited"`, matches nothing,
+     and inherits the default text colour. The card looks exactly like the
+     neutral one next to it and nothing anywhere fails. */
+  const css = read(PUBLIC, 'styles.css');
+  for (const a of accentsUsed()) {
+    assert.ok(css.includes(`--kpi-${a}:`), `no --kpi-${a} token for the accent the view asks for`);
+    // Whitespace-tolerant: the rules are column-aligned in the stylesheet, and
+    // a check that breaks on a second space is a check that gets deleted.
+    assert.match(css, new RegExp(`\\.kpis\\.accented \\.kpi\\.k-${a}\\s+\\.value`), `no rule paints .k-${a}`);
+  }
+});
+
+check('THE HUES ARE READABLE ON BOTH THEMES, which no screenshot can show', () => {
+  /* 3:1 is the WCAG AA floor for large text, and these are 30px at weight
+     800 — comfortably past the 18.66px-bold threshold. Five of the six clear
+     4.5 as well; `blocked` is the app's own `--risk` pink, which already
+     carries numbers this size elsewhere. */
+  const css = read(PUBLIC, 'styles.css');
+  const light = tokens(css, ':root {');
+  const dark = tokens(css, '[data-theme="dark"] {');
+  const LIGHT_BG = '#FFFFFF', DARK_BG = '#181A38';
+  assert.strictEqual(resolve('--app-surface', dark), DARK_BG,
+    'the dark card is no longer the colour this check measures against');
+
+  const bad = [];
+  for (const a of accentsUsed()) {
+    const l = resolve(`--kpi-${a}`, light);
+    const d = resolve(`--kpi-${a}`, dark, light);
+    assert.ok(l, `--kpi-${a} does not resolve to a hex colour in light mode`);
+    assert.ok(d, `--kpi-${a} does not resolve to a hex colour in dark mode`);
+    if (contrast(l, LIGHT_BG) < 3) bad.push(`${a} light ${l} ${contrast(l, LIGHT_BG).toFixed(2)}:1`);
+    if (contrast(d, DARK_BG) < 3) bad.push(`${a} dark ${d} ${contrast(d, DARK_BG).toFixed(2)}:1`);
+  }
+  assert.deepStrictEqual(bad, [], `KPI hues below the large-text floor:\n      ${bad.join('\n      ')}`);
+});
+
+check('NO TWO KPIS IN THE STRIP SHARE A HUE, in either theme', () => {
+  // The exact failure being fixed: Committed and Projected landing were both
+  // `--risk` pink, so the two numbers a lead compares first looked identical.
+  const css = read(PUBLIC, 'styles.css');
+  const light = tokens(css, ':root {');
+  const dark = tokens(css, '[data-theme="dark"] {');
+  for (const [theme, maps] of [['light', [light]], ['dark', [dark, light]]]) {
+    const seen = new Map();
+    for (const a of accentsUsed()) {
+      const hex = resolve(`--kpi-${a}`, ...maps);
+      assert.ok(!seen.has(hex), `${theme}: ${a} and ${seen.get(hex)} are both ${hex}`);
+      seen.set(hex, a);
+    }
+  }
+});
+
+check('STATUS STILL HAS A CHANNEL — the edge, and it survives printing', () => {
+  /* Moving status off the number is only safe because it lands somewhere
+     else. Dropping these three rules would leave a strip where nothing marks
+     the number that is a problem, and every card would still look deliberate. */
+  const css = read(PUBLIC, 'styles.css');
+  /* SPLIT THE SCREEN RULES FROM THE PRINT ONES FIRST. The print block restates
+     these three with `!important`, so a search of the whole file finds them
+     there and passes with the on-screen rules deleted — the edge would then
+     appear on paper and nowhere else. Anchored on the restatement and the
+     `@media print` that encloses it, because this file has seven print blocks
+     and the first of them is four hundred lines above these rules. */
+  const restated = css.indexOf('inset 3px 0 0 var(--risk) !important');
+  assert.ok(restated > 0, 'the print restatement is gone');
+  const screen = css.slice(0, css.lastIndexOf('@media print', restated));
+  for (const t of ['ok', 'warn', 'risk']) {
+    assert.match(screen, new RegExp(`\\.kpis\\.accented \\.kpi\\.t-${t}\\s*\\{[^}]*inset 3px 0 0`),
+      `no status edge for t-${t} on screen`);
+  }
+  const print = css.slice(css.indexOf('@media print'));
+  assert.match(print, /\.kpis\.accented \.kpi\.t-risk\s*\{[^}]*inset 3px 0 0[^}]*!important/,
+    'the blanket box-shadow reset takes the status edge off the printed report');
+  // ...and the view must still pass the tones, or the rules paint nothing.
+  const view = read(VIEWS, 'sprint.js');
+  const from = view.indexOf('<div class="kpis accented">');
+  const strip = view.slice(from, view.indexOf('</div>', from));
+  assert.ok((strip.match(/tone:/g) || []).length >= 3,
+    'the strip stopped passing tones, so no card can show a status edge');
+});
+
 (async () => {
   for (const [name, fn] of checks) {
     try { await fn(); passed++; console.log(`  ✓ ${name}`); }

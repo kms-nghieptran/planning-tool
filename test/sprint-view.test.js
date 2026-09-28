@@ -796,6 +796,21 @@ check('a sprint with no bucket stories says nothing about test cases', async () 
 const kpis = (html) => [...html.matchAll(/<div class="label">([^<]*)<\/div>\s*<div class="value[^"]*">([^<]*)/g)]
   .map(m => [m[1].trim(), m[2].trim()]);
 
+/**
+ * The KPI row.
+ *
+ * Matched on the class TOKEN, not on `class="kpis"` verbatim — the strip
+ * gained a second class the day its cards got their own hues, and three
+ * checks that had hard-coded the whole attribute went looking for a row that
+ * no longer existed. Two of them then reported "the KPI row did not render",
+ * which was true of the string and false of the page.
+ */
+const kpiStrip = (html) => {
+  const at = html.search(/<div class="kpis[\s"]/);
+  assert.ok(at >= 0, 'the KPI row did not render');
+  return html.slice(at, html.indexOf('</section>', at));
+};
+
 check('CAPACITY LEADS THE KPI ROW, immediately before Committed', async () => {
   const { html } = await renderHtml();
   const labels = kpis(html).map(([l]) => l);
@@ -819,7 +834,7 @@ check('THE HEADROOM IS MEASURED AGAINST THIS SCREEN\'S OWN COMMITMENT', async ()
   const gap = Math.round((payload.totals.predicted - payload.progress.committed) * 10) / 10;
   assert.notStrictEqual(payload.totals.planned, payload.progress.committed,
     'fixture check: this sprint has work outside the roster, or the check proves nothing');
-  const strip = html.slice(html.indexOf('<div class="kpis">'), html.indexOf('</section>', html.indexOf('<div class="kpis">')));
+  const strip = kpiStrip(html);
   assert.ok(strip.includes(`${gap} pts of headroom`) || strip.includes(`${Math.abs(gap)} pts over capacity`),
     `the headroom does not match capacity minus commitment (${gap})`);
 });
@@ -1508,9 +1523,7 @@ check('DUPLICATE BLOCKERS ACROSS EPICS COLLAPSE, so the count is a set', async (
  * text walked straight through it.
  */
 const kpiCard = (html, label) => {
-  const row = html.indexOf('<div class="kpis"');
-  assert.ok(row > 0, 'the KPI row did not render');
-  const section = html.slice(row, html.indexOf('</section>', row));
+  const section = kpiStrip(html);
   const card = section.split('<div class="kpi ').find(c => c.includes(`>${label}</div>`));
   assert.ok(card, `no KPI labelled ${label}`);
   // The last card in the row has no next card to stop at, so bound it on the
@@ -1519,6 +1532,27 @@ const kpiCard = (html, label) => {
   assert.ok(card.length < 1200, `the KPI slice ran past its card (${card.length} chars)`);
   return card;
 };
+
+check('EVERY KPI CARD CARRIES ITS OWN ACCENT CLASS, or the hues paint nothing', async () => {
+  /* `UI.kpi` builds the class list, and dropping `accent` from it is a silent
+     no-op: the strip renders, every number is the default colour, and the
+     stylesheet is still full of rules that match no element. The CSS side is
+     checked in links.test.js; this is the half that only shows up in markup. */
+  const { html } = await renderHtml();
+  const section = kpiStrip(html);
+  const expected = {
+    Capacity: 'capacity', Committed: 'committed', Done: 'done',
+    'Sprint elapsed': 'elapsed', 'Projected landing': 'projected', Blocked: 'blocked',
+  };
+  for (const [label, accent] of Object.entries(expected)) {
+    const card = section.split('<div class="kpi ').find(c => c.includes(`>${label}</div>`));
+    assert.ok(card, `no KPI labelled ${label}`);
+    assert.ok(card.slice(0, card.indexOf('>')).includes(`k-${accent}`),
+      `${label} is not painted: ${card.slice(0, card.indexOf('>'))}`);
+  }
+  assert.match(section.slice(0, 40), /class="kpis[^"]*\baccented\b/,
+    'the row does not opt in, so none of the rules apply to it');
+});
 
 check('THE BLOCKED KPI COUNTS THE REFINEMENT COLUMN, not "is blocked by" links', async () => {
   /* The reason this screen exists in its current form: on his sprints not one

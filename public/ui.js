@@ -128,8 +128,16 @@ const UI = (() => {
 
   // variant 'text' is for names and labels: the 800-weight stat style is reserved
   // for figures, per the KMS house rules.
-  const kpi = ({ label, value, unit, foot, tone = '', featured = false, variant = '' }) => `
-    <div class="kpi ${tone ? `t-${tone}` : ''}${featured ? ' featured card' : ''}">
+  /**
+   * `accent` — the KPI's own identity, separate from `tone`, which is its
+   * STATUS. A strip where colour means only "good or bad" has as many colours
+   * as it has states, so cards measuring completely different things end up
+   * identical; the styles file carries the reasoning and the hues. Only the
+   * container opts in (`.kpis accented`), so every other KPI row in the app
+   * renders exactly as before whether or not it passes one.
+   */
+  const kpi = ({ label, value, unit, foot, tone = '', featured = false, variant = '', accent = '' }) => `
+    <div class="kpi ${tone ? `t-${tone}` : ''}${accent ? ` k-${accent}` : ''}${featured ? ' featured card' : ''}">
       <div class="label">${esc(label)}</div>
       <div class="value${variant === 'text' ? ' text' : ''}">${value}${unit ? `<small>${esc(unit)}</small>` : ''}</div>
       ${foot ? `<div class="foot">${foot}</div>` : ''}
