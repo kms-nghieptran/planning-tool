@@ -58,20 +58,126 @@ check('AND A LATER MOVE FROM MAINTENANCE IS MAINTENANCE', () => {
   assert.strictEqual(by.Mar.kseBuild, 0, 'and not counted as a second build');
 });
 
-check('an epic whose FIRST arrival came from Maintenance is still a build', () => {
-  // An epic cannot be re-automated before it has been automated once. Taking
-  // this the other way round reports an epic as maintained without ever
-  // reporting it built, and the build column is permanently short.
+check('A FIRST ARRIVAL IS A BUILD EVEN IF IT CAME FROM MAINTENANCE', () => {
+  /* His correction, and it overturns an inference I made and he rejected:
+     that Maintenance implies a working suite, so leaving it proves an earlier
+     build. It does not — Maintenance gets set on epics that were never
+     automated, so the implication relabels real builds as returns.
+
+     The rule is the one thing that is not an inference: has this epic ARRIVED
+     at Automated before? Nothing else counts. */
   const p = bp.profile([epic('E3', [
     move('2026-03-12', 'Maintenance', 'Automated'),
     move('2026-04-02', 'Automated', 'Maintenance'),
     move('2026-04-20', 'Maintenance', 'Automated'),
   ], { tt: true })], { grain: 'month', periods: 2, asOf: '2026-04-25' });
   const by = Object.fromEntries(p.periods.map(x => [x.label, x.counts]));
-  assert.strictEqual(by.Mar.ttBuild, 1, 'the first arrival is the build');
+  assert.strictEqual(by.Mar.ttBuild, 1, 'the first arrival is the build, whatever it came from');
   assert.strictEqual(by.Mar.ttMaint, 0);
-  assert.strictEqual(by.Apr.ttMaint, 1, 'and the second is maintenance');
+  assert.strictEqual(by.Apr.ttMaint, 1, 'and the second arrival is the return');
   assert.strictEqual(by.Apr.ttBuild, 0);
+});
+
+check('A DEPARTURE FROM AUTOMATED IS NOT EVIDENCE OF A BUILD — AUTOKAT-9020', () => {
+  /* The real epic, its real stored history. It opens with the Automation
+     Status field being CLEARED from Automated, is tidied twice more inside
+     eight minutes, and is automated for the first time seven weeks later.
+
+     Reading that opening `Automated → ""` as proof of an earlier build makes
+     the September arrival a return — which is how a brand-new TrueTest suite
+     came to be counted as maintenance. There is no arrival before it, so it
+     is a build. */
+  const p = bp.profile([epic('AUTOKAT-9020', [
+    move('2026-07-29T23:46:24', 'Automated', ''),
+    move('2026-07-29T23:46:28', null, 'Ready for Automation'),
+    move('2026-07-29T23:54:39', 'Ready for Automation', ''),
+    move('2026-07-30T03:09:46', null, 'Ready for Automation'),
+    move('2026-09-13T13:49:11', 'Ready for Automation', 'Automated'),
+  ], { tt: true })], { grain: 'month', periods: 3, asOf: '2026-09-28' });
+  const by = Object.fromEntries(p.periods.map(x => [x.label, x.counts]));
+  assert.strictEqual(p.events, 1, 'the clears and re-tags are not events');
+  assert.strictEqual(by.Sep.ttBuild, 1, 'a first automation was counted as maintenance');
+  assert.strictEqual(by.Sep.ttMaint, 0);
+});
+
+check('and the same epic DOES report a return once it is automated twice', () => {
+  // The other side of it: the rule must not have become "everything is a
+  // build". One more arrival after September and that one is maintenance.
+  const p = bp.profile([epic('AUTOKAT-9020', [
+    move('2026-07-29T23:46:24', 'Automated', ''),
+    move('2026-09-13T13:49:11', 'Ready for Automation', 'Automated'),
+    move('2026-09-20T10:00:00', 'Automated', 'Maintenance'),
+    move('2026-09-25T10:00:00', 'Maintenance', 'Automated'),
+  ], { tt: true })], { grain: 'month', periods: 3, asOf: '2026-09-28' });
+  const by = Object.fromEntries(p.periods.map(x => [x.label, x.counts]));
+  assert.strictEqual(by.Sep.ttBuild, 1);
+  assert.strictEqual(by.Sep.ttMaint, 1);
+});
+
+/* ── THE ROUTE BACK IS NOT PART OF THE RULE ───────────────────────────────
+   His five paths, each one a real shape in the store. The old rule required
+   the return to arrive directly FROM Maintenance, which counted the first and
+   dropped the other four — and dropped them SILENTLY: they were not moved to
+   the build column, they left the chart, so the bars were short and nothing on
+   the screen said so. Four of the five are therefore regression checks on a
+   defect that shipped, not hypotheticals. */
+
+const RETURN_PATHS = [
+  ['Automated > Maintenance > Automated',
+    [['2026-02-01', 'Automated', 'Maintenance'], ['2026-03-05', 'Maintenance', 'Automated']]],
+  ['Automated > Maintenance > Ready for Automation > Automated',
+    [['2026-02-01', 'Automated', 'Maintenance'], ['2026-02-10', 'Maintenance', 'Ready for Automation'],
+      ['2026-03-05', 'Ready for Automation', 'Automated']]],
+  ['Automated > Maintenance > Blocked > Automated',
+    [['2026-02-01', 'Automated', 'Maintenance'], ['2026-02-10', 'Maintenance', 'Blocked'],
+      ['2026-03-05', 'Blocked', 'Automated']]],
+  ['Automated > Maintenance > Blocked > Ready for Automation > Automated',
+    [['2026-02-01', 'Automated', 'Maintenance'], ['2026-02-10', 'Maintenance', 'Blocked'],
+      ['2026-02-20', 'Blocked', 'Ready for Automation'], ['2026-03-05', 'Ready for Automation', 'Automated']]],
+  /* NO MAINTENANCE STEP ANYWHERE, and still maintenance. This is the path that
+     settles what the rule is about: a suite that broke and was fixed, not a
+     status it was parked in on the way back. A rule written around the word
+     "Maintenance" cannot count this one at all. */
+  ['Automated > Blocked > Ready for Automation > Automated',
+    [['2026-02-01', 'Automated', 'Blocked'], ['2026-02-10', 'Blocked', 'Ready for Automation'],
+      ['2026-03-05', 'Ready for Automation', 'Automated']]],
+];
+
+for (const [name, steps] of RETURN_PATHS) {
+  check(`RETURN COUNTS AS MAINTENANCE — ${name}`, () => {
+    const p = bp.profile([epic('R1', [
+      move('2026-01-15', 'Ready for Automation', 'Automated'),   // the real build
+      ...steps.map(a => move(...a)),
+    ])], { grain: 'month', periods: 3, asOf: '2026-03-20' });
+    const by = Object.fromEntries(p.periods.map(x => [x.label, x.counts]));
+    assert.strictEqual(by.Jan.kseBuild, 1, 'the build in January is still the build');
+    assert.strictEqual(by.Mar.kseMaint, 1, `the return was not counted: ${name}`);
+    assert.strictEqual(by.Mar.kseBuild, 0, 'and it is not a second build');
+    // Nothing may vanish: one build plus one return is two events, no more.
+    assert.strictEqual(p.periods.reduce((t, x) => t + (x.total || 0), 0), 2,
+      'an event was dropped or invented on the way');
+  });
+}
+
+check('A STEP THAT IS NOT AN ARRIVAL IS NOT AN EVENT, however long the path', () => {
+  // The walk now reads every row, so the risk moves the other way: a route
+  // with four hops must still produce ONE event, not four.
+  const p = bp.profile([epic('R2', [
+    move('2026-01-15', 'Ready for Automation', 'Automated'),
+    move('2026-02-01', 'Automated', 'Maintenance'),
+    move('2026-02-10', 'Maintenance', 'Blocked'),
+    move('2026-02-20', 'Blocked', 'Ready for Automation'),
+  ])], { grain: 'month', periods: 3, asOf: '2026-03-20' });
+  assert.strictEqual(p.events, 1, 'the hops that never reached Automated were counted as events');
+  assert.strictEqual(p.periods.find(x => x.label === 'Feb').total, 0);
+});
+
+check('AND AN EPIC THAT NEVER LEFT AUTOMATED HAS ONE EVENT, not one per edit', () => {
+  const p = bp.profile([epic('R3', [
+    move('2026-01-15', 'Ready for Automation', 'Automated'),
+    move('2026-02-01', 'Automated', 'Automated'),
+  ])], { grain: 'month', periods: 3, asOf: '2026-03-20' });
+  assert.strictEqual(p.events, 1);
 });
 
 check('THE CHANGELOG IS SORTED BEFORE "FIRST" IS DECIDED', () => {

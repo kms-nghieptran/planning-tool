@@ -385,6 +385,27 @@ await check('an item with no component gets a row rather than vanishing', () => 
   assert.match(r.rows[0].component, /no component/i);
 });
 
+await check('EVERY COMPONENT ROW CARRIES THE KEYS IT COUNTED', () => {
+  /* The component name on screen is a link to these issues. A count without
+     its key list leaves the screen to write its own query from the component
+     name and the sprint — a second question, whose answer can differ from the
+     number beside it with nothing to say which is wrong. */
+  const items = [
+    { ...comp({ points: 5, components: ['A_One'] }), key: 'X-1' },
+    { ...comp({ points: 3, components: ['A_One', 'B_Two'] }), key: 'X-2' },
+    { ...comp({ points: 2, components: ['B_Two'] }), key: 'X-3' },
+  ];
+  const r = insights.componentProgress(items);
+  for (const row of r.rows) {
+    assert.strictEqual(row.keys.length, row.count, `${row.component}: ${row.count} counted, ${row.keys.length} keys`);
+  }
+  const a = r.rows.find(x => x.component === 'A_One');
+  assert.deepStrictEqual(a.keys.slice().sort(), ['X-1', 'X-2']);
+  // An item in two components is counted in each, so its key is in each list.
+  const b = r.rows.find(x => x.component === 'B_Two');
+  assert.ok(b.keys.includes('X-2'), 'a shared item is missing from the second component');
+});
+
 await check('and the rows flag what needs attention', () => {
   const r = insights.componentProgress([
     comp({ points: 5, components: ['A_One'], status: 'Refinement' }),

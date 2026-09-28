@@ -553,6 +553,49 @@ tr.exempt .name-cell { font-style: italic; }
 .kpi.t-risk .value  { color: var(--risk); }
 .kpi.t-brand .value { color: var(--brand-blue); }
 
+/* A due date that lands after the sprint it was committed to. Amber rather
+   than red: the item is not wrong, it is dated outside the window it was
+   planned in, which is a question for planning rather than an alarm. It reuses
+   the status ramp so it sits in the same visual system as the column beside
+   it. */
+.st-late { color: var(--warn); font-weight: var(--font-weight-medium, 500); }
+
+/* OVERDUE IS A DIFFERENT FACT FROM LATE, so it gets the other end of the
+   ramp: the date has passed and the work is not done. `--risk`, the same
+   colour every other "act on this today" in the app uses. */
+.st-overdue { color: var(--risk); font-weight: var(--font-weight-semibold, 600); }
+
+/* The flag beside it, so the warning is not colour alone — a red date and a
+   black one are the same date to a reader who cannot tell them apart. */
+.due-flag {
+  font-style: normal; font-weight: var(--font-weight-extrabold, 800); color: var(--risk);
+  border: 1.5px solid currentColor; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 13px; height: 13px; font-size: 9px; line-height: 1; vertical-align: 1px;
+}
+
+/* The editable cell: a native date input, so the value is always YYYY-MM-DD
+   whatever the locale shows. The state rides on the WRAPPER — a coloured
+   input border reads as a validation error rather than a deadline. */
+.due-wrap { display: inline-flex; align-items: center; gap: 4px; }
+input.due-edit {
+  padding: 2px 4px; font-size: 12px; width: 124px; min-width: 0;
+  border: 1px solid transparent; background: transparent; border-radius: var(--radius-sm, 4px);
+  color: inherit; font-family: inherit;
+}
+input.due-edit:hover { border-color: var(--app-line); }
+input.due-edit:focus { border-color: var(--brand-blue); background: var(--app-surface); }
+input.due-edit:disabled { opacity: 0.55; }
+.due-wrap.due-overdue input.due-edit { color: var(--risk); font-weight: var(--font-weight-semibold, 600); }
+.due-wrap.due-late input.due-edit { color: var(--warn); }
+
+/* A component name that opens its work items. Underlined on hover only: a
+   whole column of underlined text reads as a list of links rather than a table
+   of components, which is the opposite of what these tables are for. */
+.comp-link { color: inherit; text-decoration: none; }
+.comp-link:hover { text-decoration: underline; text-decoration-color: var(--brand-blue); }
+.comp-link:focus-visible { outline: 2px solid var(--brand-blue); outline-offset: 1px; border-radius: 2px; }
+
 /* ── THE ACCENTED KPI STRIP ──────────────────────────────────────────────
    Opt-in, on the container. Every other KPI row in the app has one or two
    cards and no identity problem, and colouring their values by position
@@ -1433,13 +1476,24 @@ svg text { font-family: var(--font-family-sans, Poppins, system-ui, sans-serif);
      gives the key column three characters and stacks "AUTOKAT-9795" down the
      left edge, which is what an even split produced. */
   .items-table { table-layout: fixed; }
-  .items-table .col-key { width: 14%; }
-  .items-table .col-summary { width: 17%; }
-  .items-table .col-category { width: 11%; }
-  .items-table .col-assignee { width: 10%; }
+  .items-table .col-key { width: 13%; }
+  .items-table .col-summary { width: 15%; }
+  .items-table .col-category { width: 10%; }
+  .items-table .col-assignee { width: 9%; }
   .items-table .col-status { width: 7%; }
   .items-table .col-points { width: 5%; }
-  .items-table .col-component { width: 10%; }
+  /* Narrow, and it never wraps: "28 Sep" broken across two lines is not a
+     date any more. The percentages come out of the two widest columns rather
+     than off the key, which cannot lose a character without becoming
+     something you have to retype. */
+  .items-table .col-due { width: 6%; white-space: nowrap; }
+  /* On paper the date is a date, not a control. The native picker's chrome
+     prints as an empty box with a calendar glyph and no value in some
+     browsers, which is worse than useless on a report. */
+  input.due-edit { border: none !important; padding: 0 !important; width: auto !important;
+    background: transparent !important; appearance: none; }
+  input.due-edit::-webkit-calendar-picker-indicator { display: none; }
+  .items-table .col-component { width: 9%; }
   .items-table .col-epic { width: 16%; }
   .items-table .col-tests { width: 10%; }
 
@@ -1479,6 +1533,41 @@ svg text { font-family: var(--font-family-sans, Poppins, system-ui, sans-serif);
      paper the name is right there beside them. */
   .avatar { display: none; }
 
+  /* ── THE PRIORITIZATION GRID ON PAPER ────────────────────────────────
+     Sixteen columns, fourteen of which hold a number of one to three digits
+     and two of which hold prose. An even split gives Component and Notes the
+     same 6% as "N/A" and breaks a 29-character component name down the left
+     edge one letter per line — so the widths are named, as they are for the
+     item table, and for the same reason.
+
+     `table-layout: fixed` takes its widths from the FIRST header row, which
+     here is five cells wide because of the colspans over each tool. So the
+     two tool groups are sized as groups and the bucket columns divide what
+     they are given, rather than each being named separately. */
+  table.pz { table-layout: fixed; }
+  table.pz th:first-child { width: 22%; }
+  table.pz th:nth-child(2) { width: 8%; }
+  table.pz .tool-head { width: 27%; }
+  table.pz .note-col { width: 16%; }
+  table.pz th.sub { font-size: 8px; letter-spacing: 0; }
+  table.pz td, table.pz th { padding: 4px 3px; }
+
+  /* A NOTE IS TEXT ON PAPER, NOT A BOX. The cell holds a textarea so it can
+     be edited on screen; printed, a textarea is a bordered box that clips its
+     own content at one or two lines and takes the note with it. Unset the
+     control chrome and let it grow — the note is often the only sentence on
+     the page explaining why a component is ranked where it is. */
+  table.pz td textarea {
+    border: none; resize: none; padding: 0; background: transparent;
+    font: inherit; color: inherit; width: 100%; height: auto; min-height: 0;
+    white-space: pre-wrap; overflow: visible;
+  }
+
+  /* The coloured square in front of a tool or bucket label is a legend key on
+     screen. On paper the words are already there and the squares only survive
+     `print-color-adjust` to become grey dots between letters. */
+  table.pz .pz-chip { display: none; }
+
   /* Keep a thing on one page where it can be; never orphan a heading from what
      it introduces, and repeat a long table's header on each page. */
   .card, .kpi, tr, .section-head { break-inside: avoid; }
@@ -1496,6 +1585,11 @@ svg text { font-family: var(--font-family-sans, Poppins, system-ui, sans-serif);
   .kpis.accented .kpi.t-warn { box-shadow: inset 3px 0 0 var(--warn) !important; }
   .kpis.accented .kpi.t-risk { box-shadow: inset 3px 0 0 var(--risk) !important; }
   tbody tr:hover { background: transparent !important; }
+
+  /* On paper a component name is a name. The hover underline cannot happen and
+     the href is not clickable, so the only thing left would be link styling
+     pretending otherwise. */
+  .comp-link { text-decoration: none !important; color: inherit !important; }
 
   /* A link's colour means nothing in a PDF, and the key itself is what you
      paste into Jira. */

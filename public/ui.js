@@ -296,6 +296,36 @@ const UI = (() => {
    * Returns nothing at all when there is no Jira base configured or no keys to
    * open — a dead or empty button is a promise the screen cannot keep.
    */
+  /**
+   * A COMPONENT NAME THAT OPENS ITS WORK ITEMS.
+   *
+   * The name, not a button beside it: these tables are one row per component
+   * and a column of identical "Open in Jira" buttons is a column of noise. The
+   * name is already the thing the eye lands on and the thing you would search
+   * for, so it is the thing that clicks.
+   *
+   * BY KEY, NEVER BY COMPONENT NAME. `component = "X" AND sprint = N` is the
+   * obvious JQL and it is a SECOND query: the day it returns ten where the row
+   * says eleven, nothing on either side says which is wrong. The keys are what
+   * the row counted, so handing Jira the keys is the only link that cannot
+   * drift from the number beside it. It also settles the "— no component —"
+   * row, which has no name to put in a JQL at all.
+   *
+   * NO BASE, NO KEYS, NO LINK — the name still renders. A dead anchor that
+   * opens the Jira home page is worse than plain text, because it looks like
+   * the feature works.
+   */
+  function componentLink(label, keys, o = {}) {
+    const name = esc(label == null ? '' : String(label));
+    const r = keysSearchUrl(keys, o);
+    if (!r) return name;
+    const what = o.what || 'work items';
+    const title = r.truncated
+      ? `${r.total} ${what} — Jira is asked for these by key and ${r.total} do not fit in one URL, so this opens the first ${r.shown}.`
+      : `Open ${r.shown} ${what} in Jira`;
+    return `<a class="comp-link" href="${esc(r.href)}" target="_blank" rel="noopener" title="${esc(title)}">${name}</a>`;
+  }
+
   function openInJira(keys, o = {}) {
     const r = keysSearchUrl(keys, o);
     if (!r) return '';
@@ -960,7 +990,7 @@ const UI = (() => {
     if (!o.editPoints) return i.points == null ? '<span class="tag risk">—</span>' : num(i.points);
     const v = i.points == null ? '' : String(i.points);
     return `<input class="pts-edit" type="number" min="0" step="0.5" inputmode="decimal"
-      value="${esc(v)}" data-points-key="${esc(i.key)}" data-was="${esc(v)}"
+      value="${esc(v)}" data-edit-key="${esc(i.key)}" data-edit-field="points" data-was="${esc(v)}"
       title="Story points for ${esc(i.key)} — saves to Jira"
       aria-label="Story points for ${esc(i.key)}"${i.points == null ? ' placeholder="—"' : ''}>`;
   }
@@ -986,34 +1016,58 @@ const UI = (() => {
    *
    * @param {object} o.readOnly  closed sprint: wire nothing at all
    */
-  function wirePointsEdit(mount, { teamId, sprintId, readOnly = false, onSaved = null } = {}) {
+  /* WHAT EACH EDITABLE FIELD IS, in one table. Two fields now write to Jira
+     from this row and they differ in exactly three ways — the endpoint, what
+     a value is, and what to say afterwards. Everything else (the unchanged
+     guard, the disable, the staleness handling, putting the row back when the
+     server refuses) is identical, and copying thirty lines of it per field is
+     how the second field comes to handle a failure differently from the
+     first on the one interaction where that matters. */
+  const EDITABLE = {
+    points: {
+      path: '/api/sprint/points',
+      body: (v) => ({ points: v === '' ? null : Number(v) }),
+      was: (w) => (w === '' ? null : Number(w)),
+      saved: (key, v) => (v === '' ? `${key} — estimate cleared in Jira` : `${key} — ${v} pts saved to Jira`),
+      already: (key, v) => `${key} was already ${v === '' ? 'unestimated' : `${v} pts`}`,
+    },
+    due: {
+      path: '/api/sprint/duedate',
+      body: (v) => ({ dueDate: v === '' ? null : v }),
+      was: (w) => (w === '' ? null : w),
+      saved: (key, v) => (v === '' ? `${key} — due date cleared in Jira` : `${key} — due ${v} saved to Jira`),
+      already: (key, v) => `${key} was already ${v === '' ? 'undated' : `due ${v}`}`,
+    },
+  };
+
+  function wireItemEdits(mount, { teamId, sprintId, readOnly = false, onSaved = null } = {}) {
     if (!mount || !mount.addEventListener || readOnly) return;
     mount.addEventListener('change', async (e) => {
-      const box = e.target.closest && e.target.closest('[data-points-key]');
+      const box = e.target.closest && e.target.closest('[data-edit-key]');
       if (!box) return;
-      const key = box.dataset.pointsKey;
+      const spec = EDITABLE[box.dataset.editField];
+      if (!spec) return;                              // an unknown field writes nothing
+      const key = box.dataset.editKey;
       const was = box.dataset.was == null ? '' : box.dataset.was;
       const value = String(box.value || '').trim();
       if (value === was.trim()) return;               // blur with nothing changed
 
       box.disabled = true;
       try {
-        const r = await jsonPut('/api/sprint/points', {
+        const r = await jsonPut(spec.path, {
           teamId, sprintId, key,
-          points: value === '' ? null : Number(value),
+          ...spec.body(value),
           // What this screen was showing. The server checks it against Jira
-          // and refuses if somebody re-estimated since the last sync.
-          was: was === '' ? null : Number(was),
+          // and refuses if somebody changed it since the last sync.
+          was: spec.was(was),
         });
         box.dataset.was = value;
-        toast(r.unchanged ? `${key} was already ${value === '' ? 'unestimated' : `${value} pts`}`
-          : value === '' ? `${key} — estimate cleared in Jira`
-            : `${key} — ${value} pts saved to Jira`);
+        toast(r.unchanged ? spec.already(key, value) : spec.saved(key, value));
         if (onSaved) onSaved(r);
       } catch (err) {
         /* PUT THE ROW BACK. A box left showing a value the server refused
            looks exactly like one that saved, and the next refresh replaces
-           it without a word — which is how you come to believe an estimate
+           it without a word — which is how you come to believe a value
            is in Jira when it never was. */
         box.value = was;
         toast(err.message, true);
@@ -1022,6 +1076,226 @@ const UI = (() => {
       }
     });
   }
+
+  /* ── FILTERING THE SPRINT ITEM TABLE ───────────────────────────────────
+     Forty rows is a scroll, not a list. The questions actually asked of this
+     table at a standup are narrow — "what has Hien got", "what is still in
+     Refinement", "what is left on iGO" — and every one of them was answered
+     by reading the whole thing.
+
+     ONE PREDICATE, HERE, because the table is shared by the Active sprint and
+     Capacity planning and the whole point of sharing it is that the two cannot
+     drift. It is also the half worth checking: the wiring below is fifteen
+     lines of hiding rows, and "which items match" is where a filter is wrong
+     in a way that looks like an answer. */
+  const ANY = '';
+  const UNASSIGNED = '— none —';
+
+  function filterItems(items, f = {}) {
+    const q = String(f.q || '').trim().toLowerCase();
+    return (items || []).filter((i) => {
+      if (f.status && String(i.status || '') !== f.status) return false;
+      /* ASSIGNEE HAS A THIRD STATE. "Unassigned" is the single most useful
+         thing to filter this table by — it is the list of work nobody has
+         picked up — and a plain equality check on the name cannot express it,
+         because the value being matched is the absence of one. */
+      if (f.assignee === UNASSIGNED) { if (i.assignee) return false; }
+      else if (f.assignee && i.assignee !== f.assignee) return false;
+      // The column shows the FIRST component, so the filter matches the same
+      // one. Matching any of them would hide rows that are on screen.
+      if (f.component && ((i.components || [])[0] || '') !== f.component) return false;
+      if (f.category && i.category !== f.category) return false;
+      if (q && !`${i.key} ${i.summary || ''}`.toLowerCase().includes(q)) return false;
+      return true;
+    });
+  }
+
+  /** The distinct values actually present, so no option opens an empty table. */
+  const optionsFrom = (list, pick) =>
+    [...new Set(list.map(pick).filter(v => v != null && v !== ''))].sort((a, b) => String(a).localeCompare(String(b)));
+
+  function itemsFilterBar(list, state) {
+    const cats = (state && state.categories) || {};
+    const sel = (name, label, opts, width = '150px') => `
+      <label class="field"><span>${esc(label)}</span>
+        <select data-items-filter="${name}" style="width:${width}">
+          <option value="${ANY}">All</option>
+          ${opts.map(([v, t]) => `<option value="${esc(v)}">${esc(t)}</option>`).join('')}
+        </select></label>`;
+
+    // Statuses in board order, not alphabetical — the column reads as a
+    // progression and a dropdown that disagrees with it is one you hunt in.
+    const statuses = optionsFrom(list, i => i.status)
+      .sort((a, b) => byStatusThenPoints({ status: a }, { status: b }) || String(a).localeCompare(String(b)));
+    const people = optionsFrom(list, i => i.assignee);
+    const comps = optionsFrom(list, i => (i.components || [])[0]);
+    const inUse = optionsFrom(list, i => i.category);
+
+    return `
+      <div class="filters" data-items-filters>
+        <label class="field"><span>Search</span>
+          <input type="text" data-items-filter="q" placeholder="key or summary" style="width:200px"></label>
+        ${sel('status', 'Status', statuses.map(v => [v, v]))}
+        ${sel('assignee', 'Assignee', [
+          ...(list.some(i => !i.assignee) ? [[UNASSIGNED, 'Unassigned']] : []),
+          ...people.map(v => [v, v]),
+        ], '170px')}
+        ${sel('component', 'Component', comps.map(v => [v, v]), '190px')}
+        ${inUse.length > 1 ? sel('category', 'Category', inUse.map(v => [v, (cats[v] || {}).label || v])) : ''}
+        <div class="field"><span>&nbsp;</span>
+          <button class="btn ghost sm" data-items-filter-clear hidden>Clear</button></div>
+      </div>`;
+  }
+
+  /**
+   * MAKE THE BAR WORK. Rows are HIDDEN, not re-rendered.
+   *
+   * Re-rendering the tbody would tear out the sort order the user clicked into
+   * and the Points boxes mid-edit, and would have to be repeated in both views;
+   * `hidden` leaves every row where it is, so sorting, the delegated drawers
+   * and an in-flight estimate all survive a filter change untouched.
+   */
+  function wireItemsFilter(mount) {
+    if (!mount || !mount.addEventListener) return;
+    const apply = () => {
+      const bar = mount.querySelector('[data-items-filters]');
+      const body = mount.querySelector('[data-items-rows]');
+      if (!bar || !body) return;
+      const f = {};
+      for (const el of bar.querySelectorAll('[data-items-filter]')) f[el.dataset.itemsFilter] = el.value;
+      const on = Object.entries(f).some(([, v]) => String(v || '').trim() !== '');
+
+      let shown = 0, points = 0;
+      const keys = [];
+      for (const row of body.querySelectorAll('tr[data-item-key]')) {
+        const i = {
+          key: row.dataset.itemKey, summary: row.dataset.itemSummary || '',
+          status: row.dataset.itemStatus || '', assignee: row.dataset.itemAssignee || null,
+          components: row.dataset.itemComponent ? [row.dataset.itemComponent] : [],
+          category: row.dataset.itemCategory || '',
+        };
+        const keep = filterItems([i], f).length > 0;
+        row.hidden = !keep;
+        if (keep) { shown++; keys.push(i.key); points += Number(row.dataset.itemPoints || 0) || 0; }
+      }
+      /* The link over exactly the rows that survived. `keys` is collected in
+         the same pass that hid them, not by a second walk of the table: the
+         one thing this link must never do is open a set the table does not
+         show. An empty filter leaves no link at all rather than a search for
+         nothing. */
+      const jira = mount.querySelector('[data-items-jira]');
+      if (jira) jira.innerHTML = openInJira(keys);
+
+      const count = mount.querySelector('[data-items-showing]');
+      if (count) {
+        count.hidden = !on;
+        count.textContent = on
+          ? `showing ${shown} of ${body.querySelectorAll('tr[data-item-key]').length} · ${Math.round(points * 10) / 10} pts`
+          : '';
+      }
+      const clear = mount.querySelector('[data-items-filter-clear]');
+      if (clear) clear.hidden = !on;
+    };
+
+    mount.addEventListener('input', (e) => {
+      if (e.target.closest && e.target.closest('[data-items-filter]')) apply();
+    });
+    mount.addEventListener('change', (e) => {
+      if (e.target.closest && e.target.closest('[data-items-filter]')) apply();
+    });
+    mount.addEventListener('click', (e) => {
+      if (!(e.target.closest && e.target.closest('[data-items-filter-clear]'))) return;
+      e.preventDefault();
+      const bar = mount.querySelector('[data-items-filters]');
+      if (bar) for (const el of bar.querySelectorAll('[data-items-filter]')) el.value = '';
+      apply();
+    });
+  }
+
+  /**
+   * THE DUE DATE, AND WHETHER IT LANDS INSIDE THE SPRINT.
+   *
+   * MEASURED AGAINST THE SPRINT'S END, NOT AGAINST TODAY. "Overdue" wants a
+   * clock, and a cell that reads the browser's clock says something the
+   * payload never agreed to — it changes overnight with nothing else changing,
+   * and it cannot be checked without freezing time in a test. The end of the
+   * sprint is on the payload, it is the date the commitment was made against,
+   * and "committed to this sprint and dated to land after it" is the finding
+   * worth a colour. Finished work is never late, whatever its date says.
+   *
+   * `data-sort-value` carries the ISO date so the column sorts chronologically
+   * — and an item with no due date sorts LAST rather than first, because an
+   * empty string sorts before every date and would put the unknowns at the top
+   * of a column you opened to find the earliest deadline.
+   */
+  const NO_DUE_SORT = '9999-12-31';
+
+  /* CONTENTS, NOT A CELL — the convention every other helper in this table
+     follows (`pointsCell`, `testCasesCell`, `epicCell`), and not a style
+     point: `epics.test.js` proves the header and the body agree by counting
+     `<th>` and `<td>` in the TEMPLATE, and a `<td>` emitted from inside a
+     function is invisible to it. The first version of this returned the whole
+     cell and turned that check red — which was the check doing its job. */
+  const dueSort = (i) => (i && i.dueDate ? String(i.dueDate).slice(0, 10) : NO_DUE_SORT);
+
+  /**
+   * TWO DIFFERENT WARNINGS, and they are not the same fact.
+   *
+   *   OVERDUE — the date has passed and the item is not finished. Something
+   *     is wrong NOW, and it is the one worth red.
+   *   AFTER THE SPRINT — the date is still ahead but falls outside the sprint
+   *     it was committed to. Nothing is late yet; it is a planning question,
+   *     and it gets amber.
+   *
+   * Overdue wins when both are true, because "it is already past" is the more
+   * urgent reading of the same date. Both are measured against dates ON THE
+   * PAYLOAD — `today` and the sprint's end — never against the browser's
+   * clock: a cell that reads its own clock changes overnight with nothing else
+   * changing, and cannot be checked without freezing time.
+   *
+   * FINISHED WORK IS NEITHER. A due date on a closed item is history, not a
+   * deadline, and colouring it teaches people to ignore the colour.
+   */
+  function dueState(i, o = {}) {
+    if (!i || !i.dueDate || isDoneItem(i)) return null;
+    const iso = String(i.dueDate).slice(0, 10);
+    const today = o.today ? String(o.today).slice(0, 10) : null;
+    if (today && iso < today) return 'overdue';
+    const end = o.sprintEnd ? String(o.sprintEnd).slice(0, 10) : null;
+    if (end && iso > end) return 'late';
+    return null;
+  }
+
+  function dueCell(i, o = {}) {
+    const iso = i && i.dueDate ? String(i.dueDate).slice(0, 10) : '';
+    const state = dueState(i, o);
+    const end = o.sprintEnd ? String(o.sprintEnd).slice(0, 10) : null;
+    const why = state === 'overdue'
+      ? `Overdue — was due ${iso} and ${i.key} is still ${String(i.status || 'open')}`
+      : state === 'late' ? `Due ${iso}, after this sprint ends on ${end}`
+        : iso ? `Due ${iso}` : 'No due date';
+
+    if (o.editDue) {
+      /* A NATIVE DATE INPUT. The value it reads and writes is always
+         YYYY-MM-DD whatever the locale displays, which is exactly what Jira
+         stores — so no format is guessed at anywhere between the keyboard and
+         the API. The flag rides on the wrapper rather than the input: a
+         coloured input border reads as a validation error. */
+      return `<span class="due-wrap${state ? ` due-${state}` : ''}" title="${esc(why)}">
+        <input class="due-edit" type="date" value="${esc(iso)}"
+          data-edit-key="${esc(i.key)}" data-edit-field="due" data-was="${esc(iso)}"
+          aria-label="Due date for ${esc(i.key)}">${state === 'overdue' ? '<i class="due-flag" aria-hidden="true">!</i>' : ''}</span>`;
+    }
+
+    if (!iso) return '<span class="muted">—</span>';
+    return `<span class="${state ? `st st-${state}` : ''}" title="${esc(why)}">${esc(date(iso))}${
+      state === 'overdue' ? ' <i class="due-flag" aria-hidden="true">!</i>' : ''}</span>`;
+  }
+
+  /* The same reading of "finished" the rest of this file uses, by stage rather
+     than by status name — a board that renames Done still reports the category,
+     and a due date on finished work is history rather than a deadline. */
+  const isDoneItem = (i) => statusStage(i) === 'done';
 
   function itemsTable(items, state, o = {}) {
     const list = (items || []).slice().sort(byStatusThenPoints);
@@ -1040,7 +1314,22 @@ const UI = (() => {
         <div class="section-head">
           <h2>${esc(o.title || 'All sprint items')}</h2>
           <span class="muted">${list.length} items${noAssignee ? ` · ${noAssignee} with no assignee` : ''}${buckets.length ? ` · ${tests} test case${tests === 1 ? '' : 's'} maintained across ${buckets.length} bucket stor${buckets.length === 1 ? 'y' : 'ies'}` : ''}${o.sub ? ` · ${esc(o.sub)}` : ''}</span>
+          ${/* The headline above counts the WHOLE sprint and goes on doing so
+               while a filter is up: it is the sprint's size, not the table's,
+               and quietly rewriting it would leave the page with no number for
+               what was committed. What the filter did gets its own line, and
+               only appears while something is filtered. */ ''}
+          <strong class="muted" data-items-showing hidden></strong>
+          <div class="spacer"></div>
+          ${/* THE LINK FOLLOWS THE FILTER. It opens the rows on screen, not the
+               sprint — a link that opens a different set from the table under
+               it is worse than no link, because you cannot tell which of the
+               two is wrong. Rebuilt by `wireItemsFilter` through this same
+               helper, so the label, the title and the URL-length truncation
+               have one implementation rather than two. */ ''}
+          <span data-items-jira class="print-hide">${openInJira(list.map(i => i.key))}</span>
         </div>
+        ${itemsFilterBar(list, state)}
         <div class="table-wrap">
           <!-- The column classes exist for print: on paper the table has to be
                laid out to a fixed width, and the only way to say "the summary
@@ -1051,17 +1340,30 @@ const UI = (() => {
               <th class="col-key">Key</th><th class="col-summary">Summary</th>
               <th class="col-category">Category</th><th class="col-assignee">Assignee</th>
               <th class="col-status">Status</th><th class="num col-points">Points</th>
+              <th class="col-due" title="Jira's Due date. Flagged when it falls after this sprint ends and the item is not finished">Due</th>
               <th class="col-component">Component</th><th class="col-epic">Epic</th>
               <th class="num col-tests" title="Test cases this bucket story is maintaining — one per &quot;relates to&quot; linked work item">Test cases</th>
             </tr></thead>
-            <tbody>${list.map(i => `
-              <tr>
+            ${/* THE ROW CARRIES WHAT IT IS FILTERED BY. The filter runs over
+                 these attributes rather than over a copy of the item list held
+                 in a closure, so the thing being matched is the thing on
+                 screen — a row cannot be hidden for a value it is not
+                 showing, which is the way a filter goes wrong invisibly. */ ''}
+            <tbody data-items-rows>${list.map(i => `
+              <tr data-item-key="${esc(i.key)}"
+                  data-item-summary="${esc(i.summary || '')}"
+                  data-item-status="${esc(i.status || '')}"
+                  data-item-assignee="${esc(i.assignee || '')}"
+                  data-item-component="${esc((i.components || [])[0] || '')}"
+                  data-item-category="${esc(i.category || '')}"
+                  data-item-points="${esc(i.points == null ? '' : i.points)}">
                 <td>${issueKey(i.key)}</td>
                 <td class="wrap">${esc(i.summary)}</td>
                 <td><span class="tag"><i class="dot" style="background:${CATEGORY_COLORS[i.category]}"></i>${esc((cats[i.category] || {}).label || i.category)}</span></td>
                 <td>${i.assignee ? `<div class="name-cell">${avatar(i.assignee)}${esc(i.assignee)}</div>` : '<span class="tag warn">unassigned</span>'}</td>
                 <td>${statusText(i)}${epicBlockerIcon(i)}</td>
                 <td class="num">${pointsCell(i, o)}</td>
+                <td class="col-due" data-sort-value="${dueSort(i)}">${dueCell(i, o)}</td>
                 <td class="muted">${esc((i.components || [])[0] || '—')}</td>
                 <td>${epicCell(i)}</td>
                 <td class="num">${testCasesCell(i)}</td>
@@ -1490,7 +1792,8 @@ const UI = (() => {
   }
 
   return { esc, el, $, $$, num, pct, int, date, dateTime, ago, initials, avatar, personColor, workloadClass, toast, drawer, closeDrawer, api, jsonPut, jsonPost, jsonDelete, kpi, bar, mixBar, pointsFieldNote, CATEGORY_COLORS, setJiraBase, issueUrl, issueKey, issueKeys, linkKey, jiraSearch, componentSearchUrl, componentsSearchUrl, boardBacklogUrl, backlogSearchUrl, keysSearchUrl, openInJira, combo, wireCombo, matchText, fitChars, sortable, sortTable, sortableTable, sortNumber, paginate, pager,
-    itemsTable, wirePointsEdit, epicCell, byStatusThenPoints, statusText, statusStage, drillNumber, drillDrawer,
+    itemsTable, wireItemEdits, filterItems, wireItemsFilter, ITEM_UNASSIGNED: UNASSIGNED, componentLink, dueState,
+    epicCell, byStatusThenPoints, statusText, statusStage, drillNumber, drillDrawer,
     inRefinement, epicBlockerIcon, epicBlockersDrawer, testCasesDrawer,
     tagList, wireTagList, splitKeywords, exportPdf, priorityTag, prioritySort, PRIORITY_UNSET_SORT, busy };
 })();

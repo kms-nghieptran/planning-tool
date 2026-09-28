@@ -162,13 +162,13 @@ const SprintView = (() => {
 
       ${componentProgress(d, w)}
 
-      ${testCaseSection(d)}
+      ${testCaseSection(d, state)}
 
       ${/* POINTS ARE EDITABLE HERE TOO, and an edit goes to real Jira. This
            is where you sit during standup with the estimates in front of you,
            which is exactly when a wrong one gets spotted — the same argument
            as on Capacity planning, and the same shared wiring below. */ ''}
-      ${UI.itemsTable(d.items, state, { editPoints: !ro })}
+      ${UI.itemsTable(d.items, state, { editPoints: !ro, editDue: !ro, sprintEnd: (d.sprint || {}).end, today: (d.window || {}).today })}
 
       ${riskSection(d, state)}
     `;
@@ -177,10 +177,14 @@ const SprintView = (() => {
        two behave identically down to the wording of the failures. `onSaved`
        reloads because the figures above this table — committed points,
        progress, the per-person split — are all derived from these numbers. */
-    UI.wirePointsEdit(mount, {
+    UI.wireItemEdits(mount, {
       teamId: state.teamId, sprintId: state.sprintId, readOnly: ro,
       onSaved: () => App.refresh(),
     });
+
+    /* THE ITEM TABLE'S OWN FILTERS. Delegated on the same mount, so it keeps
+       working after a sort reorders the rows. */
+    UI.wireItemsFilter(mount);
 
     /* One delegated listener on the render container — the property
        ui-wiring.test.js pins. `window.print()` is the whole export: the
@@ -630,7 +634,7 @@ const SprintView = (() => {
             </tr></thead>
             <tbody>${c.rows.map(r => `
               <tr>
-                <td>${UI.esc(r.component)}</td>
+                <td>${UI.componentLink(r.component, r.keys, { what: 'sprint items' })}</td>
                 <td data-sort-value="${r.priority == null ? UNSET_SORT : r.priority}">${prio(d, r)}</td>
                 <td class="num">${r.count}</td>
                 <td class="num">${UI.num(r.points)}</td>
@@ -697,7 +701,11 @@ const SprintView = (() => {
     committed: 'Committed',
   };
 
-  function testCaseSection(d) {
+  /* `state` is here for ONE thing — the export link's team and sprint. It is
+     passed rather than read off a closure because this function is called from
+     `render`, and a closure that happens to be in scope is how a section comes
+     to depend on the last screen's ids. */
+  function testCaseSection(d, state) {
     const t = d.testCases;
     if (!t || !t.rows.length) return '';
     const T = t.totals;
@@ -717,6 +725,14 @@ const SprintView = (() => {
             <strong>${UI.int(T.maintained)}</strong> maintained ·
             ${UI.int(T.maintaining)} maintaining
           </span>
+          <div class="spacer"></div>
+          ${/* CSV rather than a real .xlsx: this app has no dependencies and
+               hand-rolling the zip container to save a double-click would be
+               the most code in the file for the least of anything. The route
+               writes a byte-order mark so Excel opens it as UTF-8. */ ''}
+          <a class="btn ghost sm print-hide"
+             href="/api/export?what=testcases&team=${encodeURIComponent(state.teamId)}&sprint=${encodeURIComponent(state.sprintId)}"
+             title="One row per component with the keys behind every number — opens in Excel">Export CSV</a>
         </div>
         <div class="table-wrap">
           <table>
@@ -731,7 +747,12 @@ const SprintView = (() => {
             </tr></thead>
             <tbody>${t.rows.map(r => `
               <tr>
-                <td>${UI.esc(r.component)}</td>
+                ${/* The same link as the progress table above, over the same
+                     set: the sprint items in this component. `keys.items` is
+                     what this row's own Items count was the size of, before
+                     that column was taken off the screen — so the two tables
+                     open the identical list and cannot disagree. */ ''}
+                <td>${UI.componentLink(r.component, (r.keys || {}).items, { what: 'sprint items' })}</td>
                 <td data-sort-value="${UI.prioritySort(r.priority)}">${UI.priorityTag(r.priority, d.priorityLevels)}</td>
                 <td class="num ${r.automated ? 'pct good' : ''}">${drill(r, 'automated')}</td>
                 <td class="num">${drill(r, 'inFlight')}</td>

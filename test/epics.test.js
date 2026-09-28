@@ -414,7 +414,14 @@ check('THE EPIC COLUMN SITS DIRECTLY AFTER COMPONENT, IN BOTH HEADER AND BODY', 
   assert.strictEqual(cols[cols.indexOf('Component') + 1], 'Epic',
     `Epic must follow Component, got ${JSON.stringify(cols)}`);
 
-  const body = table.slice(table.indexOf('<tbody>'));
+  /* BOUNDED AT ITS OWN `</tbody>`, and matched on the tag rather than on
+     `<tbody>` exactly: the element gained an attribute when the table got
+     filters, and an open-ended slice runs to the end of ui.js, so both halves
+     of this were one edit away from counting cells that are not in this
+     table at all. */
+  const from = table.search(/<tbody(?=[\s>])/);
+  assert.ok(from > 0, 'the item table has no body');
+  const body = table.slice(from, table.indexOf('</tbody>', from));
   const cells = [...body.matchAll(/<td[^>]*>/g)].length;
   assert.strictEqual(cells, cols.length,
     `${cols.length} headers but ${cells} cells — a table that renders perfectly with every value in the wrong column`);

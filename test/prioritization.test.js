@@ -728,7 +728,13 @@ function fakeEl(id) {
     classList: { toggle() {}, add() {}, remove() {}, contains: () => false },
     addEventListener(type, fn) { (on[type] = on[type] || []).push(fn); },
     fire(type, e = {}) { for (const fn of on[type] || []) fn({ target: this, preventDefault() {}, ...e }); },
-    set innerHTML(v) { this._html = v; }, get innerHTML() { return this._html || ''; },
+    /* WRITES ARE COUNTED, not just kept. "Did this redraw?" cannot be answered
+       by comparing the HTML before and after: a redraw rebuilds the same grid
+       from the same payload, so the string is identical and a check on it
+       passes whether or not the redraw happened. A mutation that redrew the
+       table before printing it walked straight through exactly that. */
+    writes: 0,
+    set innerHTML(v) { this._html = v; this.writes++; }, get innerHTML() { return this._html || ''; },
   };
 }
 
@@ -773,8 +779,13 @@ function boot() {
   ctx.UI.jsonPut = async (url, body) => { puts.push({ url, body: out(body) }); return { ok: true }; };
   ctx.UI.toast = () => {};
   ctx.UI.drawer = () => {};
+  /* `exportPdf` is an EXPORT, so stubbing it here really does replace what the
+     view calls — unlike `toast` and `jsonPut`, which are module-private inside
+     ui.js and have to be stubbed at the seam below them. */
+  const prints = [];
+  ctx.UI.exportPdf = (title) => { prints.push(title); return 'x'; };
   vm.runInContext(`${fs.readFileSync(path.join(PUBLIC, 'views', 'prioritization.js'), 'utf8')}\n;globalThis.__v = PrioritizationView;`, ctx);
-  return { ctx, puts, urls, store, setPayload: (p) => { payload = p; } };
+  return { ctx, puts, urls, store, prints, setPayload: (p) => { payload = p; } };
 }
 
 /** One render, onto a FRESH mount — the node App hands a view each time. */
@@ -787,10 +798,13 @@ async function mountOnce(app, state = {}) {
   const many = new Map();
   const getAll = (sel) => {
     if (!many.has(sel)) {
-      const keys = sel === '[data-level]' ? [1, 2, 3, 4] : sel === '[data-scope]' ? ['team', 'all'] : [];
+      const keys = sel === '[data-level]' ? [1, 2, 3, 4]
+        : sel === '[data-scope]' ? ['team', 'all']
+          : sel === '[data-sprint]' ? ['all', 'exclude'] : [];
+      const attr = sel.slice(6, -1);      // '[data-sprint]' -> 'sprint'
       many.set(sel, keys.map(k => {
         const n = fakeEl(sel);
-        n.dataset = sel === '[data-level]' ? { level: String(k) } : { scope: String(k) };
+        n.dataset = { [attr]: String(k) };
         return n;
       }));
     }
@@ -830,6 +844,17 @@ async function mountOnce(app, state = {}) {
     clickFamily: (v, o) => chip('family', v == null ? '' : v, o),
     clickCol: (v, o) => chip('col', v, o),
     scopes: getAll('[data-scope]'),
+    sprintScopes: getAll('[data-sprint]'),
+    /** Click a control identified by `data-act`, the way the page's one
+        delegated listener finds it. */
+    /** How many times the grid has been written — see `fakeEl`. */
+    tableWrites: () => get('#pzTable').writes,
+    clickAct: (value) => {
+      const node = { dataset: { act: value }, disabled: false };
+      node.closest = (sel) => (sel === `[data-act="${value}"]` ? node : null);
+      fire('click', { target: { closest: node.closest } });
+    },
+    prints: app.prints,
     puts: app.puts,
     urls: app.urls,
     fire,
@@ -1510,6 +1535,135 @@ check('A BIG SHORTLIST STILL RENDERS EVERY ROW IT COUNTED', () => {
     const said = Number((html.match(/>(\d+) components? ·/) || [])[1]);
     assert.strictEqual(said, 120, `the count line says ${said} and the table drew ${drawn}`);
   });
+});
+
+/* ── THE EXPORT LINK ──────────────────────────────────────────────────
+   The route is checked over HTTP in prioritization-export.test.js. What only
+   the view can prove is that the LINK carries the scopes the screen is on —
+   a route that honours `excludeActiveSprint` is no use if the button never
+   sends it, and both halves look perfectly normal on their own. */
+
+const exportHref = (page) => {
+  const m = /href="(\/api\/export\?what=prioritization[^"]*)"/.exec(page);
+  assert.ok(m, 'no Export CSV link on the Prioritization page');
+  return m[1].replace(/&amp;/g, '&');
+};
+
+/* ── EXPORT PDF ───────────────────────────────────────────────────────
+   A print of the page, not a second renderer: `window.print()` on what you
+   are looking at is the only export that cannot disagree with the screen, and
+   every alternative means a second implementation of a sixteen-column grid.
+   What can still go wrong is the title — the browser offers it as the
+   filename, and a PDF that does not say whose numbers these are is one that
+   gets forwarded as somebody else's. */
+
+check('THE PAGE OFFERS A PDF EXPORT, and the button is not itself on the paper', async () => {
+  const p = await renderPage(PAYLOAD());
+  assert.match(p.page(), /data-act="pz-export-pdf"/, 'no Export PDF control');
+  assert.match(p.page(), /class="btn ghost sm print-hide"[^>]*data-act="pz-export-pdf"/,
+    'the button would print itself onto the report');
+});
+
+check('AND CLICKING IT PRINTS, with the team and the scope in the title', async () => {
+  const team = { id: 'titan', name: 'Katalon Titan', jiraTeams: ['Katalon PS Squad'] };
+  const v = pz.view(SNAP, { ...PLAN(), teams: [team] }, { team });
+  const p = await renderPage({ ...v, noteMax: notes.MAX, project: 'AUTOKAT' });
+  p.clickAct('pz-export-pdf');
+  assert.strictEqual(p.prints.length, 1, 'the button printed nothing');
+  const parts = p.prints[0].filter(Boolean);
+  assert.ok(parts.includes('Katalon Titan'), `the title does not name the team: ${parts.join(' | ')}`);
+  assert.ok(parts.includes('prioritization'), 'nor what the page is');
+});
+
+check('THE TITLE SAYS WHEN THE ACTIVE SPRINT IS EXCLUDED', async () => {
+  /* Two PDFs of the same team with different numbers and the same filename is
+     how the wrong one ends up attached to the wrong email — the same argument
+     the CSV filename already makes. */
+  const app = boot();
+  app.setPayload(PAYLOAD());
+  let page = await mountOnce(app);
+  page.clickAct('pz-export-pdf');
+  assert.ok(!app.prints[0].filter(Boolean).some(x => /sprint/i.test(x)),
+    'precondition: the scope starts off');
+
+  page.sprintScopes.find(n => n.dataset.sprint === 'exclude').fire('click');
+  page = await mountOnce(app);
+  page.clickAct('pz-export-pdf');
+  assert.ok(app.prints[1].filter(Boolean).some(x => /not in active sprint/i.test(x)),
+    `the scope is on and the title does not say so: ${app.prints[1].join(' | ')}`);
+});
+
+check('PRINTING DOES NOT REDRAW THE PAGE, so what is printed is what was read', async () => {
+  // The click lands on the same delegated listener as the chips, every one of
+  // which redraws. Falling through to one of those would reprint a different
+  // grid from the one on screen.
+  const p = await renderPage(PAYLOAD());
+  const before = p.tableWrites();
+  assert.ok(before > 0, 'fixture check: the grid has to have been drawn at least once');
+  p.clickAct('pz-export-pdf');
+  assert.strictEqual(p.tableWrites(), before, 'the export redrew the table before printing it');
+});
+
+check('THE PRINT STYLESHEET SIZES THIS GRID, and turns the notes back into text', () => {
+  /* Sixteen columns on A4: an even split gives Component the same width as
+     "N/A" and breaks a 29-character name one letter per line. And the Notes
+     cell holds a TEXTAREA so it can be edited — printed, a textarea is a
+     bordered box that clips its own content, taking with it the one sentence
+     on the page that says why a component is ranked where it is.
+
+     Read from the stylesheet because neither is visible in a rendered string
+     and neither is checkable without a browser. */
+  const css = fs.readFileSync(path.join(PUBLIC, 'styles.css'), 'utf8');
+  const print = css.slice(css.indexOf('@media print'));
+  assert.match(print, /table\.pz\s*\{[^}]*table-layout:\s*fixed/, 'the grid is not sized for the page');
+  assert.match(print, /table\.pz th:first-child\s*\{[^}]*width/, 'the Component column has no width');
+  assert.match(print, /table\.pz td textarea\s*\{[^}]*border:\s*none/,
+    'the notes still print as input boxes');
+  assert.match(print, /table\.pz td textarea\s*\{[^}]*height:\s*auto/,
+    'a fixed-height textarea clips the note it is meant to show');
+});
+
+check('THE PAGE OFFERS AN EXPORT, and it is a download rather than a print', async () => {
+  const p = await renderPage(PAYLOAD());
+  const href = exportHref(p.page());
+  assert.match(href, /what=prioritization/);
+  assert.ok(!/excludeActiveSprint/.test(href), 'the flag is on the link before it is on the screen');
+  assert.match(p.page(), /class="btn ghost sm print-hide"[^>]*href="\/api\/export/,
+    'a download button does not belong on paper');
+});
+
+check('AND THE LINK FOLLOWS "EXCLUDE ACTIVE SPRINT ITEMS"', async () => {
+  /* The failure: the toggle is on, the file is not, and the spreadsheet
+     carries different figures under the same headings as the screen that
+     produced it. Driven through the real control, because the state is module
+     state and a check that sets it directly proves nothing about the button. */
+  const app = boot();
+  app.setPayload(PAYLOAD());
+  let page = await mountOnce(app);
+  assert.ok(!/excludeActiveSprint/.test(exportHref(page.page())), 'precondition: the flag starts off');
+
+  const toggle = page.sprintScopes.find(n => n.dataset.sprint === 'exclude');
+  assert.ok(toggle, 'the harness did not build the exclude control');
+  toggle.fire('click');
+  // `App.refresh` is a no-op here, so the re-render is done by hand — the
+  // module keeps its state across mounts, which is the thing being read.
+  page = await mountOnce(app);
+  assert.match(exportHref(page.page()), /excludeActiveSprint=1/,
+    'the toggle is on and the export link does not say so');
+});
+
+check('and the team on screen is the team in the link', async () => {
+  /* Without it the file answers for one squad a question asked about another,
+     and looks entirely normal doing it. Built through `pz.view` with a real
+     team rather than by patching `team` onto a payload: the header reads more
+     off that object than the id, and a hand-made stub breaks the render for
+     reasons that have nothing to do with the link. */
+  const team = { id: 'titan', name: 'Katalon Titan', jiraTeams: ['Katalon PS Squad'] };
+  const plan = { ...PLAN(), teams: [team] };
+  const v = pz.view(SNAP, plan, { team });
+  assert.ok(v.team && v.team.id === 'titan', 'fixture check: the view has to carry the team');
+  const p = await renderPage({ ...v, noteMax: notes.MAX, project: 'AUTOKAT' });
+  assert.match(exportHref(p.page()), /team=titan/);
 });
 
 (async () => {

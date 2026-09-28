@@ -49,20 +49,28 @@ process.env.PORT = '0';
    them is to edit a real issue in a real instance. */
 const JIRA_FIELD = 'customfield_10016';
 const jiraState = { 'T-1': 3, 'T-2': null };
+/* The due date is a SECOND field on the same issues, kept separately because
+   the stub has to be able to answer for one without disturbing the other —
+   the failure worth catching is the two writes crossing. */
+const jiraDue = { 'T-1': '2026-09-20', 'T-2': null };
 const jiraCalls = [];
 const jiraStub = http.createServer((req, res) => {
   const key = decodeURIComponent((req.url.match(/\/issue\/([^?]+)/) || [])[1] || '');
   jiraCalls.push({ method: req.method, key });
   if (req.method === 'GET') {
     res.writeHead(200, { 'content-type': 'application/json' });
-    return res.end(JSON.stringify({ key, fields: { [JIRA_FIELD]: jiraState[key] ?? null } }));
+    return res.end(JSON.stringify({ key, fields: { [JIRA_FIELD]: jiraState[key] ?? null, duedate: jiraDue[key] ?? null } }));
   }
   if (req.method === 'PUT') {
     let body = '';
     req.on('data', c => { body += c; });
     return req.on('end', () => {
       if (jiraState.__refuse) { res.writeHead(403); return res.end('no'); }
-      jiraState[key] = JSON.parse(body).fields[JIRA_FIELD];
+      const fields = JSON.parse(body).fields || {};
+      // Whichever field the write named, and ONLY that one: a route that sent
+      // both would otherwise pass every check here.
+      if (JIRA_FIELD in fields) jiraState[key] = fields[JIRA_FIELD];
+      if ('duedate' in fields) jiraDue[key] = fields.duedate;
       res.writeHead(204); res.end();
     });
   }
@@ -274,6 +282,226 @@ const stub = (handler) => {
   j.request = async (pathname, options = {}) => handler(pathname, options);
   return j;
 };
+
+/* ── THE DUE DATE, the second field this tool writes ──────────────────
+   Deliberately the same shape as the points write above: the same guards in
+   the same order, the same read-before-write, the same 409. These checks
+   exist because "same shape" is a claim, and the way it stops being true is
+   the second field quietly handling one case differently from the first. */
+
+const putDue = (body) => call('PUT', '/api/sprint/duedate', body);
+const dueOf = (key) => { store.invalidate(); return (store.getSnapshot().issues[key] || {}).dueDate; };
+
+check('A CLOSED SPRINT REFUSES A DATE EDIT, as it refuses an estimate', async () => {
+  const r = await putDue({ teamId: 'titan', sprintId: 'SHUT', key: 'T-1', dueDate: '2026-11-02', was: '2026-09-20' });
+  assert.strictEqual(r.status, 409, `expected the lock to bite, got ${r.status}`);
+  assert.strictEqual(jiraDue['T-1'], '2026-09-20', 'Jira must be untouched');
+});
+
+check('AND AN ISSUE OUTSIDE THE SPRINT IS REFUSED', async () => {
+  const r = await putDue({ teamId: 'titan', sprintId: 'OPEN', key: 'T-9', dueDate: '2026-11-02', was: null });
+  assert.strictEqual(r.status, 400);
+  assert.match(r.body.error, /not in/);
+});
+
+check('A DATE THAT IS NOT A DATE IS REFUSED, never guessed at', async () => {
+  /* `new Date("03/04/2026")` is a real date in two different months depending
+     on who typed it, and Jira would store whichever one it read. Anything but
+     YYYY-MM-DD is refused rather than parsed. */
+  for (const bad of ['03/04/2026', '2026-13-01', 'tomorrow', '2026-9-1', 42, {}, []]) {
+    const r = await putDue({ teamId: 'titan', sprintId: 'OPEN', key: 'T-1', dueDate: bad, was: '2026-09-20' });
+    assert.strictEqual(r.status, 400, `${JSON.stringify(bad)} was accepted as a date`);
+  }
+  assert.strictEqual(jiraDue['T-1'], '2026-09-20', 'Jira must be untouched by any of them');
+});
+
+check('THE ROUND TRIP: Jira gets the date, and so does the local copy', async () => {
+  const r = await putDue({ teamId: 'titan', sprintId: 'OPEN', key: 'T-1', dueDate: '2026-11-02', was: '2026-09-20' });
+  assert.strictEqual(r.status, 200, JSON.stringify(r.body));
+  assert.strictEqual(jiraDue['T-1'], '2026-11-02', 'Jira must have the new date');
+  assert.strictEqual(dueOf('T-1'), '2026-11-02', 'and the local copy must agree, or the screen lies until the next sync');
+});
+
+check('AND THE POINTS ARE UNTOUCHED BY A DATE EDIT', async () => {
+  // One row, two fields, two endpoints. A write that sent both would pass
+  // every check above and quietly overwrite an estimate nobody edited.
+  const before = jiraState['T-2'];
+  await putDue({ teamId: 'titan', sprintId: 'OPEN', key: 'T-2', dueDate: '2026-12-01', was: null });
+  assert.strictEqual(jiraState['T-2'], before, 'the date write changed the estimate too');
+  assert.strictEqual(jiraDue['T-2'], '2026-12-01');
+});
+
+check('CLEARING A DATE IS A REAL EDIT — null, not an empty string', async () => {
+  const r = await putDue({ teamId: 'titan', sprintId: 'OPEN', key: 'T-2', dueDate: '', was: '2026-12-01' });
+  assert.strictEqual(r.status, 200, JSON.stringify(r.body));
+  assert.strictEqual(jiraDue['T-2'], null, 'clearing must send null');
+  assert.strictEqual(dueOf('T-2'), null);
+});
+
+check('A STALE SCREEN IS REFUSED, not allowed to overwrite', async () => {
+  /* Somebody moved the date in Jira since this screen loaded. Writing anyway
+     would silently discard their edit — the one outcome that cannot be undone
+     from here. */
+  jiraDue['T-1'] = '2026-10-05';
+  const r = await putDue({ teamId: 'titan', sprintId: 'OPEN', key: 'T-1', dueDate: '2026-11-30', was: '2026-11-02' });
+  assert.strictEqual(r.status, 409, JSON.stringify(r.body));
+  assert.match(r.body.error, /2026-10-05/, 'the message has to say what Jira actually holds');
+  assert.strictEqual(jiraDue['T-1'], '2026-10-05', 'their edit must survive');
+});
+
+check('A DATE WITH A TIME ON IT IS NOT A CONFLICT', async () => {
+  /* Jira answers `duedate` as a plain date today, but the same issue read
+     through another endpoint carries a time — and "2026-10-05" against
+     "2026-10-05T00:00:00.000+0700" is a false conflict no amount of
+     refreshing would clear. Compared on the date. */
+  jiraDue['T-1'] = '2026-10-05T00:00:00.000+0700';
+  const r = await putDue({ teamId: 'titan', sprintId: 'OPEN', key: 'T-1', dueDate: '2026-12-25', was: '2026-10-05' });
+  assert.strictEqual(r.status, 200, `a timestamp read as a different date: ${JSON.stringify(r.body)}`);
+  assert.strictEqual(jiraDue['T-1'], '2026-12-25');
+});
+
+check('AN UNCHANGED DATE SAYS SO AND WRITES NOTHING', async () => {
+  const calls = jiraCalls.length;
+  const r = await putDue({ teamId: 'titan', sprintId: 'OPEN', key: 'T-1', dueDate: '2026-12-25', was: '2026-12-25' });
+  assert.strictEqual(r.status, 200);
+  assert.strictEqual(r.body.unchanged, true);
+  assert.ok(!jiraCalls.slice(calls).some(c => c.method === 'PUT'), 'it wrote to Jira anyway');
+});
+
+check('WHEN JIRA REFUSES, THE LOCAL COPY IS LEFT ALONE', async () => {
+  // Jira first, local second: if the write fails the local copy still matches
+  // Jira, which is the state a reader can act on.
+  jiraState.__refuse = true;
+  const r = await putDue({ teamId: 'titan', sprintId: 'OPEN', key: 'T-1', dueDate: '2027-01-01', was: '2026-12-25' });
+  delete jiraState.__refuse;
+  assert.strictEqual(r.status, 502, JSON.stringify(r.body));
+  assert.strictEqual(dueOf('T-1'), '2026-12-25', 'the local copy moved on a write Jira never accepted');
+});
+
+check('setDueDate SENDS ONE FIELD, and refuses a format Jira would misread', async () => {
+  const seen = [];
+  const j = stub((pathname, options) => { seen.push({ pathname, options }); return null; });
+  await j.setDueDate('T-1', '2026-11-02');
+  assert.deepStrictEqual(JSON.parse(seen[0].options.body), { fields: { duedate: '2026-11-02' } },
+    'the body must carry the due date and nothing besides');
+  await j.setDueDate('T-1', null);
+  assert.deepStrictEqual(JSON.parse(seen[1].options.body), { fields: { duedate: null } });
+  await assert.rejects(() => j.setDueDate('T-1', '03/04/2026'), /YYYY-MM-DD/,
+    'a locale-ambiguous date must not reach Jira');
+});
+
+/* ── THE FORTY-ENTRY CAP ──────────────────────────────────────────────
+   Jira's search endpoint embeds at most 40 changelog entries per issue and
+   reports `changelog.maxResults: 40` however the request is written. Measured
+   on the live instance: AUTOKAT-101 has 81 entries and AUTOKAT-96 has 52, and
+   both arrived cut in half.
+
+   The backfill used to drop a cut-short history ENTIRELY, so the epics it lost
+   were the long-lived ones — the only ones with maintenance cycles to count.
+   Those two had been automated, broken and re-automated four times over and
+   appeared on the chart not once. */
+
+const histories = (moves) => moves.map(([at, from, to], i) => ({
+  id: String(i), created: at,
+  items: [{ field: 'Automation Status', fieldId: 'customfield_16513', fromString: from, toString: to }],
+}));
+
+/** A stub Jira that answers the search, then the per-issue changelog. */
+const historyStub = ({ total, embedded, full }) => {
+  const calls = [];
+  const j = new Jira({ baseUrl: 'https://x.atlassian.net', email: 'a@b.c', apiToken: 't', automationStatusField: 'customfield_16513' });
+  j.request = async (pathname, options = {}) => {
+    calls.push(pathname);
+    if (pathname.startsWith('/rest/api/3/search/jql')) {
+      return { issues: [{
+        key: 'E-1', fields: { summary: 'x', components: [], labels: [] },
+        changelog: { total, maxResults: 40, histories: histories(embedded) },
+      }], nextPageToken: null };
+    }
+    const startAt = Number(/startAt=(\d+)/.exec(pathname)[1]);
+    const page = full.slice(startAt, startAt + 100);
+    return { total: full.length, startAt, values: histories(page), isLast: startAt + page.length >= full.length };
+  };
+  return { j, calls };
+};
+
+const FULL = [
+  ['2025-12-09T21:46:29Z', 'Ready for Automation', 'Automated'],
+  ['2026-01-19T04:52:44Z', 'Automated', 'Maintenance'],
+  ['2026-01-30T11:01:01Z', 'Maintenance', 'Automated'],
+  ['2026-09-09T08:46:18Z', 'Automated', 'Maintenance'],
+  ['2026-09-28T00:03:57Z', 'Maintenance', 'Automated'],
+];
+
+check('A CUT-SHORT CHANGELOG IS COMPLETED, not thrown away', async () => {
+  // The search hands back the last two entries of five and says so.
+  const { j, calls } = historyStub({ total: 5, embedded: FULL.slice(3), full: FULL });
+  const out = await j.searchWithHistory('project = X');
+
+  assert.strictEqual(out.length, 1);
+  assert.strictEqual(out[0].truncated, false, 'the flag must clear once the whole history is in hand');
+  assert.strictEqual(out[0].transitions.length, FULL.length,
+    `the history was not completed: ${out[0].transitions.length} of ${FULL.length}`);
+  assert.deepStrictEqual(out[0].transitions[0], { at: FULL[0][0], from: FULL[0][1], to: FULL[0][2] },
+    'the oldest move is the one the cap was hiding, and it decides which arrival is the build');
+  assert.ok(calls.some(c => c.includes('/issue/E-1/changelog')), 'the per-issue changelog was never read');
+});
+
+check('AND AN INTACT ONE IS LEFT ALONE — no extra request per epic', async () => {
+  /* The re-read is one request per affected issue against somebody's
+     production Jira. Firing it for every epic would turn a backfill into a
+     rate limit. */
+  const { j, calls } = historyStub({ total: FULL.length, embedded: FULL, full: FULL });
+  const out = await j.searchWithHistory('project = X');
+  assert.strictEqual(out[0].truncated, false);
+  assert.strictEqual(out[0].transitions.length, FULL.length);
+  assert.ok(!calls.some(c => c.includes('/changelog')), `an intact history was re-read: ${calls.join(', ')}`);
+});
+
+check('A HISTORY LONGER THAN ONE PAGE IS PAGED TO THE END', async () => {
+  // The cap is the defect being fixed; stopping at the first hundred would fix
+  // it only for issues that happen to be under the new limit.
+  const long = Array.from({ length: 250 }, (_, i) =>
+    [`2026-01-${String((i % 28) + 1).padStart(2, '0')}T00:00:00Z`, i % 2 ? 'Automated' : 'Maintenance', i % 2 ? 'Maintenance' : 'Automated']);
+  const { j, calls } = historyStub({ total: 250, embedded: long.slice(0, 40), full: long });
+  const out = await j.searchWithHistory('project = X');
+  assert.strictEqual(out[0].transitions.length, 250, 'the history stopped short of its own end');
+  assert.strictEqual(calls.filter(c => c.includes('/changelog')).length, 3, 'expected three pages of 100');
+});
+
+check('A RE-READ THAT FAILS LEAVES THE ISSUE FLAGGED, not silently partial', async () => {
+  /* The one outcome that must not happen quietly: half a history stored as if
+     it were whole. `saveTransitions` skips anything still flagged, so a failed
+     re-read shows up as a missing epic rather than as a wrong count. */
+  const { j } = historyStub({ total: 5, embedded: FULL.slice(3), full: FULL });
+  const search = j.request;
+  j.request = async (pathname, options) => {
+    if (pathname.includes('/changelog')) throw new Error('Jira 429');
+    return search(pathname, options);
+  };
+  const out = await j.searchWithHistory('project = X');
+  assert.strictEqual(out[0].truncated, true, 'a failed re-read must leave the flag up');
+  assert.strictEqual(out[0].transitions.length, 2, 'and keep what it had');
+});
+
+check('ONE DEFINITION READS BOTH ENDPOINTS — embedded histories and paged values', async () => {
+  // The two shapes differ (`histories` vs `values`) and the moves inside them
+  // do not. A second copy of the extraction is how a completed history comes
+  // to disagree with the partial one it replaced.
+  const { j } = historyStub({ total: 5, embedded: FULL.slice(3), full: FULL });
+  const direct = await j.automationHistory('E-1');
+  const viaSearch = (await j.searchWithHistory('project = X'))[0].transitions;
+  assert.deepStrictEqual(viaSearch, direct);
+});
+
+check('A FIELD THAT IS NOT AUTOMATION STATUS IS NOT A TRANSITION', async () => {
+  const j = new Jira({ baseUrl: 'https://x.atlassian.net', email: 'a@b.c', apiToken: 't', automationStatusField: 'customfield_16513' });
+  const moves = j.automationMoves([{ created: '2026-01-01T00:00:00Z', items: [
+    { field: 'summary', fieldId: 'summary', fromString: 'a', toString: 'b' },
+    { field: 'Automation Status', fieldId: 'customfield_16513', fromString: 'Maintenance', toString: 'Automated' },
+  ] }]);
+  assert.deepStrictEqual(moves, [{ at: '2026-01-01T00:00:00Z', from: 'Maintenance', to: 'Automated' }]);
+});
 
 check('THE WRITE SENDS ONE FIELD ON ONE ISSUE — nothing else', async () => {
   /* A helper that could set arbitrary fields is one typo from clearing a

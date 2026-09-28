@@ -71,6 +71,7 @@ const issue = (o) => ({
   // the shape of every Story in Refinement in his sprint: the block is
   // recorded on the epic, never on the Story.
   blockedBy: o.blockedBy || [], parentKey: o.parentKey || null, relatesTo: o.relatesTo || [],
+  dueDate: 'dueDate' in o ? o.dueDate : null,
   updated: '2026-09-20T00:00:00.000Z',
   resolved: o.status === 'Done' ? '2026-09-21T00:00:00.000Z' : null,
   team: 'Katalon Auto Titan', priority: 'Medium',
@@ -286,7 +287,11 @@ const CAPACITY_VIEW = fs.readFileSync(path.join(__dirname, '..', 'public', 'view
  * sharing it being that the two cannot drift apart.
  */
 async function renderCapacity(snap = SNAP, plan = PLAN) {
-  const payload = insights.capacityView(plan, snap, TEAM, SPRINT);
+  /* TODAY IS PINNED, like the Active sprint harness pins it. The capacity
+     payload now carries a `today` for the Due column's overdue reading, and
+     left to the wall clock these checks would pass today and fail whenever
+     somebody ran them after the fixture's dates went by. */
+  const payload = insights.capacityView(plan, snap, TEAM, SPRINT, { today: MID_SPRINT });
   let html = '';
   const el = () => ({
     addEventListener() {}, value: '', hidden: false, dataset: {}, style: {}, setAttribute() {},
@@ -314,7 +319,12 @@ async function renderCapacity(snap = SNAP, plan = PLAN) {
   };
   await ctx.__c.render({
     teamId: 'titan', sprintId: 'S40', categories: {},
-    sprints: [{ id: 'S40', name: 'Sprint 40', byTeam: {} }],
+    /* THE REAL SPRINT, not a stub of it. The app hands this view the sprints
+       off the plan, dates and all, and the Due column reads `end` from here to
+       decide what is late — so a stripped-down copy makes that column render
+       and never colour anything, which looks exactly like a sprint with no
+       late work. It did, until a check asked. */
+    sprints: [{ ...SPRINT, byTeam: {} }],
   }, mount);
   return { html, payload };
 }
@@ -347,8 +357,10 @@ check('EVERY SPRINT ITEM IS A ROW, including the ones nobody owns', async () => 
   for (const k of [...OWNED, ...UNOWNED]) {
     assert.ok(body.includes(`>${k}</a>`) || body.includes(`>${k}<`), `${k} has no row in the item table`);
   }
-  // Header row plus one per item — so nothing is being dropped silently either.
-  assert.strictEqual((body.match(/<tr>/g) || []).length, payload.items.length + 1);
+  // One row per item — so nothing is being dropped silently either. Counted
+  // on the tag rather than on `<tr>` exactly: the item rows carry the values
+  // the filter matches on, so their opening tag is no longer bare.
+  assert.strictEqual(trs(body).length, payload.items.length);
 });
 
 check('an item with no assignee says so in the Assignee column', async () => {
@@ -447,7 +459,7 @@ check('CAPACITY PLANNING SHOWS THE SPRINT ITEMS TOO', async () => {
   for (const k of [...OWNED, ...UNOWNED]) {
     assert.ok(body.includes(`>${k}</a>`) || body.includes(`>${k}<`), `${k} has no row`);
   }
-  assert.strictEqual((body.match(/<tr>/g) || []).length, payload.items.length + 1);
+  assert.strictEqual(trs(body).length, payload.items.length);
 });
 
 check('and it is the SAME table, not a second one that will drift', async () => {
@@ -558,7 +570,7 @@ check('EVERY ROW HAS AS MANY CELLS AS THE HEADER HAS COLUMNS', async () => {
     // or the closing bracket, or the header comes out one column too wide.
     const cols = (body.match(/<th(?=[\s>])[^>]*>/g) || []).length;
     assert.ok(cols >= 8, `${where}: expected the full item table, saw ${cols} columns`);
-    const rows = body.split('<tr>').slice(2);          // past the header row
+    const rows = trs(body);                            // past the header row
     assert.ok(rows.length, `${where}: no rows to check`);
     for (const r of rows) {
       assert.strictEqual((r.match(/<td[^>]*>/g) || []).length, cols,
@@ -568,6 +580,16 @@ check('EVERY ROW HAS AS MANY CELLS AS THE HEADER HAS COLUMNS', async () => {
 });
 
 /* ── per-component progress ───────────────────────────────────────────── */
+
+/**
+ * The `<tr>` fragments in a slice of markup, header row dropped.
+ *
+ * Split on the tag, not on `'<tr>'` verbatim: the item rows gained attributes
+ * the day the table got filters, and three checks that had hard-coded the
+ * whole opening tag came back with one fragment and reported "no rows to
+ * check" — a count of nothing, asserted against successfully.
+ */
+const trs = (html, drop = 1) => html.split(/<tr(?=[\s>])/).slice(1 + drop);
 
 /**
  * The whole `<tr>` an issue key sits in.
@@ -595,7 +617,7 @@ check('THE ACTIVE SPRINT SCREEN BREAKS PROGRESS DOWN BY COMPONENT', async () => 
   for (const r of payload.byComponent.rows) {
     assert.ok(body.includes(r.component), `${r.component} has no row`);
   }
-  const rows = body.split('<tr>').slice(2);
+  const rows = trs(body);
   assert.strictEqual(rows.length, payload.byComponent.rows.length);
 });
 
@@ -644,7 +666,7 @@ check('a sprint with no components at all renders no empty section', async () =>
   // One row — "no component" — is still a real answer, so the section stays.
   // What must not happen is a section with no rows under it.
   const body = componentSection(html);
-  if (body) assert.ok(body.split('<tr>').length > 2, 'a section with a header and nothing in it');
+  if (body) assert.ok(trs(body).length >= 1, 'a section with a header and nothing in it');
 });
 
 /* ── test cases under maintenance ─────────────────────────────────────── */
@@ -660,12 +682,23 @@ check('THE ITEM TABLE COUNTS TEST CASES UNDER MAINTENANCE', async () => {
   // deleted altogether.
   const row = rowFor(body, 'A-20');
   const cells = [...row.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)].map(m => m[1].trim());
-  assert.strictEqual(cells.length, 9, `expected 9 cells in the row, got ${cells.length}`);
-  // The number is a control now, so the cell is a button wrapping it. Still
-  // matched on the LAST cell for the reason above: this row is also worth 3
-  // points, and a looser match was once green with the column deleted.
-  assert.match(cells[8], />3<\/button>/, `the test-case cell reads "${cells[8]}"`);
-  assert.match(cells[8], /data-act="item-testcases"[^>]*data-key="A-20"/,
+  /* Counted off the HEADER rather than typed. A literal here has to be edited
+     every time the table gains a column, for a reason that has nothing to do
+     with what this check is about — and it broke twice for exactly that. What
+     it actually guards is "the LAST cell is the test-case count", which the
+     header count gives it for free. */
+  const cols = (body.match(/<th(?=[\s>])[^>]*>/g) || []).length;
+  assert.strictEqual(cells.length, cols, `the row has ${cells.length} cells and the header ${cols} columns`);
+  /* The number is a control now, so the cell is a button wrapping it. Read
+     from the LAST cell — `cells[cols - 1]`, not `cells[8]`: the index was
+     typed, and inserting a Due column ahead of it silently moved this
+     assertion onto the Epic cell, where it failed for a reason that had
+     nothing to do with test cases. The point was always "the last column",
+     because this row is also worth 3 points and a looser match was once green
+     with the column deleted altogether. */
+  const last = cells[cols - 1];
+  assert.match(last, />3<\/button>/, `the test-case cell reads "${last}"`);
+  assert.match(last, /data-act="item-testcases"[^>]*data-key="A-20"/,
     'the number does not open the suites it counted');
 });
 
@@ -940,8 +973,15 @@ check('THE WIDE TABLE IS LAID OUT TO THE PAGE, not merely un-scrolled', async ()
   // Component truncated mid-word and Epic missing altogether, on a page that
   // still looked complete.
   assert.match(printRules, /\.items-table \{ table-layout: fixed/, 'the columns are not sized for paper');
+  /* EVERY COLUMN THE TABLE RENDERS NEEDS A WIDTH, and the count comes from the
+     table rather than from a number typed here: with `table-layout: fixed` a
+     column with no width is given whatever is left, which on a ten-column
+     table is a Due date squeezed to two characters. Deriving it means a new
+     column fails this check until it is sized. */
+  const { html: rendered } = await renderHtml();
+  const cols = (itemsSection(rendered).match(/<th(?=[\s>])[^>]*>/g) || []).length;
   const widths = [...printRules.matchAll(/\.items-table \.col-[a-z]+ \{ width: (\d+)%/g)].map(m => Number(m[1]));
-  assert.strictEqual(widths.length, 9, `expected a width for all 9 columns, found ${widths.length}`);
+  assert.strictEqual(widths.length, cols, `the table renders ${cols} columns and ${widths.length} have a print width`);
   assert.strictEqual(widths.reduce((a, b) => a + b, 0), 100,
     `the column widths add up to ${widths.reduce((a, b) => a + b, 0)}%, so the table cannot fit the page`);
 });
@@ -1030,6 +1070,20 @@ check('THE COLUMN IS READ-ONLY — the Coverage grid owns the value', async () =
   assert.ok(!/data-prio|data-set-priority/.test(sec), 'and no write handler');
 });
 
+check('THE SECTION OFFERS AN EXPORT, pointed at this team and this sprint', async () => {
+  /* The link carries the ids because the route needs them, and a link built
+     from the wrong ones downloads another team's sprint without complaining —
+     the numbers are all plausible and nothing on the file says whose it is. */
+  const sec = testCaseSection((await renderHtml()).html);
+  const href = /href="(\/api\/export[^"]*)"/.exec(sec);
+  assert.ok(href, 'no export link on the test-case section');
+  assert.match(href[1], /what=testcases/);
+  assert.match(href[1], /team=titan/, 'the link does not name the team on screen');
+  assert.match(href[1], /sprint=S40/, 'nor the sprint');
+  assert.match(sec.slice(sec.indexOf('/api/export')), /^[^<]*/, 'the link must be a real anchor');
+  assert.ok(/class="btn ghost sm print-hide"/.test(sec), 'a download button does not belong on paper');
+});
+
 check('THE TABLE IS TEST CASES ONLY — the item counts are gone', async () => {
   /* Stories, Bucket stories, Items and Done were sprint-item counts sitting in
      a table about test cases, and they pushed the columns that answer the
@@ -1062,7 +1116,7 @@ check('EVERY ROW AND THE FOOTER MATCH THE HEADER, column for column', async () =
   assert.ok(cols >= 7, `expected the full table, saw ${cols} columns`);
 
   const body = sec.slice(sec.indexOf('<tbody>'), sec.indexOf('</tbody>'));
-  const rows = body.split('<tr>').slice(1);
+  const rows = trs(body, 0);
   assert.ok(rows.length, 'no rows to check');
   for (const r of rows) {
     assert.strictEqual((r.match(/<td[^>]*>/g) || []).length, cols,
@@ -1509,6 +1563,681 @@ check('DUPLICATE BLOCKERS ACROSS EPICS COLLAPSE, so the count is a set', async (
   assert.match(html, /3 items/, 'the drawer heading disagrees with the icon');
 });
 
+/* ── FILTERING THE ITEM TABLE ─────────────────────────────────────────── */
+
+/**
+ * The predicate is checked directly and the BAR is checked from the markup.
+ *
+ * Between them sits fifteen lines of hiding rows, which needs a real DOM to
+ * exercise and cannot go wrong in an interesting way: the two things that can
+ * are "which items match" and "which options the bar offers", and both are
+ * reachable without one.
+ */
+
+const filterBar = (html) => {
+  const at = html.indexOf('data-items-filters');
+  assert.ok(at > 0, 'the item table has no filter bar');
+  const from = html.lastIndexOf('<div', at);
+  return html.slice(from, html.indexOf('</div>\n      </div>', at) + 20);
+};
+/** The <option> values under one filter's <select>. */
+const optionsOf = (bar, name) => {
+  const at = bar.indexOf(`data-items-filter="${name}"`);
+  if (at < 0) return null;
+  return [...bar.slice(at, bar.indexOf('</select>', at)).matchAll(/<option value="([^"]*)"/g)].map(m => m[1]);
+};
+
+check('THE FILTER MATCHES ON WHAT THE ROW SHOWS, field by field', async () => {
+  const { ctx, payload } = await refined();
+  const F = ctx.UI.filterItems;
+  const items = payload.items;
+  const one = items.find(i => i.assignee && i.status);
+
+  assert.deepStrictEqual(F(items, {}).map(i => i.key), items.map(i => i.key),
+    'an empty filter must be the whole list, not an empty one');
+  assert.ok(F(items, { status: one.status }).every(i => i.status === one.status));
+  assert.ok(F(items, { assignee: one.assignee }).every(i => i.assignee === one.assignee));
+  assert.ok(F(items, { status: 'No Such Status' }).length === 0);
+});
+
+check('UNASSIGNED IS A CHOICE, not something you can only search for', async () => {
+  /* The single most useful thing to ask this table — what has nobody picked
+     up — and a plain equality on the name cannot express it, because the
+     value being matched is the absence of one. */
+  const { ctx, payload } = await renderHtml();
+  const items = payload.items;
+  const none = items.filter(i => !i.assignee);
+  assert.ok(none.length, 'fixture check: something has to be unassigned');
+  const got = ctx.UI.filterItems(items, { assignee: ctx.UI.ITEM_UNASSIGNED });
+  assert.deepStrictEqual(got.map(i => i.key).sort(), none.map(i => i.key).sort());
+  // ...and it is offered, or it can only be reached by typing the sentinel.
+  const bar = filterBar((await renderHtml()).html);
+  assert.ok((optionsOf(bar, 'assignee') || []).includes(ctx.UI.ITEM_UNASSIGNED),
+    'the bar does not offer Unassigned');
+});
+
+check('SEARCH LOOKS AT THE KEY AND THE SUMMARY, and ignores case', async () => {
+  const { ctx, payload } = await renderHtml();
+  const one = payload.items.find(i => i.summary);
+  const byKey = ctx.UI.filterItems(payload.items, { q: one.key.toLowerCase() });
+  assert.ok(byKey.some(i => i.key === one.key), 'a lower-cased key found nothing');
+  const word = String(one.summary).split(' ')[0];
+  assert.ok(ctx.UI.filterItems(payload.items, { q: word.toUpperCase() }).some(i => i.key === one.key),
+    'an upper-cased word from the summary found nothing');
+});
+
+check('EVERY FIELD THE BAR OFFERS ACTUALLY NARROWS — field by field, not by sample', async () => {
+  /* Driven off the fields themselves rather than off two hand-picked ones.
+     The first version of these checks exercised status, assignee and search,
+     which left `category` and `component` with no coverage at all: a mutation
+     turning the category clause into `return true` — a filter that WIDENS —
+     went through 1,300 checks untouched. */
+  const { ctx, payload } = await renderHtml();
+  const items = payload.items;
+  const pick = {
+    status: i => i.status,
+    assignee: i => i.assignee,
+    component: i => (i.components || [])[0],
+    category: i => i.category,
+  };
+  for (const [field, of] of Object.entries(pick)) {
+    const values = [...new Set(items.map(of).filter(Boolean))];
+    assert.ok(values.length, `fixture check: nothing to filter ${field} by`);
+    for (const v of values) {
+      const got = ctx.UI.filterItems(items, { [field]: v });
+      const want = items.filter(i => of(i) === v);
+      assert.deepStrictEqual(got.map(i => i.key).sort(), want.map(i => i.key).sort(),
+        `${field}=${v} returned the wrong set`);
+      assert.ok(got.length <= items.length, `${field} widened the list`);
+    }
+    // A value nothing has must empty the table, or the clause is not running.
+    assert.strictEqual(ctx.UI.filterItems(items, { [field]: '☃ nothing has this' }).length, 0,
+      `${field} ignores a value no row carries`);
+  }
+});
+
+check('COMPONENT MATCHES THE ONE ON SCREEN, not any the item carries', async () => {
+  /* The column shows the FIRST component and nothing else. A filter that
+     matched any of them would leave rows on screen whose Component cell reads
+     something other than what was filtered for — which looks like the filter
+     failing rather than like a row with two components.
+
+     Hand-built items, not the fixture: every item in the sprint snapshot has
+     at most one component, so the two readings agree there and a mutation
+     swapping `[0] ===` for `.includes()` walked straight through. */
+  const { ctx } = await renderHtml();
+  const items = [
+    { key: 'X-1', summary: 'two', status: 'Open', components: ['PS_Shown', 'PS_Hidden'] },
+    { key: 'X-2', summary: 'one', status: 'Open', components: ['PS_Hidden'] },
+  ];
+  assert.deepStrictEqual(ctx.UI.filterItems(items, { component: 'PS_Shown' }).map(i => i.key), ['X-1']);
+  assert.deepStrictEqual(ctx.UI.filterItems(items, { component: 'PS_Hidden' }).map(i => i.key), ['X-2'],
+    'a row whose Component cell reads PS_Shown was kept under a PS_Hidden filter');
+});
+
+check('TWO FILTERS NARROW, they do not widen', async () => {
+  // An `||` where an `&&` belongs reads as a filter that works right up until
+  // you use two of them, and then quietly returns more rows than one alone.
+  const { ctx, payload } = await renderHtml();
+  const items = payload.items;
+  const one = items.find(i => i.assignee && i.status);
+  const both = ctx.UI.filterItems(items, { assignee: one.assignee, status: one.status });
+  const single = ctx.UI.filterItems(items, { assignee: one.assignee });
+  assert.ok(both.length <= single.length, `two filters returned more rows (${both.length}) than one (${single.length})`);
+  assert.ok(both.every(i => i.assignee === one.assignee && i.status === one.status));
+});
+
+check('THE BAR OFFERS ONLY VALUES THAT ARE IN THE TABLE, so no choice is a dead end', async () => {
+  /* A dropdown built from the team roster or the status catalogue rather than
+     from these rows offers options that empty the table, which reads exactly
+     like a broken filter. */
+  const { html, payload } = await renderHtml();
+  const bar = filterBar(html);
+  const present = {
+    status: new Set(payload.items.map(i => i.status).filter(Boolean)),
+    assignee: new Set(payload.items.map(i => i.assignee).filter(Boolean)),
+    component: new Set(payload.items.map(i => (i.components || [])[0]).filter(Boolean)),
+  };
+  for (const [name, set] of Object.entries(present)) {
+    const opts = (optionsOf(bar, name) || []).filter(v => v !== '' && v !== 'ALL_UNASSIGNED');
+    assert.ok(opts.length, `the ${name} filter offers nothing`);
+    for (const v of opts) {
+      if (v === '— none —') continue;      // the Unassigned sentinel
+      assert.ok(set.has(v), `${name} offers "${v}", which no row has`);
+    }
+    for (const v of set) assert.ok(opts.includes(v), `${name} is missing "${v}", which is on a row`);
+  }
+});
+
+check('EVERY ROW CARRIES THE VALUES IT IS FILTERED BY', async () => {
+  /* The wiring reads these attributes rather than a copy of the item list, so
+     a row cannot be hidden for a value it is not showing. Missing attributes
+     make every row match nothing, which looks like an empty sprint. */
+  const { html, payload } = await renderHtml();
+  const body = itemsSection(html);
+  for (const i of payload.items) {
+    const row = rowFor(body, i.key);
+    assert.ok(row, `${i.key} has no row`);
+    for (const a of ['key', 'summary', 'status', 'assignee', 'component', 'category', 'points']) {
+      assert.match(row, new RegExp(`data-item-${a}="`), `${i.key} is missing data-item-${a}`);
+    }
+    assert.match(row, new RegExp(`data-item-status="${i.status}"`), `${i.key}'s status attribute disagrees with its cell`);
+  }
+});
+
+check('AND BOTH SCREENS GET THE BAR, because it is the same table', async () => {
+  for (const [where, render] of [['Active sprint', renderHtml], ['Capacity planning', renderCapacity]]) {
+    const { html } = await render();
+    assert.ok(html.includes('data-items-filters'), `${where}: no filter bar on the item table`);
+  }
+});
+
+check('AND BOTH SCREENS WIRE IT — a bar nothing listens to is furniture', async () => {
+  /* The markup renders either way. Without the wiring call the selects open,
+     the options are right, choosing one does nothing, and no check above this
+     notices — which is why this one reads the source of both views rather
+     than their output. */
+  for (const f of ['sprint.js', 'capacity.js']) {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'public', 'views', f), 'utf8');
+    assert.match(src, /UI\.wireItemsFilter\(mount/, `${f} renders the filter bar but never wires it`);
+  }
+  // And the mount really is given a listener, rather than the call being a
+  // no-op that returns early on everything.
+  const { ctx } = await renderHtml();
+  const types = [];
+  ctx.UI.wireItemsFilter({ addEventListener: (t) => types.push(t), querySelector: () => null, querySelectorAll: () => [] });
+  for (const t of ['input', 'change', 'click']) {
+    assert.ok(types.includes(t), `nothing listens for ${t}, so the bar is dead`);
+  }
+});
+
+/* ── OPEN IN JIRA, OVER WHAT THE TABLE IS SHOWING ─────────────────────── */
+
+/**
+ * The link is rebuilt by the filter wiring, so checking the rendered HTML only
+ * covers the unfiltered case. The rest needs the wiring to actually run, which
+ * needs enough of a DOM for it to walk — a dozen lines, and the alternative is
+ * an untested rewrite of the one link on the page that can silently open the
+ * wrong set.
+ */
+function fakeTable(rows, { jiraBase = 'https://ipipelinejira.atlassian.net' } = {}) {
+  const el = (tag, data = {}) => ({
+    tagName: tag, dataset: data, hidden: false, value: '', innerHTML: '', textContent: '',
+    querySelectorAll: () => [], querySelector: () => null,
+    closest(sel) { return sel.replace(/[[\]]/g, '') in this.dataset ? this : null; },
+  });
+  // `closest('[data-items-filter]')` has to answer for the inputs, so the
+  // dataset key is what the selector names, camel-cased as the DOM does it.
+  const input = (name) => {
+    const n = el('input', { itemsFilter: name });
+    n.closest = (sel) => (sel === '[data-items-filter]' ? n : null);
+    return n;
+  };
+  const fields = { q: input('q'), status: input('status'), assignee: input('assignee'), component: input('component'), category: input('category') };
+  const bar = el('div', { itemsFilters: '' });
+  bar.querySelectorAll = () => Object.values(fields);
+  const trs = rows.map(r => el('tr', {
+    itemKey: r.key, itemSummary: r.summary || '', itemStatus: r.status || '',
+    itemAssignee: r.assignee || '', itemComponent: (r.components || [])[0] || '',
+    itemCategory: r.category || '', itemPoints: r.points == null ? '' : String(r.points),
+  }));
+  const body = el('tbody', { itemsRows: '' });
+  body.querySelectorAll = () => trs;
+  const jira = el('span', { itemsJira: '' });
+  const showing = el('strong', { itemsShowing: '' });
+  const clear = el('button', { itemsFilterClear: '' });
+  const map = {
+    '[data-items-filters]': bar, '[data-items-rows]': body,
+    '[data-items-jira]': jira, '[data-items-showing]': showing,
+    '[data-items-filter-clear]': clear,
+  };
+  const handlers = {};
+  const mount = {
+    addEventListener: (t, fn) => { (handlers[t] = handlers[t] || []).push(fn); },
+    querySelector: (sel) => map[sel] || null,
+    querySelectorAll: () => [],
+    set: (name, v) => { fields[name].value = v; for (const fn of handlers.change || []) fn({ target: fields[name] }); },
+  };
+  return { mount, jira, showing, clear, rows: trs, jiraBase };
+}
+
+const ITEMS = [
+  { key: 'F-1', summary: 'one', status: 'Refinement', assignee: 'Hien Phan', components: ['PS_A'], points: 3 },
+  { key: 'F-2', summary: 'two', status: 'In Dev', assignee: 'Hien Phan', components: ['PS_A'], points: 5 },
+  { key: 'F-3', summary: 'three', status: 'In Dev', assignee: null, components: ['PS_B'], points: 2 },
+];
+
+check('THE ITEM TABLE OFFERS OPEN IN JIRA, on both screens', async () => {
+  for (const [where, render] of [['Active sprint', renderHtml], ['Capacity planning', renderCapacity]]) {
+    const { html, payload } = await render();
+    const sec = itemsSection(html);
+    assert.ok(sec.includes('data-items-jira'), `${where}: no Open in Jira on the item table`);
+    const href = /href="([^"]*jql[^"]*)"/.exec(sec.slice(sec.indexOf('data-items-jira')));
+    assert.ok(href, `${where}: the link has no Jira search URL`);
+    // Unfiltered, it is the whole sprint — every key on the table.
+    const url = decodeURIComponent(href[1]);
+    for (const i of payload.items) {
+      assert.ok(url.includes(i.key), `${where}: ${i.key} is on the table but not in the link`);
+    }
+  }
+});
+
+check('AND IT FOLLOWS THE FILTER — the link opens what the table shows', async () => {
+  /* The failure this exists for: filter to one person, click the link, get the
+     whole sprint. It looks like the filter failed, and there is no way to tell
+     from the screen which of the two is wrong. */
+  const { ctx } = await renderHtml();
+  const t = fakeTable(ITEMS);
+  ctx.UI.setJiraBase(t.jiraBase);
+  ctx.UI.wireItemsFilter(t.mount);
+
+  t.mount.set('status', 'In Dev');
+  const url = decodeURIComponent(/href="([^"]*)"/.exec(t.jira.innerHTML)[1]);
+  assert.ok(url.includes('F-2') && url.includes('F-3'), `the two In Dev rows are not in the link: ${url}`);
+  assert.ok(!url.includes('F-1'), `a filtered-out row is still in the link: ${url}`);
+  assert.match(t.showing.textContent, /showing 2 of 3/, `the count disagrees: ${t.showing.textContent}`);
+  assert.match(t.showing.textContent, /7 pts/, 'the points do not follow the filter either');
+});
+
+check('A FILTER THAT MATCHES NOTHING LEAVES NO LINK, rather than one to nothing', async () => {
+  const { ctx } = await renderHtml();
+  const t = fakeTable(ITEMS);
+  ctx.UI.setJiraBase(t.jiraBase);
+  ctx.UI.wireItemsFilter(t.mount);
+  t.mount.set('assignee', 'Nobody At All');
+  assert.strictEqual(t.jira.innerHTML, '', `an empty result still offered a link: ${t.jira.innerHTML}`);
+  assert.match(t.showing.textContent, /showing 0 of 3/);
+});
+
+check('CLEARING PUTS EVERY ROW AND EVERY KEY BACK', async () => {
+  const { ctx } = await renderHtml();
+  const t = fakeTable(ITEMS);
+  ctx.UI.setJiraBase(t.jiraBase);
+  ctx.UI.wireItemsFilter(t.mount);
+  t.mount.set('status', 'In Dev');
+  assert.ok(t.rows.some(r => r.hidden), 'precondition: something has to be hidden');
+  t.mount.set('status', '');
+  assert.ok(!t.rows.some(r => r.hidden), 'a row stayed hidden after the filter was cleared');
+  const url = decodeURIComponent(/href="([^"]*)"/.exec(t.jira.innerHTML)[1]);
+  for (const i of ITEMS) assert.ok(url.includes(i.key), `${i.key} did not come back into the link`);
+  assert.strictEqual(t.showing.hidden, true, 'the count line stayed up with nothing filtered');
+  assert.strictEqual(t.clear.hidden, true, 'the Clear button stayed up with nothing to clear');
+});
+
+/* ── THE DUE DATE ─────────────────────────────────────────────────────── */
+
+/* The sprint under test runs to 2026-09-30 (see SPRINT). One item is due
+   inside it, one after it, one after it but finished, and one has no date —
+   the four cases the column has to tell apart. */
+const DUE_SNAP = {
+  ...SNAP,
+  issues: Object.fromEntries([
+    ...Object.values(SNAP.issues),
+    issue({ key: 'D-1', assignee: 'Hien Phan', points: 1, dueDate: '2026-09-25' }),
+    issue({ key: 'D-2', assignee: 'Hien Phan', points: 1, dueDate: '2026-10-14' }),
+    issue({ key: 'D-3', assignee: 'Hien Phan', points: 1, dueDate: '2026-10-14', status: 'Done' }),
+    /* THE LAST DAY OF THE SPRINT, which is inside it. `>=` instead of `>` is
+       the whole of the off-by-one here, and without this row both readings
+       agree on every item in the fixture — a mutation swapping them survived
+       a thousand checks. */
+    issue({ key: 'D-4', assignee: 'Hien Phan', points: 1, dueDate: '2026-09-30' }),
+  ].map(i => [i.key, i])),
+};
+
+const dueCellOf = (html, key) => {
+  const row = rowFor(itemsSection(html), key);
+  assert.ok(row, `${key} has no row`);
+  const m = /<td class="col-due"[^>]*>([\s\S]*?)<\/td>/.exec(row);
+  assert.ok(m, `${key} has no Due cell`);
+  return { cell: m[0], inner: m[1] };
+};
+
+check('BOTH SCREENS SHOW A DUE DATE COLUMN, because it is one table', async () => {
+  for (const [where, render] of [['Active sprint', renderHtml], ['Capacity planning', renderCapacity]]) {
+    const { html } = await render(DUE_SNAP);
+    const sec = itemsSection(html);
+    const heads = [...sec.matchAll(/<th(?=[\s>])[^>]*>([^<]*)</g)].map(m => m[1].trim());
+    assert.ok(heads.includes('Due'), `${where}: no Due column — ${heads.join(' | ')}`);
+    assert.ok(sec.includes('class="col-due"'), `${where}: the cells are not classed`);
+  }
+});
+
+check('THE DATE ON THE ROW IS THE DATE ON THE ISSUE', async () => {
+  const { html, payload } = await renderHtml(DUE_SNAP);
+  const withDate = payload.items.filter(i => i.dueDate);
+  assert.strictEqual(withDate.length, 4, 'fixture check: four items should carry a date');
+  for (const i of withDate) {
+    assert.match(dueCellOf(html, i.key).cell, new RegExp(`data-sort-value="${i.dueDate}"`),
+      `${i.key} sorts by something other than its own due date`);
+  }
+});
+
+check('A DATE AFTER THE SPRINT ENDS IS FLAGGED, and one inside it is not', async () => {
+  /* The finding worth a colour: committed to this sprint, dated to land after
+     it. Measured against the sprint's end, which is on the payload — not
+     against today, which would change overnight with nothing else changing
+     and could not be checked without freezing the clock. */
+  const { html, payload } = await renderHtml(DUE_SNAP);
+  assert.strictEqual(String(payload.sprint.end).slice(0, 10), '2026-09-30', 'fixture check: the sprint end moved');
+  /* `due-late` on the wrapper, not `st-late` on a span: the cell is an input
+     now, and the state rides on what wraps it — a coloured input border reads
+     as a validation error rather than a deadline. */
+  assert.match(dueCellOf(html, 'D-2').inner, /due-late/, 'a date past the sprint end is not flagged');
+  assert.ok(!/due-late/.test(dueCellOf(html, 'D-1').inner), 'a date inside the sprint was flagged');
+  // The boundary: due ON the last day is due inside the sprint.
+  assert.ok(!/due-late/.test(dueCellOf(html, 'D-4').inner),
+    'an item due on the sprint\'s last day was called late');
+});
+
+check('AND FINISHED WORK IS NEVER LATE, whatever its date says', async () => {
+  // D-3 is Done and dated a fortnight out. A due date on finished work is
+  // history, not a deadline, and colouring it teaches people to ignore the
+  // colour.
+  const { html, payload } = await renderHtml(DUE_SNAP);
+  const d3 = payload.items.find(i => i.key === 'D-3');
+  assert.strictEqual(d3.dueDate, '2026-10-14', 'fixture check: still dated past the sprint');
+  assert.ok(!/due-late|due-overdue/.test(dueCellOf(html, 'D-3').inner), 'a finished item was flagged');
+});
+
+check('AN ITEM WITH NO DUE DATE SORTS LAST, not first', async () => {
+  /* An empty sort value sorts before every date, which puts every unknown at
+     the top of a column you opened to find the earliest deadline. */
+  const { html, payload } = await renderHtml(DUE_SNAP);
+  const none = payload.items.find(i => !i.dueDate);
+  assert.ok(none, 'fixture check: something has to be undated');
+  const { cell, inner } = dueCellOf(html, none.key);
+  assert.match(cell, /data-sort-value="9999-/, 'an undated item would sort above every date');
+  // Editable, so an undated item is an empty date box rather than a dash —
+  // the read-only form is checked on the closed sprint below.
+  assert.match(inner, /value=""/, 'an undated box should be empty and typeable');
+});
+
+check('THE SPRINT END IS PASSED BY BOTH VIEWS, or nothing is ever flagged', async () => {
+  /* The flag lives in the shared table and the end date does not: each view
+     has to hand it over. A view that forgot would render a column that never
+     colours anything, which looks exactly like a sprint with no late work. */
+  for (const f of ['sprint.js', 'capacity.js']) {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'public', 'views', f), 'utf8');
+    assert.match(src, /sprintEnd:/, `${f} renders the Due column but never says when the sprint ends`);
+    assert.match(src, /today:/, `${f} renders the Due column but never says what today is`);
+  }
+  const { html } = await renderCapacity(OVERDUE_SNAP);
+  assert.match(dueCellOf(html, 'D-2').inner, /due-late/, 'Capacity planning flags nothing past the sprint end');
+  /* AND THE OTHER ANCHOR. `today` travels separately from the sprint end —
+     the Active sprint screen reads it off `window.today`, Capacity planning
+     off its own payload — so a view that carries one and not the other shows
+     a column that flags half of what it should. */
+  assert.match(dueCellOf(html, 'D-5').inner, /due-overdue/, 'Capacity planning marks nothing overdue');
+});
+
+/* MID_SPRINT is 2026-09-24 and the sprint runs to 2026-09-30, so an item due
+   2026-09-20 is overdue and one due 2026-10-14 is merely outside the sprint —
+   the two warnings, on the same screen, at the same moment. */
+const OVERDUE_SNAP = {
+  ...SNAP,
+  issues: Object.fromEntries([
+    ...Object.values(DUE_SNAP.issues),
+    issue({ key: 'D-5', assignee: 'Hien Phan', points: 1, dueDate: '2026-09-20' }),
+    issue({ key: 'D-6', assignee: 'Hien Phan', points: 1, dueDate: '2026-09-20', status: 'Done' }),
+    /* DUE TODAY, which is not overdue — you have the rest of the day. `<=`
+       instead of `<` is the whole of the off-by-one, and without a row dated
+       exactly today both readings agree on every item in the fixture. */
+    issue({ key: 'D-7', assignee: 'Hien Phan', points: 1, dueDate: '2026-09-24' }),
+  ].map(i => [i.key, i])),
+};
+
+check('A DATE THAT HAS PASSED ON UNFINISHED WORK IS OVERDUE', async () => {
+  const { html, payload } = await renderHtml(OVERDUE_SNAP);
+  assert.strictEqual(payload.window.today, '2026-09-24', 'fixture check: today moved');
+  const { inner } = dueCellOf(html, 'D-5');
+  assert.match(inner, /due-overdue/, 'a date in the past on open work is not marked overdue');
+  assert.match(inner, /due-flag/, 'the warning is colour alone — nothing marks it for a reader who cannot see it');
+  // Due TODAY is not overdue: the day is not over.
+  assert.ok(!/due-overdue/.test(dueCellOf(html, 'D-7').inner),
+    'an item due today was already called overdue');
+});
+
+check('AND OVERDUE OUTRANKS "after the sprint" when a date is both', async () => {
+  /* They are different facts: one says something is wrong now, the other that
+     a plan needs revisiting. A date already past is the more urgent reading,
+     so it takes the cell. */
+  const { ctx } = await renderHtml();
+  const opts = { today: '2026-09-24', sprintEnd: '2026-09-30' };
+  const past = { key: 'X-1', status: 'In Dev', dueDate: '2026-09-20' };
+  assert.strictEqual(ctx.UI.dueState(past, opts), 'overdue');
+  assert.strictEqual(ctx.UI.dueState({ ...past, dueDate: '2026-10-14' }, opts), 'late');
+  assert.strictEqual(ctx.UI.dueState({ ...past, dueDate: '2026-09-26' }, opts), null,
+    'a date ahead of today and inside the sprint is neither');
+});
+
+check('FINISHED WORK IS NEVER OVERDUE, however far past its date', async () => {
+  // D-6 was due four days ago and is Done. A deadline on closed work is
+  // history; colouring it teaches people to ignore the colour.
+  const { html, payload } = await renderHtml(OVERDUE_SNAP);
+  const d6 = payload.items.find(i => i.key === 'D-6');
+  assert.strictEqual(d6.dueDate, '2026-09-20', 'fixture check: still dated in the past');
+  assert.ok(!/due-overdue/.test(dueCellOf(html, 'D-6').inner), 'a finished item was marked overdue');
+});
+
+check('OVERDUE IS MEASURED AGAINST THE PAYLOAD\'S TODAY, never the browser clock', async () => {
+  /* The whole reason `today` is sent rather than read from `new Date()`: a
+     cell that consults its own clock changes overnight with nothing else
+     changing, and cannot be checked at all without freezing time. Hand it no
+     today and it must decline to call anything overdue rather than guess. */
+  const { ctx } = await renderHtml();
+  const past = { key: 'X-1', status: 'In Dev', dueDate: '2020-01-01' };
+  /* Long past, and with no `today` the cell says NOTHING about it — which is
+     the point. It is before the sprint's end, so the other anchor has no
+     opinion either, and the alternative to silence is a clock. */
+  assert.strictEqual(ctx.UI.dueState(past, { sprintEnd: '2026-09-30' }), null,
+    'it called a date overdue with no today to measure against');
+  assert.strictEqual(ctx.UI.dueState(past, {}), null, 'with neither anchor it claims nothing');
+  // The other anchor still works on its own, so "no today" disables overdue
+  // rather than the whole cell.
+  assert.strictEqual(ctx.UI.dueState({ ...past, dueDate: '2026-10-14' }, { sprintEnd: '2026-09-30' }), 'late');
+});
+
+/* ── EDITING THE DUE DATE ─────────────────────────────────────────────── */
+
+check('THE DUE DATE IS EDITABLE ON AN OPEN SPRINT, as a real date input', async () => {
+  /* `type="date"` specifically: its value is YYYY-MM-DD whatever the locale
+     displays, which is what Jira stores — so no format is guessed at anywhere
+     between the keyboard and the API. A free-text box would send "03/04/2026"
+     and Jira would pick one of two months. */
+  const { html, payload } = await renderHtml(OVERDUE_SNAP);
+  const dated = payload.items.find(i => i.dueDate);
+  const { inner } = dueCellOf(html, dated.key);
+  assert.match(inner, /type="date"/, 'the due cell is not a date input');
+  assert.match(inner, new RegExp(`data-edit-key="${dated.key}"`));
+  assert.match(inner, /data-edit-field="due"/, 'the box does not say which field it writes');
+  assert.match(inner, new RegExp(`data-was="${dated.dueDate}"`),
+    'without the starting value the server cannot tell a stale edit from a fresh one');
+});
+
+check('A CLOSED SPRINT SHOWS THE DATE AND NO BOX', async () => {
+  const { html } = await renderHtml(OVERDUE_SNAP, PLAN, { lock: { readOnly: true, reason: 'closed' } });
+  const sec = itemsSection(html);
+  assert.ok(!/data-edit-field="due"/.test(sec), 'a closed sprint still offered an editable due date');
+  // ...and the date is still there, read-only rather than blank.
+  assert.match(dueCellOf(html, 'D-5').inner, /st-overdue/, 'the read-only cell lost its warning');
+});
+
+check('CHANGING THE DATE SAVES IT TO JIRA, and says which field', async () => {
+  const { payload, mount, puts } = await renderHtml(OVERDUE_SNAP);
+  const item = payload.items.find(i => i.dueDate);
+  mount.fire('change', {
+    closest: (sel) => (sel.includes('data-edit-key')
+      ? { dataset: { editKey: item.key, editField: 'due', was: item.dueDate }, value: '2026-11-02', disabled: false }
+      : null),
+  });
+  await new Promise(r => setTimeout(r, 0));
+  assert.strictEqual(puts.length, 1, 'the edit reached Jira zero times, or more than once');
+  assert.strictEqual(puts[0].url, '/api/sprint/duedate', 'it went to the points endpoint');
+  assert.deepStrictEqual(puts[0].body,
+    { teamId: 'titan', sprintId: 'S40', key: item.key, dueDate: '2026-11-02', was: item.dueDate });
+});
+
+check('CLEARING THE DATE IS A REAL EDIT, sent as null', async () => {
+  // "No deadline" and "a deadline nobody typed" are the same thing to Jira and
+  // different things to a reader, so clearing has to travel rather than be
+  // dropped as an empty string.
+  const { payload, mount, puts } = await renderHtml(OVERDUE_SNAP);
+  const item = payload.items.find(i => i.dueDate);
+  mount.fire('change', {
+    closest: () => ({ dataset: { editKey: item.key, editField: 'due', was: item.dueDate }, value: '', disabled: false }),
+  });
+  await new Promise(r => setTimeout(r, 0));
+  assert.strictEqual(puts.length, 1);
+  assert.strictEqual(puts[0].body.dueDate, null, 'clearing must send null, not an empty string');
+});
+
+check('A REFUSED DATE PUTS THE OLD ONE BACK', async () => {
+  const { payload, mount } = await renderHtml(OVERDUE_SNAP, PLAN, { failSave: 'Jira refused the edit' });
+  const item = payload.items.find(i => i.dueDate);
+  const box = { dataset: { editKey: item.key, editField: 'due', was: item.dueDate }, value: '2026-11-02', disabled: false };
+  mount.fire('change', { closest: () => box });
+  await new Promise(r => setTimeout(r, 0));
+  assert.strictEqual(box.value, item.dueDate, 'the refused date stayed on screen');
+  assert.strictEqual(box.dataset.was, item.dueDate, 'a failed save moved the baseline');
+  assert.strictEqual(box.disabled, false, 'the box was left disabled');
+});
+
+check('THE TWO FIELDS GO TO DIFFERENT ENDPOINTS FROM ONE HANDLER', async () => {
+  /* One listener serves both, and the box says which field it is. The failure
+     that costs real data is the two crossing — a date sent to the points
+     route, or points to the date route — which would look like a save that
+     did nothing. */
+  const { payload, mount, puts } = await renderHtml(OVERDUE_SNAP);
+  const item = payload.items.find(i => i.dueDate && i.points != null);
+  mount.fire('change', { closest: () => ({ dataset: { editKey: item.key, editField: 'points', was: String(item.points) }, value: '21', disabled: false }) });
+  mount.fire('change', { closest: () => ({ dataset: { editKey: item.key, editField: 'due', was: item.dueDate }, value: '2026-11-02', disabled: false }) });
+  await new Promise(r => setTimeout(r, 0));
+  assert.deepStrictEqual(puts.map(p => p.url), ['/api/sprint/points', '/api/sprint/duedate']);
+  assert.strictEqual(puts[0].body.points, 21);
+  assert.strictEqual(puts[1].body.dueDate, '2026-11-02');
+});
+
+check('AND A BOX NAMING AN UNKNOWN FIELD WRITES NOTHING', async () => {
+  // The handler is keyed by what the box says it is. An unrecognised name must
+  // do nothing rather than fall through to whichever endpoint is first.
+  const { mount, puts } = await renderHtml(OVERDUE_SNAP);
+  mount.fire('change', { closest: () => ({ dataset: { editKey: 'A-1', editField: 'summary', was: 'x' }, value: 'y', disabled: false }) });
+  await new Promise(r => setTimeout(r, 0));
+  assert.strictEqual(puts.length, 0, 'an unknown field was written to Jira');
+});
+
+/* ── THE COMPONENT NAME OPENS ITS WORK ITEMS ──────────────────────────── */
+
+/** The href on a component name inside one section, or '' if it is plain text. */
+const compHref = (section, component) => {
+  const at = section.indexOf(`>${component}<`);
+  if (at < 0) return null;
+  const open = section.lastIndexOf('<', at);
+  const tag = section.slice(open, at + 1);
+  const m = /href="([^"]*)"/.exec(tag);
+  return m ? m[1].replace(/&amp;/g, '&') : '';
+};
+
+check('BOTH COMPONENT TABLES LINK THE NAME TO JIRA', async () => {
+  const { html, payload } = await renderHtml();
+  for (const [where, section, rows, keysOf] of [
+    ['Per-component progress', componentSection(html), payload.byComponent.rows, r => r.keys],
+    ['Test cases by component', testCaseSection(html), payload.testCases.rows, r => r.keys.items],
+  ]) {
+    assert.ok(rows.length, `${where}: fixture check: no rows means this proves nothing`);
+    for (const r of rows) {
+      const href = compHref(section, r.component);
+      assert.ok(href, `${where}: ${r.component} is not a link`);
+      const jql = decodeURIComponent(href);
+      for (const k of keysOf(r)) {
+        assert.ok(jql.includes(k), `${where}: ${r.component} counted ${k} and the link does not open it`);
+      }
+    }
+  }
+});
+
+check('THE LINK OPENS WHAT THE ROW COUNTED — by key, not by component name', async () => {
+  /* `component = "X" AND sprint = N` is the obvious JQL and it is a SECOND
+     query: the day it answers ten where the row says eleven, nothing on either
+     side says which is wrong. The Backlog link was corrected for exactly this.
+     So the test is that the URL names the KEYS and never the component. */
+  const { html, payload } = await renderHtml();
+  const section = componentSection(html);
+  const row = payload.byComponent.rows.find(r => r.keys.length);
+  assert.ok(row, 'fixture check: a component row has to have items');
+  const jql = decodeURIComponent(compHref(section, row.component));
+  assert.match(jql, /key in \(/, 'the link is not a key search');
+  assert.ok(!jql.includes(`component = `), `the link queries the component name: ${jql}`);
+  const listed = (/key in \(([^)]*)\)/.exec(jql) || [])[1].split(',').map(x => x.trim()).filter(Boolean);
+  assert.deepStrictEqual(listed.slice().sort(), row.keys.slice().sort(),
+    'the link opens a different set from the one the row counted');
+});
+
+check('THE TWO TABLES OPEN THE IDENTICAL LIST for the same component', async () => {
+  // They are two views of one sprint. A component whose progress row and
+  // test-case row opened different sets would be two answers to one question.
+  const { html, payload } = await renderHtml();
+  const prog = componentSection(html);
+  const tc = testCaseSection(html);
+  let compared = 0;
+  for (const r of payload.testCases.rows) {
+    const a = compHref(prog, r.component);
+    const b = compHref(tc, r.component);
+    if (a == null || b == null) continue;
+    assert.strictEqual(a, b, `${r.component} opens two different lists`);
+    compared++;
+  }
+  assert.ok(compared, 'fixture check: no component appears in both tables');
+});
+
+check('THE "NO COMPONENT" ROW LINKS TOO, which a JQL could not do', async () => {
+  /* "— no component —" is a label this app invented, not a name in Jira: a
+     query written from it matches nothing and reads as an empty suite. Keys
+     have no such problem, which is half the reason the link is built from
+     them. */
+  const bare = {
+    ...SNAP,
+    issues: Object.fromEntries(Object.entries(SNAP.issues).map(([k, v]) => [k, { ...v, components: [] }])),
+  };
+  const { html, payload } = await renderHtml(bare);
+  const row = payload.byComponent.rows[0];
+  assert.match(row.component, /no component/i, 'fixture check: everything should be uncomponented here');
+  const href = compHref(componentSection(html), row.component);
+  assert.ok(href, 'the no-component row lost its link');
+  assert.match(decodeURIComponent(href), /key in \(/);
+});
+
+check('THE NAME IS ESCAPED — a component name is not trusted markup', async () => {
+  /* Component names are Jira data. One of his really does contain an
+     ampersand (R&D_iGO_E2E), and the name now sits inside an anchor rather
+     than a bare cell — so a quote ends the href's neighbours and a bracket
+     ends the tag. The existing escaping check covers a `data-scope`
+     attribute; this is the text node, which is a different hole.
+
+     Called directly: the helper is pure, and putting a hostile name through
+     the whole fixture to reach it would be a slower check of less. */
+  const { ctx } = await renderHtml();
+  const nasty = 'R&D_<img src=x onerror=alert(1)>_"odd"';
+  const out = ctx.UI.componentLink(nasty, ['A-1']);
+  assert.ok(!out.includes('<img'), `the name broke out of the anchor: ${out}`);
+  assert.ok(out.includes('&amp;') && out.includes('&lt;img') && out.includes('&quot;odd&quot;'),
+    `the name is not escaped: ${out}`);
+  // ...and the ordinary case still reads as itself rather than as entities
+  // nobody asked for.
+  assert.match(ctx.UI.componentLink('PS_iGO_NLG', ['A-1']), />PS_iGO_NLG</);
+});
+
+check('AND WITHOUT A JIRA BASE THE NAME IS STILL THERE, just not a link', async () => {
+  // A dead anchor that opens the Jira home page is worse than plain text: it
+  // looks like the feature works.
+  const { ctx, payload } = await renderHtml();
+  ctx.UI.setJiraBase('');
+  const row = payload.byComponent.rows[0];
+  const out = ctx.UI.componentLink(row.component, row.keys);
+  assert.ok(!out.includes('<a'), `an anchor was rendered with no Jira base: ${out}`);
+  assert.ok(out.includes(row.component.replace(/&/g, '&amp;')), 'the name vanished with the link');
+});
+
 /* ── THE BLOCKED NUMBER, AND THE SET BEHIND IT ────────────────────────── */
 
 /**
@@ -1627,7 +2356,7 @@ check('A SPRINT WITH NOTHING IN REFINEMENT SHOWS A ZERO THAT DOES NOT OPEN', asy
  */
 
 const boxFor = (html, key) => {
-  const at = html.indexOf(`data-points-key="${key}"`);
+  const at = html.indexOf(`data-edit-key="${key}"`);
   if (at < 0) return null;
   const from = html.lastIndexOf('<input', at);
   return html.slice(from, html.indexOf('>', at) + 1);
@@ -1650,7 +2379,7 @@ check('POINTS ARE EDITABLE ON AN OPEN SPRINT, carrying the value they started at
 check('A CLOSED SPRINT RENDERS NO POINTS BOXES, because the estimate is history', async () => {
   const { html, payload } = await renderHtml(SNAP, PLAN, { lock: { readOnly: true, reason: 'closed' } });
   assert.ok(payload.items.length, 'no items at all — the check is vacuous');
-  assert.ok(!html.includes('data-points-key'),
+  assert.ok(!html.includes('data-edit-key'),
     'a closed sprint still offered editable estimates');
   // ...and the numbers are still THERE. Read-only is not blank.
   const withPoints = payload.items.find(i => i.points != null);
@@ -1662,8 +2391,8 @@ check('CHANGING A BOX SAVES THAT ISSUE, with the team and sprint on screen', asy
   const { payload, mount, puts } = await renderHtml();
   const item = payload.items.find(i => i.points != null);
   mount.fire('change', {
-    closest: (sel) => (sel.includes('data-points-key')
-      ? { dataset: { pointsKey: item.key, was: String(item.points) }, value: '13', disabled: false }
+    closest: (sel) => (sel.includes('data-edit-key')
+      ? { dataset: { editKey: item.key, editField: 'points', was: String(item.points) }, value: '13', disabled: false }
       : null),
   });
   await new Promise(r => setTimeout(r, 0));
@@ -1678,7 +2407,7 @@ check('A BOX THAT DID NOT CHANGE SAVES NOTHING, so a blur is not a write', async
   const { payload, mount, puts } = await renderHtml();
   const item = payload.items.find(i => i.points != null);
   mount.fire('change', {
-    closest: () => ({ dataset: { pointsKey: item.key, was: String(item.points) },
+    closest: () => ({ dataset: { editKey: item.key, editField: 'points', was: String(item.points) },
       value: String(item.points), disabled: false }),
   });
   await new Promise(r => setTimeout(r, 0));
@@ -1690,7 +2419,7 @@ check('A REFUSED SAVE PUTS THE OLD NUMBER BACK, rather than showing a lie', asyn
   // number you typed, which reads exactly like a box that saved.
   const { payload, mount } = await renderHtml(SNAP, PLAN, { failSave: 'Jira refused the edit' });
   const item = payload.items.find(i => i.points != null);
-  const box = { dataset: { pointsKey: item.key, was: String(item.points) }, value: '99', disabled: false };
+  const box = { dataset: { editKey: item.key, editField: 'points', was: String(item.points) }, value: '99', disabled: false };
   mount.fire('change', { closest: () => box });
   await new Promise(r => setTimeout(r, 0));
   assert.equal(box.value, String(item.points), 'the refused value stayed on screen');
@@ -1700,12 +2429,12 @@ check('A REFUSED SAVE PUTS THE OLD NUMBER BACK, rather than showing a lie', asyn
 
 check('A CLOSED SPRINT WIRES NO SAVE HANDLER, belt as well as braces', async () => {
   // Not the same guarantee as "renders no boxes". Something else on the page
-  // could carry `data-points-key` one day; the handler must not be listening
+  // could carry `data-edit-key` one day; the handler must not be listening
   // at all when the sprint is shut.
   const open = await renderHtml();
   const shut = await renderHtml(SNAP, PLAN, { lock: { readOnly: true } });
   const item = open.payload.items.find(i => i.points != null);
-  const target = { closest: () => ({ dataset: { pointsKey: item.key, was: '1' }, value: '8', disabled: false }) };
+  const target = { closest: () => ({ dataset: { editKey: item.key, editField: 'points', was: '1' }, value: '8', disabled: false }) };
   shut.mount.fire('change', target);
   await new Promise(r => setTimeout(r, 0));
   assert.equal(shut.puts.length, 0, 'a closed sprint still saved an edit to Jira');

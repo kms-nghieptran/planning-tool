@@ -75,7 +75,27 @@ const PrioritizationView = (() => {
         <div class="section-head">
           <h2>By component</h2>
           <div class="spacer"></div>
-          <a class="btn ghost sm" href="/api/export?what=prioritization${d.team ? `&team=${encodeURIComponent(d.team.id)}` : ''}">Export CSV</a>
+          ${/* THE FILE FOLLOWS THE SCOPES, NOT THE CHIPS. Team and "exclude
+               active sprint items" change what the numbers count, so the link
+               carries both — without the second one the file would disagree
+               with the screen that produced it, under the same headings. The
+               level and family chips hide rows without changing a number, so
+               the file keeps the whole list and a Family column to filter on.
+
+               Rebuilt on every render, and both scopes call `App.refresh()`,
+               so the link cannot be left pointing at the previous team. */ ''}
+          <a class="btn ghost sm print-hide"
+             href="/api/export?what=prioritization${d.team ? `&team=${encodeURIComponent(d.team.id)}` : ''}${excludeActiveSprint ? '&excludeActiveSprint=1' : ''}"
+             title="Every component with its priority, family and note — opens in Excel">Export CSV</a>
+          ${/* PDF IS A PRINT, not a second renderer. `window.print()` on the
+               page you are looking at is the only export that cannot disagree
+               with the screen — and every alternative here means a second
+               implementation of a sixteen-column grid. It follows the chips
+               too, where the CSV deliberately does not: a PDF is a picture of
+               what you were reading, and a picture that quietly showed rows
+               you had filtered out would be the wrong picture. */ ''}
+          <button class="btn ghost sm print-hide" data-act="pz-export-pdf"
+            title="Opens your browser's print dialogue — choose &quot;Save as PDF&quot;">Export PDF</button>
         </div>
         <div class="filters">
           ${teamBar(d, state)}
@@ -603,6 +623,21 @@ const PrioritizationView = (() => {
     mount.addEventListener('click', async (e) => {
       const close = e.target.closest && e.target.closest.bind(e.target);
       if (!close) return;
+
+      /* FIRST, and before anything that redraws: a print has to run against
+         the page as it stands. The title is what the browser offers as the
+         filename, so it carries the same two scopes the CSV's filename does —
+         a PDF that does not say whose numbers these are is one that gets
+         forwarded as somebody else's. */
+      if (close('[data-act="pz-export-pdf"]')) {
+        e.preventDefault();
+        UI.exportPdf([
+          data && data.team ? data.team.name : 'all teams',
+          excludeActiveSprint ? 'not in active sprint' : '',
+          'prioritization',
+        ]);
+        return;
+      }
 
       const lv = close('[data-level]');
       if (lv) {

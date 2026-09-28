@@ -263,6 +263,91 @@ check('AND SO DOES THE CAPACITY GRID ITSELF, not just the roster endpoint', asyn
     'three people must not be given four people\'s capacity');
 });
 
+/* ── THE TEST-CASE EXPORT ─────────────────────────────────────────────── */
+
+const csvRows = (text) => {
+  const body = String(text).replace(/^﻿/, '');
+  const lines = body.split('\n');
+  return { header: lines[0].split(','), lines: lines.slice(1).filter(Boolean), body };
+};
+
+check('THE TEST-CASE GRID EXPORTS, one row per component plus the distinct total', async () => {
+  const r = await call('GET', '/api/export?what=testcases&team=titan&sprint=S38');
+  assert.strictEqual(r.status, 200);
+  const { header, lines } = csvRows(r.body);
+  const view = await call('GET', '/api/sprint?team=titan&sprint=S38');
+  const rows = view.body.testCases.rows;
+  /* S38, not S39: the fixture puts the components on the issues in jira
+     sprint 938, and a sprint with no components produces no rows at all — the
+     first version of these checks ran against S39 and two of them passed by
+     iterating an empty list. */
+  assert.ok(rows.length, 'fixture check: the sprint has to have test-case rows');
+  assert.strictEqual(lines.length, rows.length + 1,
+    `expected ${rows.length} components plus a total row, got ${lines.length}`);
+  for (const c of ['Component', 'Priority', 'Automated', 'In flight', 'Maintained', 'Maintaining', 'Blocked']) {
+    assert.ok(header.includes(c), `the export is missing the ${c} column`);
+  }
+  assert.match(lines[lines.length - 1], /^Sprint total \(distinct\)/,
+    'the last row must say it is the distinct total, not an addable subtotal');
+});
+
+check('AND THE NUMBERS ARE THE SCREEN\'S NUMBERS, not a second count', async () => {
+  /* The file and the page are built from one `activeSprintView`. A CSV that
+     recomputed anything is a second implementation of this table, and the two
+     part company the first time either changes — on a file people forward. */
+  const view = await call('GET', '/api/sprint?team=titan&sprint=S38');
+  const { header, lines } = csvRows((await call('GET', '/api/export?what=testcases&team=titan&sprint=S38')).body);
+  const col = (name) => header.indexOf(name);
+  assert.ok(view.body.testCases.rows.length, 'fixture check: no rows means this compares nothing');
+  for (const row of view.body.testCases.rows) {
+    const line = lines.find(l => l.startsWith(`${row.component},`));
+    assert.ok(line, `${row.component} has no row in the export`);
+    const cells = line.split(',');
+    for (const [name, key] of [['Automated', 'automated'], ['In flight', 'inFlight'],
+      ['Maintained', 'maintained'], ['Maintaining', 'maintaining'], ['Blocked', 'blocked']]) {
+      assert.strictEqual(cells[col(name)], String(row[key]),
+        `${row.component}: ${name} disagrees with the screen`);
+    }
+  }
+});
+
+check('THE KEYS TRAVEL WITH THE COUNTS, so the file can be audited', async () => {
+  // On screen every number opens a drawer listing what it counted. A CSV of
+  // the numbers alone is the one copy of this table nobody can check.
+  const view = await call('GET', '/api/sprint?team=titan&sprint=S38');
+  const { header, body } = csvRows((await call('GET', '/api/export?what=testcases&team=titan&sprint=S38')).body);
+  for (const c of ['Automated keys', 'In flight keys', 'Maintained keys', 'Maintaining keys', 'Blocked keys']) {
+    assert.ok(header.includes(c), `no ${c} column`);
+  }
+  const withKeys = view.body.testCases.rows.filter(r => (r.keys.automated || []).length
+    || (r.keys.inFlight || []).length || (r.keys.maintained || []).length);
+  assert.ok(withKeys.length, 'fixture check: no keys anywhere means this proves nothing');
+  for (const r of withKeys) {
+    for (const k of [...r.keys.automated, ...r.keys.inFlight, ...r.keys.maintained]) {
+      assert.ok(body.includes(k), `${k} is counted on screen but not listed in the file`);
+    }
+  }
+});
+
+check('THE REMAINDER IS A COLUMN, not a footnote the sheet loses', async () => {
+  /* On screen "no automation status" is a note explaining why Maintained and
+     Maintaining add up to less than the links. In a sheet somebody will total,
+     a missing remainder reads as a wrong total. */
+  const { header } = csvRows((await call('GET', '/api/export?what=testcases&team=titan&sprint=S38')).body);
+  assert.ok(header.includes('No automation status'), 'the unclassified remainder is not in the file');
+});
+
+check('EVERY EXPORT LEADS WITH A BYTE-ORDER MARK, or Excel mangles the dashes', async () => {
+  /* "CSV" means "opens in Excel", and Excel reads a UTF-8 file without a BOM
+     as the local codepage — the em dashes in "— no component —" come out as
+     mojibake on the row people are most likely to ask about. */
+  for (const what of ['testcases', 'backlog', 'capacity']) {
+    const r = await call('GET', `/api/export?what=${what}&team=titan&sprint=S38`);
+    assert.strictEqual(r.status, 200);
+    assert.ok(String(r.body).startsWith('﻿'), `${what} has no BOM`);
+  }
+});
+
 check('THE ACTIVE SPRINT SCREEN IS TOLD WHETHER IT MAY WRITE', async () => {
   // Its own check, on its own route. /api/capacity carries a lock too, and its
   // check above stays green even when this one forgets — which would leave the

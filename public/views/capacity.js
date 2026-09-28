@@ -216,6 +216,14 @@ const CapacityView = (() => {
       ${UI.itemsTable(data.items, state, {
         sub: UI.esc(sprint.name || state.sprintId),
         editPoints: !ro,
+        editDue: !ro,
+        /* The same two anchors the Active sprint screen uses, both off the
+           payload: "late" is against the sprint the work was committed to,
+           "overdue" is against a today the server sent — never the browser's
+           own clock, which no test can pin and which changes overnight with
+           nothing else changing. */
+        sprintEnd: data.sprintEnd || sprint.end,
+        today: data.today,
       })}
     `;
 
@@ -454,10 +462,14 @@ const CapacityView = (() => {
        these points: capacity used, per-person load, the over/under warnings.
        Leaving those stale beside an edited row is a screen disagreeing with
        itself. */
-    UI.wirePointsEdit(mount, {
+    UI.wireItemEdits(mount, {
       teamId: state.teamId, sprintId: state.sprintId, readOnly: ro,
       onSaved: () => App.refresh(),
     });
+
+    /* THE ITEM TABLE'S OWN FILTERS — the same call the Active sprint makes,
+       because it is the same table. */
+    UI.wireItemsFilter(mount);
 
     // Day cells cycle; weekends are fixed so a stray click cannot invent a working Saturday.
     UI.$$('.daygrid .day', mount).forEach(cell => {

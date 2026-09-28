@@ -465,6 +465,78 @@ async function handleApi(req, res, url) {
     }
   }
 
+  /* THE DUE DATE, the second field this tool writes to Jira.
+     Deliberately the same shape as the points write above — the same guards
+     in the same order, the same read-before-write, the same 409 — because
+     the two are one interaction with two fields and a reader comparing them
+     should find no surprises. What differs is only what a value IS. */
+  if (p === '/api/sprint/duedate' && req.method === 'PUT') {
+    const body = await readJsonBody(req);           // closed-sprint guard runs here
+    const plan = store.getPlan(), snap = store.getSnapshot();
+    const key = String(body.key || '').trim().toUpperCase();
+    if (!key) return json(res, 400, { error: 'Which issue?' });
+
+    const team = (plan.teams || []).find(t => t.id === body.teamId);
+    if (!team) return json(res, 404, { error: `No team "${body.teamId}".` });
+    const sprint = (plan.sprints || []).find(s => s.id === body.sprintId);
+    if (!sprint) return json(res, 404, { error: `No sprint "${body.sprintId}".` });
+
+    const inSprint = new Set(insights.sprintIssueKeys(snap, team, sprint) || []);
+    if (!inSprint.has(key)) {
+      return json(res, 400, { error: `${key} is not in ${sprint.name || sprint.id} for ${team.name}.` });
+    }
+
+    /* A DATE OR NOTHING, and the format is checked rather than parsed. `new
+       Date("03/04/2026")` is a real date in two different months depending on
+       who typed it, and Jira would store whichever one it read — so anything
+       that is not exactly YYYY-MM-DD is refused instead of guessed at. The
+       same reasoning as the points guard next door: a non-primitive is
+       refused outright rather than coerced into what it stringifies to. */
+    const raw = body.dueDate;
+    let due = null;
+    const blank = raw === null || raw === undefined || (typeof raw === 'string' && raw.trim() === '');
+    if (!blank) {
+      if (typeof raw !== 'string') {
+        return json(res, 400, { error: `${JSON.stringify(raw)} is not a date.` });
+      }
+      due = raw.trim().slice(0, 10);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(due) || Number.isNaN(Date.parse(`${due}T00:00:00Z`))) {
+        return json(res, 400, { error: `"${raw}" is not a date — it has to be YYYY-MM-DD.` });
+      }
+    }
+
+    const jira = new Jira(cfg.jira || {});
+    if (!jira.configured) return json(res, 400, { error: 'Jira is not configured — add credentials in Settings.' });
+
+    try {
+      /* Compared on the DATE, not the string Jira happens to return: the API
+         answers `duedate` as a plain date today, but an issue read through a
+         different endpoint can carry a time, and "2026-10-14" against
+         "2026-10-14T00:00:00.000+0700" is a false conflict that no amount of
+         refreshing would clear. */
+      const liveRaw = await jira.fieldValue(key, 'duedate');
+      const live = liveRaw == null || liveRaw === '' ? null : String(liveRaw).slice(0, 10);
+      const wasRaw = body.was;
+      const was = wasRaw == null || String(wasRaw).trim() === '' ? null : String(wasRaw).trim().slice(0, 10);
+      if (live !== was) {
+        return json(res, 409, {
+          error: `${key} is ${live == null ? 'undated' : `due ${live}`} in Jira, not ${was == null ? 'undated' : `due ${was}`} as this screen showed. Somebody changed it — refresh and try again.`,
+          jira: live, expected: was,
+        });
+      }
+      if (live === due) return json(res, 200, { ok: true, key, dueDate: due, unchanged: true });
+
+      await jira.setDueDate(key, due);
+      // Jira first, local second — see the points route for why.
+      repo.writeField(key, 'dueDate', due);
+      store.invalidate();
+      store.audit('jira.duedate.set', { key, from: live, to: due, team: team.id, sprint: sprint.id });
+      return json(res, 200, { ok: true, key, dueDate: due, from: live });
+    } catch (err) {
+      return json(res, 502, { error: err.message });
+    }
+  }
+
   if (p === '/api/backlog' && req.method === 'GET') {
     const plan = store.getPlan(), snap = store.getSnapshot();
     return json(res, 200, insights.backlogView(plan, snap, { teamId: q.get('team') || null }));
@@ -1605,25 +1677,99 @@ async function handleApi(req, res, url) {
          renders, so the file and the page cannot disagree, and it exports the
          WHOLE list whatever level chip happens to be on: a CSV of the rows that
          survived a filter is the trap the Backlog export already avoids. */
-      /* The CSV follows the team the screen is on, so the file matches what
-         was being read when the button was pressed — but not the level chip,
-         which is a lens rather than a scope. */
+      /* WHAT THE FILE FOLLOWS, AND WHAT IT DELIBERATELY DOES NOT.
+         Team and "exclude active sprint items" are SCOPES — they change which
+         epics the numbers are counted over, so a file that ignored them would
+         carry different figures from the screen that produced it, under the
+         same column headings. Both travel.
+
+         The level and family chips are LENSES: they hide rows, they do not
+         change a number. The file carries the whole list and a Family column,
+         so the reader filters in the spreadsheet — which is what a spreadsheet
+         is for, and avoids the trap of a CSV that is silently the shortlist
+         somebody happened to be looking at. */
       const pzTeam = q.get('team') ? plan.teams.find(t => t.id === q.get('team')) : null;
-      const v = prioritization.view(snap, plan, { scope: (cfg.metrics || {}).coverageScope || 'Epic', team: pzTeam });
-      name = pzTeam ? `prioritization-${pzTeam.id}` : 'prioritization';
+      if (q.get('team') && !pzTeam) return json(res, 404, { error: `No team "${q.get('team')}".` });
+      const pzExclude = q.get('excludeActiveSprint') === '1';
+      const v = prioritization.view(snap, plan, {
+        scope: (cfg.metrics || {}).coverageScope || 'Epic', team: pzTeam, excludeActiveSprint: pzExclude,
+      });
+      name = `prioritization${pzTeam ? `-${pzTeam.id}` : ''}${pzExclude ? '-not-in-sprint' : ''}`;
+      const grid = (r) => Object.assign({}, ...v.tools.map(t => Object.fromEntries(
+        v.buckets.map(b => [`${t.label} — ${b.label}`, r[t.key][b.key]]))));
       rows = v.rows.map(r => Object.assign(
-        { Component: r.component, Priority: r.priorityLabel },
-        ...v.tools.map(t => Object.fromEntries(
-          v.buckets.map(b => [`${t.label} — ${b.label}`, r[t.key][b.key]]))),
+        {
+          Component: r.component,
+          Priority: r.priorityLabel || '',
+          // The short name, not "PS — client delivery": this is a column to
+          // group by in a pivot, and the explanation belongs on the screen.
+          Family: coverage.familyShort(coverage.familyOf(r.component)),
+        },
+        grid(r),
         { Notes: r.note || '' },
       ));
+      /* The totals the screen already shows, labelled as a total rather than
+         left for the reader to sum — a component can be counted under both
+         tools, so the two tool columns are not addable across each other and
+         somebody will try. */
+      if (rows.length) {
+        rows.push(Object.assign(
+          { Component: `Total — ${v.rows.length} components`, Priority: '', Family: '' },
+          Object.assign({}, ...v.tools.map(t => Object.fromEntries(
+            v.buckets.map(b => [`${t.label} — ${b.label}`, v.totals[t.key][b.key]])))),
+          { Notes: '' },
+        ));
+      }
+    } else if (what === 'testcases') {
+      /* THE TEST-CASE GRID FROM THE ACTIVE SPRINT, built from the same
+         `activeSprintView` the screen renders and decorated with the same
+         priority, so the file and the page cannot disagree about a number.
+
+         THE KEYS TRAVEL WITH THE COUNTS. On screen every one of these numbers
+         opens a drawer listing exactly what it counted; a CSV of the numbers
+         alone would be the one copy of this table you cannot audit, and the
+         first question asked of a spreadsheet is always "which ones". They are
+         semicolon-joined so a cell stays one cell.
+
+         UNCLASSIFIED IS A COLUMN HERE, not a footnote. On screen it is a note
+         under the table explaining why Maintained and Maintaining add up to
+         less than the links; in a sheet that someone will total, the remainder
+         has to be a number in a column or the totals look wrong. */
+      const v = insights.activeSprintView(plan, snap, team, sprint);
+      const t = v.testCases || { rows: [], totals: {} };
+      const rows_ = priority.decorate(t.rows || [], plan);
+      name = `test-cases-${team.id}-${sprint.id}`;
+      const line = (label, r) => ({
+        Component: label,
+        Priority: r.priorityLabel || '',
+        Automated: r.automated, 'In flight': r.inFlight,
+        Maintained: r.maintained, Maintaining: r.maintaining,
+        Blocked: r.blocked, 'No automation status': r.unclassified,
+        'Automated keys': ((r.keys || {}).automated || []).join('; '),
+        'In flight keys': ((r.keys || {}).inFlight || []).join('; '),
+        'Maintained keys': ((r.keys || {}).maintained || []).join('; '),
+        'Maintaining keys': ((r.keys || {}).maintaining || []).join('; '),
+        'Blocked keys': ((r.keys || {}).blocked || []).join('; '),
+        'No automation status keys': ((r.keys || {}).unclassified || []).join('; '),
+      });
+      rows = rows_.map(r => line(r.component, r));
+      /* The sprint total as the screen states it — DISTINCT, not the rows added
+         up. An item in two components is in two rows, so a reader who sums the
+         column gets a bigger number than the page shows and assumes the page is
+         wrong. The label says which one this is. */
+      if (rows.length) rows.push(line('Sprint total (distinct)', { ...t.totals, priorityLabel: '' }));
     } else if (what === 'risks') {
       const v = insights.riskView(plan, snap, { teamId: team.id });
       name = `risks-${team.id}`;
       rows = v.signals.map(s => ({ Severity: s.severity, Category: s.category, Team: s.teamName, Title: s.title, Detail: s.detail, Action: s.action }))
         .concat(v.manual.map(s => ({ Severity: s.severity, Category: s.category || 'Manual', Team: s.teamName || '', Title: s.title, Detail: s.detail || '', Action: s.mitigation || '' })));
     }
-    const body = csv.stringify(rows);
+    /* A BYTE-ORDER MARK, because "CSV" means "opens in Excel" and Excel reads a
+       UTF-8 file without one as the local 8-bit codepage: the em dashes this
+       app uses in "— no component —" and "In flight" come out as mojibake, on
+       the row a reader is most likely to query. Their own parser already
+       strips a leading BOM, so a file exported and re-imported round-trips. */
+    const body = `\ufeff${csv.stringify(rows)}`;
     res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': `attachment; filename="${name}.csv"` });
     return res.end(body);
   }
