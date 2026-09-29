@@ -54,6 +54,92 @@ const ISSUE = (over = {}) => ({
   ...over,
 });
 
+/* ── the snapshot round-trip ──────────────────────────────────────────── */
+
+const persist = require('../lib/persist');
+const project = require('../lib/project');
+
+check('A SNAPSHOT KEY THAT IS READ BACK IS A SNAPSHOT KEY THAT WAS SAVED', () => {
+  /* THE BUG THIS EXISTS FOR, and it was invisible from every direction.
+     `persist.saveSnapshot` writes a WHITELIST of blob keys. Anything the sync
+     computes and the list does not name is held in memory for the rest of
+     that request and then dropped — no error, nothing missing on screen, and
+     the damage appearing only at the NEXT sync, which reads the key back as
+     undefined and quietly takes its fallback path.
+
+     `boardBacklogByTeam` fell through that gap. A full sync asks each board
+     for its own backlog and reconcile builds the sidebar count from it; the
+     COUNT survived, because `byTeam` is on the list, but the LIST did not. So
+     the next sync found nothing, fell back to the ownership heuristic, and
+     Titan read 615 after a full sync and 593 after every sync that followed.
+
+     Written as a ROUND-TRIP over every key rather than as three assertions
+     about the three that were missing, because the next key to be added will
+     be forgotten the same way. */
+  const snap = {
+    syncedAt: '2026-09-29T00:00:00Z',
+    watermark: '2026-09-29T00:00:00Z',
+    source: 'jira',
+    issues: {},
+    components: ['PS_iGO_NLG'],
+    byTeam: { titan: { backlog: ['AUTOKAT-1'], backlogSource: 'board' } },
+    /* The three that were being dropped. */
+    boardBacklogByTeam: { titan: ['AUTOKAT-1', 'AUTOKAT-2'], ruby: [] },
+    boardFilterByTeam: { titan: { filterId: 10123, type: 'scrum', boardId: 2092 } },
+    teamFieldValues: [{ id: 'x', value: 'Katalon Auto Titan' }],
+  };
+  persist.saveSnapshot(snap);
+  const back = project.snapshot();
+
+  for (const key of ['boardBacklogByTeam', 'boardFilterByTeam', 'teamFieldValues', 'byTeam']) {
+    assert.deepStrictEqual(back[key], snap[key],
+      `${key} did not survive the round-trip — it is computed, used once, and dropped`);
+  }
+});
+
+check('AND AN UNWRITTEN KEY STAYS ABSENT rather than arriving empty', () => {
+  /* Absent and empty are different answers. `reconcile` asks whether the
+     board's backlog for a team IS AN ARRAY to decide between the board's own
+     list and the ownership heuristic; an `{}` that reads as "no board list"
+     is right for a team with no board and wrong for one whose board simply
+     has not been read yet. */
+  persist.saveSnapshot({ syncedAt: 'x', source: 'jira', issues: {} });
+  const back = project.snapshot();
+  assert.strictEqual('boardBacklogByTeam' in back, false,
+    'an unwritten board backlog came back as a value, which reads as "this team has no board list"');
+  assert.strictEqual('byTeam' in back, false, 'an unbuilt index came back as a value');
+});
+
+check('THE BOARD BACKLOG IS WHAT DECIDES THE COUNT, and losing it changes the answer', () => {
+  /* The consequence, stated in the terms he saw it in: the same issues, the
+     same reconcile, and a backlog that reads differently depending on whether
+     one key survived the save. */
+  const reconcile = require('../lib/reconcile');
+  const issues = {};
+  for (let n = 1; n <= 6; n++) {
+    issues[`AUTOKAT-${n}`] = {
+      key: `AUTOKAT-${n}`, project: 'AUTOKAT', summary: `S${n}`,
+      issueType: n <= 4 ? 'Story' : 'Epic', status: 'Open', statusCategory: 'new',
+      team: 'Katalon Auto Titan', components: [], labels: [], sprints: [], blockedBy: [],
+    };
+  }
+  const plan = { teams: [{ id: 'titan', name: 'Titan', jiraTeams: ['Katalon Auto Titan'], boardId: '2092', members: [] }], sprints: [] };
+
+  /* WITH the board's list: the board says three of them are its backlog. */
+  const withBoard = { issues, sprints: [], boardBacklogByTeam: { titan: ['AUTOKAT-1', 'AUTOKAT-2', 'AUTOKAT-3'] } };
+  reconcile.reconcileAll(JSON.parse(JSON.stringify(plan)), withBoard);
+  assert.strictEqual(withBoard.byTeam.titan.backlogSource, 'board');
+  assert.strictEqual(withBoard.byTeam.titan.backlogCount, 3);
+
+  /* WITHOUT it — exactly what every sync after a full one used to see. */
+  const without = { issues, sprints: [] };
+  reconcile.reconcileAll(JSON.parse(JSON.stringify(plan)), without);
+  assert.strictEqual(without.byTeam.titan.backlogSource, 'heuristic',
+    'with no board list it should say so rather than claim the board');
+  assert.notStrictEqual(without.byTeam.titan.backlogCount, 3,
+    'fixture check: the heuristic must disagree, or this proves nothing');
+});
+
 /* ── storage basics ───────────────────────────────────────────────────── */
 
 check('an issue round-trips with every relation intact', () => {

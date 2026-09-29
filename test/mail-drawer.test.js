@@ -44,6 +44,7 @@ console.log('\nThe "Email the report" panel\n');
 function boot({ templates = [], cfg = null, api = null } = {}) {
   const drawn = [];
   const toasts = [];
+  const opened = [];
   const nodes = new Map();
 
   const el = (id) => {
@@ -81,7 +82,26 @@ function boot({ templates = [], cfg = null, api = null } = {}) {
        editing did nothing. A harness that is wrong in this direction does not
        fail; it quietly stops testing. */
     if (sel.includes(',')) return sel.split(',').flatMap(x => inDrawer(x.trim()));
-    if (sel.startsWith('#')) return html.includes(`id="${sel.slice(1)}"`) ? [el(sel.slice(1))] : [];
+    if (sel.startsWith('#')) {
+      const id = sel.slice(1);
+      if (!html.includes(`id="${id}"`)) return [];
+      const node = el(id);
+      /* A CHECKBOX REFLECTS WHAT WAS RENDERED — ONCE PER RENDER.
+         The stub used to default every node to `checked: true`, so a
+         switched-OFF schedule read as on and the check that a disabled
+         schedule pins nothing was quietly testing the armed path instead.
+         But re-reading the html on EVERY lookup is wrong in the other
+         direction: a test that sets `checked` to simulate a click has its
+         value overwritten by the previous render before the handler sees it.
+         Refreshed only when this node has not been touched since the drawer
+         last redrew, which is what a real checkbox does. */
+      if (node._gen !== drawn.length) {
+        node._gen = drawn.length;
+        const tag = html.slice(html.indexOf(`id="${id}"`));
+        node.checked = /^[^>]*\schecked/.test(tag);
+      }
+      return [node];
+    }
     const m = sel.match(/\[data-mail="([^"]+)"\]/);
     if (m) return html.includes(`data-mail="${m[1]}"`) ? [el(`mail:${m[1]}`)] : [];
     return [];
@@ -90,7 +110,8 @@ function boot({ templates = [], cfg = null, api = null } = {}) {
   const ctx = {
     console, Promise, setTimeout, clearTimeout, encodeURIComponent, URLSearchParams,
     JSON, Date, Math, Number, String, Array, Object, Boolean, RegExp, Error,
-    App: { refresh() {} },
+    App: { refresh() {}, state: { teams: [{ id: 'ruby', name: 'Katalon RDA' }, { id: 'titan', name: 'Katalon PSA' }] } },
+    window: { open(url) { opened.push(url); } },
     Charts: new Proxy({}, { get: () => () => '' }),
     confirm: () => true,
     document: { createElement: () => ({ set innerHTML(_) {}, content: {} }), querySelector: () => null, querySelectorAll: () => [] },
@@ -138,7 +159,7 @@ function boot({ templates = [], cfg = null, api = null } = {}) {
   vm.runInContext(`${fs.readFileSync(path.join(PUBLIC, 'mail-drawer.js'), 'utf8')}\n;globalThis.__v = MailDrawer;`, ctx);
 
   return {
-    ctx, drawn, toasts, el,
+    ctx, drawn, toasts, el, opened,
     html: () => drawn[drawn.length - 1] || '',
     /** Open the panel the way an Email the report button does. */
     async open(over = {}) {
@@ -326,6 +347,99 @@ check('THE FILE-NAME PLACEHOLDER IS THE REPORT\'S OWN DEFAULT', async () => {
     'the sprint panel offers the coverage filename as its default');
   assert.ok(!/Automation Delivery Dashboard/.test(h),
     'the coverage default leaked onto the sprint panel');
+});
+
+/* A template whose schedule still carries the team of the page it was FIRST
+   saved on — his "Sprint report - RDA", pinned to titan with the schedule
+   switched off, which is how a Ruby report rendered Titan's sprint. */
+const STALE_PIN = {
+  id: 'mt9', name: 'Sprint report - RDA', report: 'sprint',
+  subject: '{{sprint}}', body: '{{done}} of {{committed}}.',
+  to: ['client@example.com'], cc: [], attachPdf: true, landscape: true,
+  schedule: { enabled: false, day: 1, hour: 8, minute: 0, team: 'titan', components: [] },
+};
+
+check('CHECK THE PDF RENDERS THE TEAM ON SCREEN, not a schedule\'s old pin', async () => {
+  /* THE BUG, exactly as he hit it. The button read the schedule's pinned team
+     before the screen's, so a template first saved on Titan's page rendered
+     Titan's sprint while he sat on Ruby's — the precise failure the button
+     exists to catch, produced by the button itself. */
+  const b = boot({ templates: [STALE_PIN] });
+  await b.open({ ...AS_SPRINT, team: 'ruby', scope: { sprint: 'S41' }, scopeLabel: 'RDA Sprint 41' });
+  await b.click('pdf');
+
+  assert.strictEqual(b.opened.length, 1, 'the PDF check did not open anything');
+  const q = new URLSearchParams(b.opened[0].split('?')[1]);
+  assert.strictEqual(q.get('team'), 'ruby',
+    `it rendered team=${q.get('team')} while the screen was on ruby`);
+  assert.strictEqual(q.get('sprint'), 'S41', `it rendered sprint=${q.get('sprint')}`);
+  assert.strictEqual(q.get('report'), 'sprint');
+
+  /* AND WITH THE SCHEDULE GENUINELY ARMED TO ANOTHER TEAM — the case that
+     actually pins this button's independence. With the schedule off, the pin
+     is already gone by the time the button reads it, so the two fixes overlap
+     and a mutation of the button alone survives. A live pin is the real
+     scenario anyway: a weekly schedule set up for Titan, and he is on Ruby's
+     page wanting to see Ruby's attachment. */
+  const armed = boot({
+    templates: [{ ...STALE_PIN, schedule: { enabled: true, day: 1, hour: 8, minute: 0, team: 'titan', components: [] } }],
+  });
+  await armed.open({ ...AS_SPRINT, team: 'ruby', scope: { sprint: 'S41' }, scopeLabel: 'RDA Sprint 41' });
+  await armed.click('pdf');
+  const q2 = new URLSearchParams(armed.opened[0].split('?')[1]);
+  assert.strictEqual(q2.get('team'), 'ruby',
+    `with a live Titan schedule the button rendered team=${q2.get('team')} from Ruby's screen`);
+});
+
+check('A SWITCHED-OFF SCHEDULE PINS NOTHING', async () => {
+  /* Where the stale team came from. The old code wrote the current team into
+     EVERY save, armed or not, and then let that stored value win forever — so
+     a template saved once on Titan's page carried titan with the schedule
+     off, and nothing on screen said so. */
+  const b = boot({ templates: [STALE_PIN] });
+  await b.open({ ...AS_SPRINT, team: 'ruby', scope: { sprint: 'S41' } });
+  const sched = b.ctx.__v.__readSchedule({ report: 'sprint', team: 'ruby', scope: { sprint: 'S41' } });
+  assert.strictEqual(sched.enabled, false, 'fixture check: the schedule is off');
+  assert.ok(!sched.team, `a disabled schedule kept a pinned team (${sched.team})`);
+  assert.ok(!sched.sprint, 'a disabled schedule kept a pinned sprint');
+});
+
+check('AND ARMING IT PINS THE TEAM ON SCREEN', async () => {
+  /* The other half: an armed schedule MUST pin, because it fires with no
+     screen to read. What it must not do is inherit a pin from a screen he was
+     on weeks ago. */
+  const b = boot({ templates: [STALE_PIN] });
+  await b.open({ ...AS_SPRINT, team: 'ruby', scope: { sprint: 'S41' } });
+  b.el('mtSchedOn').checked = true;
+  await b.el('mtSchedOn').fire('change');
+  const sched = b.ctx.__v.__readSchedule({ report: 'sprint', team: 'ruby', scope: { sprint: 'S41' } });
+  assert.strictEqual(sched.enabled, true);
+  assert.strictEqual(sched.team, 'ruby',
+    `arming it on Ruby's page pinned ${sched.team}`);
+});
+
+check('AN ALREADY-ARMED PIN IS NOT MOVED BY A SAVE FROM ANOTHER SCREEN', async () => {
+  /* The case the pin exists for, and the reason "just take ctx every time" is
+     wrong: a live weekly schedule must not change team because he fixed a
+     typo in the subject while looking at a different report. */
+  const ARMED = { ...STALE_PIN, schedule: { enabled: true, day: 1, hour: 8, minute: 0, team: 'titan', components: [] } };
+  const b = boot({ templates: [ARMED] });
+  await b.open({ ...AS_SPRINT, team: 'ruby', scope: { sprint: 'S41' } });
+  const sched = b.ctx.__v.__readSchedule({ report: 'sprint', team: 'ruby', scope: { sprint: 'S41' } });
+  assert.strictEqual(sched.enabled, true);
+  assert.strictEqual(sched.team, 'titan',
+    'a live schedule was re-pointed by opening the drawer on another team');
+});
+
+check('AND THE PIN IS VISIBLE, with a warning when it is not this screen', async () => {
+  /* Invisible state that decides what a client receives is how this took an
+     afternoon to find. */
+  const ARMED = { ...STALE_PIN, schedule: { enabled: true, day: 1, hour: 8, minute: 0, team: 'titan', components: [] } };
+  const b = boot({ templates: [ARMED] });
+  await b.open({ ...AS_SPRINT, team: 'ruby', scope: { sprint: 'S41' } });
+  const h = b.html();
+  assert.match(h, /Pinned to Katalon PSA/, 'the schedule does not say what it is pinned to');
+  assert.match(h, /not the team on screen/i, 'nor warn that it disagrees with the screen');
 });
 
 (async () => {

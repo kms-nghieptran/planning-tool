@@ -117,6 +117,169 @@ function load(file, ctx) {
   return ctx.__view;
 }
 
+/**
+ * BOOT THE REAL `app.js` AND SEE WHICH TEAM IT LANDS ON.
+ *
+ * Written after a sprint report for Titan arrived showing Ruby's sprint. The
+ * URL carried `team=titan`; the page ignored it, because the print block
+ * applied the parameters by WRITING localStorage and sat BELOW the two lines
+ * that had already read it — and the renderer hands Chrome a throwaway
+ * profile, so that localStorage is empty on every single render. The
+ * parameters could not have worked.
+ *
+ * NOTHING SOURCE-LEVEL WOULD HAVE CAUGHT IT. Every part was present and
+ * spelt correctly: the URL builder set `team`, the block read `q.get('team')`,
+ * the view read `state.teamId`. Only the ORDER was wrong, and order is what a
+ * string check cannot see. So this executes boot and asks the one question
+ * that matters: which team is the page about.
+ */
+/* BOOT KEEPS GOING AFTER THE PART UNDER TEST, and it is running without the
+   DOM it expects — this harness loads `app.js` alone, so the shell wiring and
+   the first render reach for nodes that are not there. Those rejections
+   arrive on a later tick than the `await` below, so a try/catch cannot see
+   them, and untrapped they kill the process AFTER every check has passed:
+   green output, failing exit code.
+   Stubbing deeper is whack-a-mole against a DOM this file has no interest in;
+   what it is asking is which team and sprint boot settled on, and that is
+   decided long before anything is painted. DBG=1 prints them. */
+process.on('unhandledRejection', (e) => {
+  if (process.env.DBG) console.log('AFTER THE CHECKS:', (e && e.message) || e);
+});
+
+async function bootWith({ search = '', stored = {}, teams, sprints, currentByTeam = {}, currentSprintId = null }) {
+  const ctx = sandbox([]);
+  ctx.location = { search, hash: '#sprints/active', pathname: '/' };
+  ctx.localStorage = {
+    getItem: (k) => (k in stored ? stored[k] : null),
+    setItem(k, v) { stored[k] = v; },
+    removeItem(k) { delete stored[k]; },
+  };
+  ctx.window = { matchMedia: () => ({ matches: false }), scrollY: 0, scrollTo() {}, addEventListener() {} };
+  /* A DOCUMENT WITH THE THREE NODES BOOT ACTUALLY TOUCHES. `documentElement`
+     carries the theme and is read before the first await, so a harness
+     without it never reaches the line under test — which is how the first
+     draft of these checks reported `teamId: null` and looked like the bug
+     rather than like a missing stub. */
+  const node = () => ({
+    dataset: {}, classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+    appendChild() {}, addEventListener() {}, removeEventListener() {}, style: {},
+    /* A NODE HAS TO BE SEARCHABLE. `UI.$(sel, root)` calls
+       `root.querySelector`, so a stub without it throws from deep inside the
+       first render — after every check has passed, as an unhandled rejection
+       that kills the process and takes the suite's exit code with it. The
+       checks were green and the run reported failure. */
+    querySelector: () => node(), querySelectorAll: () => [],
+    value: '', textContent: '', innerHTML: '', options: [], selectedIndex: 0,
+  });
+  ctx.document = {
+    documentElement: node(), body: node(), head: node(),
+    createElement: () => node(), querySelector: () => node(), querySelectorAll: () => [],
+  };
+  ctx.UI.api = async (p) => {
+    if (String(p).startsWith('/api/state')) {
+      return {
+        plan: { teams }, sprints, categories: {}, teamIndex: {},
+        currentSprintId, currentSprintByTeam: currentByTeam,
+        jiraSprints: {}, sync: { syncedAt: null, issues: 1 }, config: {},
+      };
+    }
+    return {};
+  };
+  ctx.UI.toast = () => {};
+  ctx.UI.$ = () => node();
+  ctx.UI.$$ = () => [];
+  /* THE MODULE'S OWN `App.boot()` IS STRIPPED, and this is not tidiness.
+     `app.js` ends by calling boot itself, so loading it starts a run
+     immediately; calling boot again from here made TWO runs, and the second
+     one read the localStorage the first had just written. Under the very bug
+     these checks exist for — the URL applied by writing localStorage — run
+     one wrote `pt-team=titan` and run two read it back, so the check went
+     GREEN against the broken code. A harness that boots twice does not fail
+     loudly; it quietly agrees with whatever it is shown. */
+  const appSrc = fs.readFileSync(path.join(VIEWS, '..', 'app.js'), 'utf8').replace(/\nApp\.boot\(\);\s*$/, '\n');
+  assert.ok(!/\nApp\.boot\(\);/.test(appSrc), 'app.js still self-boots, so this harness would run it twice');
+  vm.runInContext(`${appSrc}\n;globalThis.__app = App;`, ctx);
+  /* BOOT IS EXPECTED TO THROW HERE, at the first render: this harness loads
+     `app.js` alone, without the view modules it routes to. Everything under
+     test — the team, the sprint, and what was or was not written back —
+     is settled before that point. Set DBG=1 to see where it actually
+     stopped, which is what turned "teamId is null" from a mystery into a
+     missing `document.documentElement` stub. */
+  try { await ctx.__app.boot(); } catch (e) { if (process.env.DBG) console.log('BOOT STOPPED AT:', e.message); }
+  return { state: ctx.__app.state, stored };
+}
+
+const TEAMS = [{ id: 'ruby', name: 'Katalon RDA' }, { id: 'titan', name: 'Katalon PSA' }];
+const SPRINTS = [{ id: 'S40' }, { id: 'S41' }, { id: 'S42' }];
+
+check('THE PRINTED PAGE IS ABOUT THE TEAM THE URL NAMED', async () => {
+  /* THE BUG, exactly as it reached him: the report said Titan, the document
+     showed Ruby. `ruby` is first in the list, which is what the page fell
+     back to. */
+  const { state } = await bootWith({
+    search: '?print=1&landscape=1&team=titan&sprint=S41',
+    teams: TEAMS, sprints: SPRINTS, currentSprintId: 'S42',
+  });
+  assert.strictEqual(state.teamId, 'titan',
+    `the page rendered for ${state.teamId} when the URL asked for titan`);
+  assert.strictEqual(state.sprintId, 'S41',
+    `the page rendered sprint ${state.sprintId} when the URL asked for S41`);
+});
+
+check('AND RENDERING ONE DOES NOT CHANGE HIS OWN SELECTION', async () => {
+  /* The second half, and the one that would have outlived the first:
+     `?print=1&team=titan` is an ordinary URL. Applying it by writing
+     localStorage means opening one in his own browser silently switches the
+     team he had selected. Rendering a report must not edit the reader's
+     settings. */
+  const stored = { 'pt-team': 'ruby', 'pt-sprint': 'S40' };
+  const { state } = await bootWith({
+    search: '?print=1&team=titan&sprint=S41',
+    stored, teams: TEAMS, sprints: SPRINTS, currentSprintId: 'S42',
+  });
+  assert.strictEqual(state.teamId, 'titan', 'the URL should still win for this render');
+  assert.strictEqual(stored['pt-team'], 'ruby',
+    `rendering a Titan report rewrote the stored team to ${stored['pt-team']}`);
+  assert.strictEqual(stored['pt-sprint'], 'S40',
+    `rendering rewrote the stored sprint to ${stored['pt-sprint']}`);
+});
+
+check('A TEAM WITH NO SPRINT NAMED GETS THAT TEAM\'S CURRENT SPRINT', async () => {
+  /* The same bug one level down: the right team, somebody else\'s sprint.
+     The global "current sprint" belongs to whichever team the app would
+     otherwise have opened on. */
+  const { state } = await bootWith({
+    search: '?print=1&team=titan',
+    teams: TEAMS, sprints: SPRINTS,
+    currentByTeam: { ruby: 'S40', titan: 'S42' }, currentSprintId: 'S40',
+  });
+  assert.strictEqual(state.teamId, 'titan');
+  assert.strictEqual(state.sprintId, 'S42',
+    `Titan's report opened on ${state.sprintId}, which is Ruby's current sprint`);
+});
+
+check('AND WITHOUT print=1 THE URL IS IGNORED ENTIRELY', async () => {
+  /* `team=` in the address bar of the normal app must not override what he
+     picked — the parameters exist for the renderer, and a stray one should
+     not quietly move his screen. */
+  const { state } = await bootWith({
+    search: '?team=titan&sprint=S41',
+    stored: { 'pt-team': 'ruby', 'pt-sprint': 'S40' },
+    teams: TEAMS, sprints: SPRINTS, currentSprintId: 'S42',
+  });
+  assert.strictEqual(state.teamId, 'ruby', 'a non-print URL moved his selected team');
+  assert.strictEqual(state.sprintId, 'S40', 'a non-print URL moved his selected sprint');
+});
+
+check('AN UNKNOWN TEAM IN THE URL FALLS BACK rather than rendering nothing', async () => {
+  const { state } = await bootWith({
+    search: '?print=1&team=gone&sprint=S99',
+    teams: TEAMS, sprints: SPRINTS, currentByTeam: { ruby: 'S42' }, currentSprintId: 'S42',
+  });
+  assert.strictEqual(state.teamId, 'ruby', 'an unknown team did not fall back to a real one');
+  assert.strictEqual(state.sprintId, 'S42', 'an unknown sprint did not fall back to a real one');
+});
+
 /* ── the fix itself ─────────────────────────────────────────────────── */
 
 check('APP.REFRESH HANDS EACH RENDER A NEW CONTAINER, never #main itself', () => {
@@ -163,9 +326,20 @@ check('and the state survives a reload, applied before the first paint', () => {
   assert.match(app, /if \(remember\) localStorage\.setItem\('pt-nav'/,
     'the choice is remembered, and the write is reachable');
 
-  const boot = app.slice(app.indexOf('async function boot()'), app.indexOf('async function boot()') + 900);
-  assert.match(boot, /pt-nav.*nav-collapsed/s, 'and restored inside boot()');
-  assert.ok(boot.indexOf('pt-nav') < boot.indexOf('await UI.api'),
+  /* MEASURED FROM THE START OF `boot`, NOT INSIDE A FIXED-SIZE SLICE.
+     This used to read the first 900 characters of the function and compare
+     positions within them. Adding a comment above the first fetch pushed
+     `await UI.api` out of that window, `indexOf` returned -1, and the check
+     failed claiming the sidebar would flash — while the code was untouched
+     and correct. A window sized in characters is a check that fails when the
+     prose around it grows. */
+  const bootAt = app.indexOf('async function boot()');
+  const navAt = app.indexOf('pt-nav', bootAt);
+  const fetchAt = app.indexOf('await UI.api', bootAt);
+  assert.ok(navAt > -1, 'the collapsed state is not restored inside boot()');
+  assert.ok(fetchAt > -1, 'boot() no longer fetches state, so this check is measuring nothing');
+  assert.match(app.slice(navAt, navAt + 200), /nav-collapsed/, 'and restored onto the shell');
+  assert.ok(navAt < fetchAt,
     'before the first await, or the sidebar flashes open on every load');
 });
 
@@ -237,7 +411,17 @@ function navOf({ quiet = true } = {}) {
     },
   });
   ctx.UI.api = async () => anything();
-  vm.runInContext(`${fs.readFileSync(path.join(VIEWS, '..', 'app.js'), 'utf8')}\n;globalThis.__app = App;`, ctx);
+  /* THE MODULE'S OWN `App.boot()` IS STRIPPED, and this is not tidiness.
+     `app.js` ends by calling boot itself, so loading it starts a run
+     immediately; calling boot again from here made TWO runs, and the second
+     one read the localStorage the first had just written. Under the very bug
+     these checks exist for — the URL applied by writing localStorage — run
+     one wrote `pt-team=titan` and run two read it back, so the check went
+     GREEN against the broken code. A harness that boots twice does not fail
+     loudly; it quietly agrees with whatever it is shown. */
+  const appSrc = fs.readFileSync(path.join(VIEWS, '..', 'app.js'), 'utf8').replace(/\nApp\.boot\(\);\s*$/, '\n');
+  assert.ok(!/\nApp\.boot\(\);/.test(appSrc), 'app.js still self-boots, so this harness would run it twice');
+  vm.runInContext(`${appSrc}\n;globalThis.__app = App;`, ctx);
   return { routes: ctx.__app.ROUTES, ctx };
 }
 

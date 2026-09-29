@@ -78,12 +78,6 @@ const App = (() => {
     // paint the sidebar open and shut it a beat later.
     if (localStorage.getItem('pt-nav') === 'collapsed') UI.$('.shell').classList.add('nav-collapsed');
 
-    const s = await UI.api('/api/state');
-    adopt(s);
-    state.teamId = localStorage.getItem('pt-team') || (s.plan.teams[0] || {}).id;
-    if (!s.plan.teams.some(t => t.id === state.teamId)) state.teamId = (s.plan.teams[0] || {}).id;
-    state.sprintId = localStorage.getItem('pt-sprint') || s.currentSprintId || (s.sprints[s.sprints.length - 1] || {}).id;
-    if (!s.sprints.some(x => x.id === state.sprintId)) state.sprintId = s.currentSprintId;
     /* ── PRINT MODE ───────────────────────────────────────────────────
        Headless Chrome renders this page to the PDF that gets emailed, and it
        is the SAME page — same stylesheet, same numbers — asked for with
@@ -93,23 +87,66 @@ const App = (() => {
 
        READ FROM THE QUERY, NOT THE HASH, because the hash is the route and
        the two have to be independent — `?print=1#reports/coverage` has to
-       mean "that page, stripped", not a route nothing recognises. */
-    /* WRAPPED, because this runs during boot. Print mode is a nicety; a
+       mean "that page, stripped", not a route nothing recognises.
+
+       WRAPPED, because this runs during boot. Print mode is a nicety; a
        browser without `URLSearchParams`, or a host that does not expose
        `location.search`, must still get the tool rather than a blank page
-       and a console error. */
+       and a console error.
+
+       ── READ BEFORE THE SELECTION IS MADE, AND NEVER WRITTEN BACK ──────
+       This block used to sit BELOW the two lines that choose the team and
+       the sprint, and it applied the URL by writing localStorage. Both halves
+       of that were wrong, and together they made the parameters do nothing at
+       all: the selection had already been read from a localStorage that is
+       empty in every render (the renderer gives Chrome a throwaway profile),
+       so the page fell back to the first team on the list and the URL only
+       took effect on a second boot that never happens. A sprint report for
+       Titan arrived showing Ruby's sprint.
+
+       It hid on the Coverage report because that page is scoped by component
+       rather than by team, and the team name in the email text comes from the
+       server, which had it right — so the only wrong thing was the part
+       nobody could see without opening the attachment.
+
+       WRITING localStorage WAS THE SECOND BUG, and it would have outlived the
+       first: `?print=1&team=titan` is an ordinary URL, and opening one in his
+       own browser would silently switch the team he had selected. Rendering a
+       report must not change the reader's settings. */
     const q = (() => {
       try { return new URLSearchParams((location && location.search) || ''); } catch { return null; }
     })();
-    if (q && q.get('print') === '1') {
+    const printing = !!(q && q.get('print') === '1');
+    const asked = {
+      team: printing ? (q.get('team') || null) : null,
+      sprint: printing ? (q.get('sprint') || null) : null,
+    };
+
+    const s = await UI.api('/api/state');
+    adopt(s);
+
+    /* THE URL WINS, THEN THE LAST SELECTION, THEN THE FIRST TEAM — and an
+       unknown id falls through to the same fallback a bad localStorage value
+       gets, rather than rendering an empty page for a team that is not there. */
+    state.teamId = asked.team || localStorage.getItem('pt-team') || (s.plan.teams[0] || {}).id;
+    if (!s.plan.teams.some(t => t.id === state.teamId)) state.teamId = (s.plan.teams[0] || {}).id;
+
+    /* WHEN A TEAM WAS NAMED AND A SPRINT WAS NOT, the fallback is THAT team's
+       current sprint — not the global one, which belongs to whichever team
+       the app would otherwise have opened on. Getting this wrong is the same
+       bug one level down: the right team, somebody else's sprint. */
+    const currentForTeam = (s.currentSprintByTeam || {})[state.teamId] || s.currentSprintId;
+    state.sprintId = asked.sprint || localStorage.getItem('pt-sprint')
+      || currentForTeam || (s.sprints[s.sprints.length - 1] || {}).id;
+    if (!s.sprints.some(x => x.id === state.sprintId)) state.sprintId = currentForTeam;
+
+    if (printing) {
       document.body.classList.add('print-mode');
       if (q.get('landscape') === '1') {
         const st = document.createElement('style');
         st.textContent = '@page { size: landscape; margin: 10mm; }';
         document.head.appendChild(st);
       }
-      if (q.get('team')) { try { localStorage.setItem('pt-team', q.get('team')); } catch { /* fine */ } }
-      if (q.get('sprint')) { try { localStorage.setItem('pt-sprint', q.get('sprint')); } catch { /* fine */ } }
     }
     state.route = location.hash.slice(1) || 'team';
 

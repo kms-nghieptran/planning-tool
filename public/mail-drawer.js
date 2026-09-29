@@ -188,7 +188,7 @@ const MailDrawer = (() => {
           Leave it blank for <code>${UI.esc(defaultFilename(c, ctx))}</code>. The same placeholders work here,
           and <code>.pdf</code> is added for you.
         </div>`}
-      ${scheduleForm(t)}`;
+      ${scheduleForm(t, ctx)}`;
   }
 
   /* Kept in step with `report-mail.js` by a check in test/mail-api.test.js —
@@ -209,6 +209,17 @@ const MailDrawer = (() => {
 
   const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
+  /* A team id is not a thing to show a person. `App.state.teams` is the list
+     the shell already holds, so the drawer names the team without a route of
+     its own; an id falls through unchanged rather than rendering blank. */
+  const teamName = (id) => {
+    if (!id) return '';
+    try {
+      const t = (App.state.teams || []).find(x => x.id === id);
+      return (t && (t.name || t.jiraName)) || id;
+    } catch { return id; }
+  };
+
   /**
    * THE WEEKLY SCHEDULE — only ever on a SAVED template.
    *
@@ -219,7 +230,7 @@ const MailDrawer = (() => {
    * afterwards, an unsaved template is told to save first — one sentence, in
    * the place the question comes up.
    */
-  function scheduleForm(t) {
+  function scheduleForm(t, ctx) {
     if (!t.id) {
       return `<div class="muted" style="font-size:12px;line-height:1.6;margin:10px 0 0">
         Save this as a template to put it on a weekly schedule.
@@ -241,6 +252,22 @@ const MailDrawer = (() => {
           </select>
         </div>
         <div class="setting-row"><label>At</label><input type="time" id="mtSchedTime" value="${hh}:${mm}"></div>
+        ${/* WHAT THE WEEKLY SEND IS PINNED TO, on screen.
+              An armed schedule fires with nobody watching, so it remembers the
+              team and scope it was armed on — and that memory used to be
+              invisible. A template carrying `team: "titan"` from the page it
+              was first saved on quietly outranked the screen, and the only way
+              to find out was to open the attachment. State that decides what a
+              client receives has to be readable from here. */''}
+        <div class="tag ${(s.team && ctx && s.team !== ctx.team) ? 'warn' : ''}"
+          style="margin:-2px 0 10px;display:inline-block">
+          Pinned to ${UI.esc(teamName(s.team) || 'this team')}${s.sprint ? ` · ${UI.esc(s.sprint)}` : ''}${(s.components || []).length ? ` · ${UI.esc(s.components.join(' + '))}` : ''}
+        </div>
+        ${(s.team && ctx && s.team !== ctx.team) ? `
+          <div class="muted" style="font-size:12px;line-height:1.6;margin:-4px 0 12px">
+            That is not the team on screen. Switch the schedule off and on again to re-pin it to
+            ${UI.esc(teamName(ctx.team) || 'this team')}.
+          </div>` : ''}
         <div class="muted" style="font-size:12px;line-height:1.7;margin:-2px 0 12px">
           ${/* SAID PLAINLY, because all three are surprises otherwise, and all
                 three are discovered at the worst moment — the week it matters. */''}
@@ -388,44 +415,72 @@ const MailDrawer = (() => {
    * every other Save on this panel — a subject fix, a new recipient — from
    * quietly disarming next Monday.
    */
+  /**
+   * THE WEEKLY SCHEDULE OFF THE FORM.
+   *
+   * ── WHAT A SCHEDULE MAY AND MAY NOT REMEMBER ─────────────────────────
+   *
+   * An ARMED schedule has to pin its team, components and sprint: it fires
+   * with nobody watching and no screen to read a selection from, so without
+   * the pin the Monday mail would report on whatever happened to be selected
+   * when the app last started.
+   *
+   * A schedule that is switched OFF must pin NOTHING, and getting that wrong
+   * cost him an afternoon. The old version wrote the current team into every
+   * template it saved, armed or not, and then let that stored value win
+   * forever — `saved.team || ctx.team`. So a template first saved while he
+   * was on Titan's page carried `team: "titan"` with `enabled: false`, and
+   * nothing on screen ever said so. His "Sprint report - RDA" had exactly
+   * that, which is why checking it from Ruby's page rendered Titan's sprint.
+   *
+   * So: nothing is remembered while the schedule is off, and the pin is taken
+   * from the screen at the moment it is ARMED. A pin only outranks the screen
+   * if it was made while the schedule was already armed — which is the case
+   * the pin exists for, and the only one.
+   */
   function readSchedule(ctx) {
     const box = UI.$('#mtSchedOn');
-    const saved = (mailState.editing && mailState.editing.schedule) || {};
-    if (!box) return saved.enabled ? saved : { ...saved, enabled: false };
+    /* THE TEMPLATE THE PANEL IS SHOWING, which is not always the one being
+       edited. `mailState.editing` is null until he touches a field, so
+       reading only that saw NO schedule on first open — and an armed pin
+       would then be recomputed from the current screen and silently moved the
+       first time he saved anything. Same expression `drawMail` uses to pick
+       `t`, so the form and this read can never be looking at different
+       templates. */
+    const shown = mailState.editing || mine(ctx)[0] || {};
+    const saved = shown.schedule || {};
+    const when = {
+      day: saved.day == null ? 1 : saved.day,
+      hour: saved.hour == null ? 8 : saved.hour,
+      minute: saved.minute == null ? 0 : saved.minute,
+    };
+    /* THE CONTROLS ARE ONLY RENDERED WHILE THE SCHEDULE IS ON, so reading
+       them blind would wipe an armed schedule on any save made from a redraw
+       that had not reached them. */
+    if (!box) return saved.enabled ? saved : { enabled: false, ...when };
+    if (!box.checked) return { enabled: false, ...when };
+
     const day = UI.$('#mtSchedDay');
     const time = UI.$('#mtSchedTime');
     const [hh, mm] = String((time && time.value) || '08:00').split(':');
+    /* A PIN ONLY SURVIVES IF IT WAS MADE WHILE ARMED. Otherwise it is a
+       leftover from a screen he happened to be on, and the screen he is on
+       NOW is the honest answer. */
+    const pinned = saved.enabled ? saved : {};
     return {
-      enabled: !!box.checked,
-      day: day ? Number(day.value) : (saved.day == null ? 1 : saved.day),
-      hour: time ? Number(hh) : (saved.hour == null ? 8 : saved.hour),
-      minute: time ? Number(mm) : (saved.minute == null ? 0 : saved.minute),
-      /* THE TEAM IS PINNED WHEN THE SCHEDULE IS ARMED, and not re-read after.
-         An unattended send has no screen to take a selection from; without
-         this the Monday mail would report on whichever team happened to be
-         selected when the app last started, and "the client got another
-         team's numbers" is an error they notice before he does. Taken from
-         the team he is looking at as he arms it — the team whose report he is
-         sitting in front of — and then left alone, so a later Save made from
-         a different team's page cannot move it. */
-      team: saved.team || (ctx && ctx.team) || null,
-      /* AND THE COMPONENT SELECTION, for exactly the same reason and with the
-         same sharper edge. An unattended send has no picker to read, so
-         without this the Monday mail quietly reports on everything while the
-         on-demand send he tested reported on the two components he had
-         chosen — the same discrepancy that made the PDF disagree with its own
-         email, arriving a week later where it is even harder to spot.
-         `saved.components` wins once armed, so editing the subject from an
-         unfiltered screen cannot widen next Monday's report. */
-      components: Array.isArray(saved.components) && saved.components.length
-        ? saved.components
-        : ((ctx.scope || {}).components || []).slice(),
-      /* AND THE SPRINT, for a sprint schedule. Left NULL on purpose when the
-         host did not pin one: `findSprint` on the server resolves a null to
-         whichever sprint is running, and for a weekly sprint report that is
-         what he means — Monday's mail is about the sprint running on Monday,
-         not the one that was open when he armed it. */
-      sprint: saved.sprint || (ctx.scope || {}).sprint || null,
+      enabled: true,
+      day: day ? Number(day.value) : when.day,
+      hour: time ? Number(hh) : when.hour,
+      minute: time ? Number(mm) : when.minute,
+      team: pinned.team || (ctx && ctx.team) || null,
+      components: Array.isArray(pinned.components) && pinned.components.length
+        ? pinned.components
+        : (((ctx || {}).scope || {}).components || []).slice(),
+      /* THE SPRINT IS LEFT NULL unless one was pinned while armed. The server
+         resolves a null to whichever sprint is running, and for a WEEKLY
+         report that is what he means: Monday's mail is about the sprint
+         running on Monday, not the one that was open when he armed it. */
+      sprint: pinned.sprint || null,
     };
   }
 
@@ -475,15 +530,17 @@ const MailDrawer = (() => {
          followed by "it worked" would be a worse version of looking at it.
          The route returns the failure as readable text for the same reason:
          whatever comes back, the tab is showing him the truth. */
-      const t = readSchedule(ctx);
+      /* `ctx` AND ONLY `ctx` — never the schedule's pinned team.
+         This button answers one question: is the attachment a SEND from this
+         screen would produce right. A send uses `ctx`, so anything else here
+         checks a different document and reports on it confidently.
+         It used to read `readSchedule(ctx).team` first, and a template whose
+         schedule still carried `team: "titan"` from the page it was first
+         saved on rendered Titan's sprint while he sat on Ruby's — the exact
+         failure the button exists to catch, produced by the button. */
       const params = new URLSearchParams({ landscape: '1' });
-      const team = (t && t.team) || ctx.team;
-      if (team) params.set('team', team);
-      /* THE SCOPE CURRENTLY ON SCREEN. This button exists to answer "is the
-         attachment right", so it has to render what a send would render — a
-         check against the unfiltered report while two components are picked
-         would pass and prove nothing. */
       params.set('report', ctx.report || 'coverage');
+      if (ctx.team) params.set('team', ctx.team);
       const sc = ctx.scope || {};
       if (sc.sprint) params.set('sprint', sc.sprint);
       for (const c of (sc.components || [])) params.append('component', c);
@@ -559,5 +616,9 @@ const MailDrawer = (() => {
       }
     });
   }
-  return { open: openMail, __fieldText: (v) => fieldText(v) };
+  /* THREE HANDLES FOR THE TEST HARNESS. `__readSchedule` is here because the
+     pin it produces is invisible state that decides which team a client
+     receives a report about — and the only other way to observe it is to save
+     a template and read it back out of the database. */
+  return { open: openMail, __fieldText: (v) => fieldText(v), __readSchedule: (ctx) => readSchedule(ctx) };
 })();
