@@ -587,6 +587,115 @@ async function handleApi(req, res, url) {
     }
   }
 
+  /* ── MOVING A BACKLOG ITEM INTO A SPRINT ──────────────────────────────
+     The third route in this file that writes to a real Jira, and the one that
+     is least like the other two: Sprint is not a field PUT. The Agile
+     endpoints do the board's bookkeeping as well as the value, and writing
+     the sprint custom field directly leaves an issue carrying a sprint it
+     does not appear in — see `jira.setSprint`.
+
+     THE GUARDS ARE THE POINTS ROUTE'S, for the same reasons:
+
+       · THE KEY MUST BE IN THIS TEAM'S BACKLOG. Without it this is an open
+         endpoint for moving any issue in the instance into any sprint.
+
+       · AN EPIC CANNOT BE MOVED. It is not a backlog item — it is the
+         container — and Jira will usually accept the move and produce a
+         sprint with an epic sitting in it, which is a mess to undo.
+
+       · IT READS JIRA BEFORE WRITING. `was` is the sprint this screen showed;
+         a mismatch is refused with both values rather than resolved by
+         guessing, because the local copy is only as fresh as the last sync.
+
+       · THE TARGET SPRINT MUST BE ONE OF THIS TEAM'S, and open. Jira refuses
+         a closed sprint itself, with better information than this side has —
+         but a sprint belonging to another team is something only the plan
+         knows, and moving work into one silently is how a ticket vanishes
+         from the board somebody is watching. */
+  if (p === '/api/backlog/sprint' && req.method === 'PUT') {
+    const body = await readJsonBody(req);
+    const plan = store.getPlan(), snap = store.getSnapshot();
+    const key = String(body.key || '').trim().toUpperCase();
+    if (!key) return json(res, 400, { error: 'Which issue?' });
+
+    const team = (plan.teams || []).find(t => t.id === body.teamId);
+    if (!team) return json(res, 404, { error: `No team "${body.teamId}".` });
+
+    const idx = (snap.byTeam || {})[team.id] || {};
+    if (!(idx.backlog || []).includes(key)) {
+      return json(res, 400, { error: `${key} is not in ${team.name}'s backlog.` });
+    }
+    const issue = (snap.issues || {})[key];
+    if (!issue) return json(res, 404, { error: `No local copy of ${key} — run a sync first.` });
+    if (!backlogLib.isBacklogItem(issue)) {
+      return json(res, 400, { error: `${key} is an ${issue.issueType} — a container, not work you pull into a sprint.` });
+    }
+
+    /* THE TARGET, resolved against the PLAN's sprints for this team. `null`
+       means the backlog, which is a real destination and the way a mistaken
+       move is undone. */
+    const toId = body.sprintId == null || body.sprintId === '' ? null : String(body.sprintId);
+    let target = null;
+    if (toId !== null) {
+      target = (plan.sprints || []).find(x => x.id === toId);
+      if (!target) return json(res, 404, { error: `No sprint "${toId}".` });
+      const mine = target.byTeam && target.byTeam[team.id];
+      if (!mine) return json(res, 409, { error: `${target.name || toId} is not one of ${team.name}'s sprints.` });
+      if (mine.state === 'closed') {
+        return json(res, 409, { error: `${mine.name || target.name} is closed — reopen it in Jira, or pick another sprint.` });
+      }
+      if (!mine.jiraId) {
+        return json(res, 409, { error: `${mine.name || target.name} has no Jira sprint id yet — run a full sync.` });
+      }
+    }
+
+    const jira = new Jira(cfg.jira || {});
+    if (!jira.configured) return json(res, 400, { error: 'Jira is not configured — add credentials in Settings.' });
+
+    try {
+      /* WHAT JIRA SAYS IT IS IN NOW. Compared by NAME rather than by id: the
+         screen showed a name, the local copy stores names beside ids, and a
+         sprint the tool has never synced has no id here to compare against.
+         Only OPEN sprints count — an issue carries every sprint it was ever
+         in, and the closed ones are history, not where it is. */
+      const live = await jira.openSprintsFor(key);
+      const liveName = live.length ? live[live.length - 1].name : null;
+      const wasName = body.was == null || String(body.was).trim() === '' ? null : String(body.was).trim();
+      if (liveName !== wasName) {
+        return json(res, 409, {
+          error: `${key} is in ${liveName || 'the backlog'} in Jira, not ${wasName || 'the backlog'} as this screen showed. Somebody moved it — refresh and try again.`,
+          jira: liveName, expected: wasName,
+        });
+      }
+
+      const toName = target ? ((target.byTeam[team.id] || {}).name || target.name) : null;
+      if (liveName === toName) return json(res, 200, { ok: true, key, sprintId: toId, unchanged: true });
+
+      await jira.setSprint(key, target ? target.byTeam[team.id].jiraId : null);
+
+      /* Jira first, local second — the same order the other two writes use.
+         The local copy carries the whole sprint list, so the move REPLACES
+         the open ones and keeps the closed history: an issue that was in
+         Sprint 38 and is now in 41 was still in 38. */
+      const kept = (issue.sprints || []).filter(x => x && x.state === 'closed');
+      const next = target
+        ? [...kept, {
+          id: target.byTeam[team.id].jiraId,
+          name: toName,
+          state: target.byTeam[team.id].state || 'future',
+          start: target.start || null,
+          end: target.end || null,
+        }]
+        : kept;
+      repo.writeField(key, 'sprints', next);
+      store.invalidate();
+      store.audit('jira.sprint.set', { key, from: liveName, to: toName, team: team.id });
+      return json(res, 200, { ok: true, key, sprintId: toId, sprint: toName, from: liveName });
+    } catch (err) {
+      return json(res, 502, { error: err.message });
+    }
+  }
+
   if (p === '/api/backlog' && req.method === 'GET') {
     const plan = store.getPlan(), snap = store.getSnapshot();
     return json(res, 200, insights.backlogView(plan, snap, { teamId: q.get('team') || null }));
@@ -1254,6 +1363,15 @@ async function handleApi(req, res, url) {
          screen needs the id to build one. */
       boardId: team.boardId || null,
       boardName: team.boardName || null,
+      /* ── THE PLANNING BOARD ───────────────────────────────────────────
+         The open sprints as SECTIONS, with their items — the comparison the
+         page exists for, and the same set the Sprint picker offers, so every
+         option has a section and every drag has somewhere to land.
+
+         SENT WITH THE PAGE rather than fetched per row or per section: the
+         picker is on every one of 594 rows, and 594 requests for the same six
+         sprints is not a feature, it is a stampede. */
+      ...insights.backlogBoard(plan, snap, team),
       ...metrics.backlogHealth(plan, snap, team),
     });
   }

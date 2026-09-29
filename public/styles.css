@@ -968,6 +968,70 @@ select.prio option[value="4"] { color: var(--app-fg-3); }
 .pz th.sub.cov-none        { color: var(--cov-none-ink); }
 .pz tfoot td strong { font-variant-numeric: tabular-nums; }
 
+/* ── THE SPRINT PICKER ON THE BACKLOG ─────────────────────────────────────
+   Sized to the sprint names rather than to the column, so the table does not
+   reflow when a row is moved into a sprint with a longer name. It reads as a
+   value until you go near it — a queue of 594 rows with 594 obvious dropdowns
+   down its middle looks like a form to fill in rather than a list to read. */
+.sprint-cell { white-space: nowrap; }
+select.sprint-pick {
+  font: inherit; font-size: 12px; padding: 2px 6px; max-width: 190px;
+  border: 1px solid transparent; border-radius: var(--radius-sm);
+  background: transparent; color: var(--app-fg);
+}
+select.sprint-pick:hover { border-color: var(--app-line); background: var(--app-bg); }
+select.sprint-pick:focus { border-color: var(--brand-blue); background: var(--app-bg); }
+select.sprint-pick:disabled { opacity: .6; }
+/* A sprint this team cannot pick — closed, or another team's. Shown beside
+   the select rather than as an option, because an option that always fails is
+   worse than no option. */
+.sprint-cell .tag { margin-left: 6px; }
+@media print { select.sprint-pick { border: none; background: none; appearance: none; } }
+
+/* ── THE BACKLOG BOARD ────────────────────────────────────────────────────
+   Open sprints stacked above the queue. Each section is a card with a head
+   you can fold, and the head stays put when the body goes — a collapsed
+   sprint is still somewhere you can drop a row, which is the whole reason
+   to fold the other three. */
+.bl-sec {
+  border: 1px solid var(--app-line); border-radius: var(--radius);
+  background: var(--app-bg); margin-bottom: 12px; overflow: hidden;
+}
+.bl-sec-head {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 9px 12px; background: var(--app-bg-2);
+  border-bottom: 1px solid var(--app-line);
+}
+.bl-sec.shut .bl-sec-head { border-bottom: none; }
+.bl-sec-head h3 { margin: 0; font-size: 13px; }
+.bl-sec-head .bl-meta { font-size: 12px; color: var(--app-fg-3); font-variant-numeric: tabular-nums; }
+.bl-sec-head .spacer { flex: 1; }
+/* The twisty. A button rather than a clickable heading so it is in the tab
+   order and announces its own state — `aria-expanded` is on it, and folding
+   is the one control on this screen a keyboard user needs most: the queue
+   below it is 594 rows long. */
+.bl-fold {
+  border: none; background: none; cursor: pointer; padding: 0 2px;
+  font: inherit; font-size: 11px; line-height: 1; color: var(--app-fg-3);
+}
+.bl-fold:hover { color: var(--app-fg); }
+.bl-fold:focus-visible { outline: 2px solid var(--brand-blue); outline-offset: 2px; border-radius: 3px; }
+.bl-sec-body > .table-wrap { border: none; border-radius: 0; }
+.bl-sec-body > .empty { padding: 18px 12px; }
+/* The row being dragged, and the section it would land in. Two different
+   states, so "where will this go" is on screen rather than guessed. The
+   section outline is inset so a collapsed head shows it just as clearly as
+   an open body does. */
+.bl-sec tr[draggable="true"] { cursor: grab; }
+.bl-sec tr[draggable="true"]:active { cursor: grabbing; }
+.bl-sec tr.bl-dragging td { opacity: .4; }
+.bl-sec.bl-over { box-shadow: inset 0 0 0 2px var(--brand-blue); }
+.bl-sec.bl-over .bl-sec-head { background: color-mix(in srgb, var(--brand-blue) 8%, var(--app-bg-2)); }
+@media print {
+  .bl-fold { display: none; }
+  .bl-sec { break-inside: avoid; }
+}
+
 /* ── ORDER WITHIN A LEVEL ─────────────────────────────────────────────────
    The grip says "this row moves"; the arrows are how it moves without a
    mouse. Both are in one narrow column so the table does not grow a hand-

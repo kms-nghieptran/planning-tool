@@ -572,7 +572,19 @@ check('NO VIEW PRINTS AN ISSUE KEY WITHOUT GOING THROUGH THE HELPER', () => {
     src.split('\n').forEach((line, n) => {
       // `UI.esc(<something>.key)` — the exact shape every dead key had.
       for (const m of line.matchAll(/UI\.esc\(\s*([A-Za-z_$][\w$]*)\.key\s*\)/g)) {
-        if (!allowed.has(m[1])) offenders.push(`${file}:${n + 1}  ${line.trim()}`);
+        if (allowed.has(m[1])) continue;
+        /* AN ATTRIBUTE VALUE IS NOT PRINTED TEXT. The rule is that a key the
+           reader SEES has to be a link; a key in `data-sprint-key="…"` is an
+           identifier the handler reads back, and `UI.issueKey` there would
+           put an anchor inside an attribute. Detected by what precedes the
+           match on the line — `="` with no `>` after it means we are still
+           inside a tag — rather than by adding the variable to the allow-list
+           above, which would blind the whole file to the real mistake. */
+        const before = line.slice(0, m.index);
+        const openQuote = before.lastIndexOf('="');
+        const insideTag = openQuote >= 0 && !before.slice(openQuote).includes('>');
+        if (insideTag) continue;
+        offenders.push(`${file}:${n + 1}  ${line.trim()}`);
       }
       // A hand-rolled /browse/ link is the other way to get this wrong: it
       // works, and then it is the one that forgets rel="noopener".
