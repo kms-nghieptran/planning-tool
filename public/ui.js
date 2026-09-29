@@ -1698,6 +1698,31 @@ const UI = (() => {
       body.classList.add(`${PRINT_ONLY}-on`);
     }
 
+    /* ── PAPER ORIENTATION ────────────────────────────────────────────
+       A STYLE ELEMENT, NOT A BODY CLASS. Every other thing this function
+       changes for the duration of a print is a class, and the obvious move
+       is `body.print-landscape` with a rule to match — but `@page` is a
+       document-level at-rule and cannot be scoped by a selector at all. A
+       `@page { size: landscape }` sitting in the stylesheet would rotate
+       EVERY print in the app, including the one-column screens where
+       landscape wastes half the sheet.
+
+       So the rule is injected for this print and taken out again by the same
+       `done` flag that restores the title — which matters, because a
+       leftover node here would silently rotate the next export somebody
+       ran from a different screen.
+
+       THE MARGIN COMES WITH IT. Switching to landscape without narrowing
+       the default margin gives back less width than the rotation gained on
+       a table that is already running out of room. */
+    let page = null;
+    if (opts.landscape && document.head) {
+      page = document.createElement('style');
+      page.setAttribute('data-print-page', '');
+      page.textContent = '@page { size: landscape; margin: 10mm; }';
+      document.head.appendChild(page);
+    }
+
     let done = false;
     const restore = () => {
       if (done) return;
@@ -1707,6 +1732,7 @@ const UI = (() => {
         only.classList.remove(PRINT_ONLY);
         body.classList.remove(`${PRINT_ONLY}-on`);
       }
+      if (page && page.parentNode) page.parentNode.removeChild(page);
       window.removeEventListener('afterprint', restore);
     };
     window.addEventListener('afterprint', restore);
@@ -1826,7 +1852,7 @@ const UI = (() => {
 
   return { esc, el, $, $$, num, pct, int, date, dateTime, ago, initials, avatar, personColor, workloadClass, toast, drawer, closeDrawer, api, jsonPut, jsonPost, jsonDelete, kpi, bar, mixBar, pointsFieldNote, CATEGORY_COLORS, setJiraBase, issueUrl, issueKey, issueKeys, linkKey, jiraSearch, componentSearchUrl, componentsSearchUrl, boardBacklogUrl, backlogSearchUrl, keysSearchUrl, openInJira, combo, wireCombo, matchText, fitChars, sortable, sortTable, sortableTable, sortNumber, paginate, pager,
     itemsTable, wireItemEdits, filterItems, wireItemsFilter, ITEM_UNASSIGNED: UNASSIGNED, componentLink, dueState,
-    epicCell, byStatusThenPoints, statusText, statusStage, drillNumber, drillDrawer,
+    epicCell, byStatusThenPoints, statusText, statusStage, drillNumber, drillDrawer, dueCell, dueSort,
     inRefinement, epicBlockerIcon, epicBlockersDrawer, testCasesDrawer,
     tagList, wireTagList, splitKeywords, exportPdf, priorityTag, prioritySort, PRIORITY_UNSET_SORT, busy };
 })();

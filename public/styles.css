@@ -988,6 +988,75 @@ select.sprint-pick:disabled { opacity: .6; }
 .sprint-cell .tag { margin-left: 6px; }
 @media print { select.sprint-pick { border: none; background: none; appearance: none; } }
 
+/* ── THE FACE PILE ────────────────────────────────────────────────────────
+   Filter by assignee, as a row of faces with the rest behind a +N. People
+   are recognised faster as faces than read as names, and the ones carrying
+   the most work are the ones you filter by — so they are the ones in the
+   row. The name is never only in the picture: every avatar has it in
+   `title`, and the menu spells it out. */
+.who { display: flex; align-items: center; gap: 2px; position: relative; }
+.who-chip, .who-more {
+  border: none; background: none; padding: 0; cursor: pointer; border-radius: 50%;
+  line-height: 0; flex: none;
+}
+/* OVERLAPPED, like a stack of cards — six faces in the space of four, and
+   the overlap is what says "these are one group" rather than six buttons.
+   Hovering or selecting lifts one clear of its neighbours. */
+.who-chip + .who-chip, .who-chip + .who-more { margin-left: -7px; }
+.who-chip .avatar, .who-more {
+  box-shadow: 0 0 0 2px var(--app-bg);
+  transition: transform .12s ease, box-shadow .12s ease;
+}
+.who-chip:hover { z-index: 2; }
+.who-chip:hover .avatar { transform: translateY(-1px); }
+/* SELECTED IS A RING, not a colour change: the avatar's own colour is the
+   thing that identifies the person, so it has to survive being chosen. */
+.who-chip.on { z-index: 3; }
+.who-chip.on .avatar { box-shadow: 0 0 0 2px var(--app-bg), 0 0 0 4px var(--brand-blue); }
+.who-chip:focus-visible .avatar,
+.who-more:focus-visible { outline: 2px solid var(--brand-blue); outline-offset: 3px; }
+.who-more {
+  width: 24px; height: 24px; border-radius: 50%;
+  display: grid; place-items: center;
+  font: inherit; font-size: 10px; font-weight: 600; line-height: 1;
+  background: var(--app-subtle); color: var(--app-fg-2);
+}
+.who-more:hover { color: var(--app-fg); }
+.who-more.on { background: var(--brand-blue); color: #fff; }
+/* Nobody. A dashed ring rather than initials — "UN" reads as a name at this
+   size, and the unowned pile is the entry most people are hunting for. */
+.avatar.nobody { background: transparent; border: 1px dashed var(--app-fg-3); box-sizing: border-box; }
+.who-clear {
+  border: none; background: none; cursor: pointer; margin-left: 8px;
+  font: inherit; font-size: 11px; color: var(--brand-blue); padding: 2px 4px;
+}
+.who-clear:hover { text-decoration: underline; }
+.who-menu {
+  position: absolute; top: calc(100% + 8px); left: 0; z-index: 40;
+  min-width: 220px; max-height: 300px; overflow-y: auto;
+  background: var(--app-bg); border: 1px solid var(--app-line);
+  border-radius: var(--radius); box-shadow: var(--shadow-lg, 0 8px 28px rgba(0,0,0,.18));
+  padding: 6px;
+}
+.who-menu[hidden] { display: none; }
+.who-opt {
+  display: flex; align-items: center; gap: 8px; cursor: pointer;
+  padding: 5px 7px; border-radius: var(--radius-sm); font-size: 12px;
+}
+.who-opt:hover { background: var(--app-subtle); }
+.who-opt input { margin: 0; flex: none; }
+.who-opt .who-name { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.who-opt .who-n { color: var(--app-fg-3); font-variant-numeric: tabular-nums; }
+/* THE ASSIGNEE CELL. The face on screen, the name on paper — `.avatar` is
+   display:none in print, so a cell holding only an avatar would print an
+   empty column, which is how this column would have quietly emptied itself
+   on every exported PDF. */
+.who-cell .who-name { display: none; }
+@media print {
+  .who, .who-clear { display: none; }
+  .who-cell .who-name { display: inline; }
+}
+
 /* ── THE BACKLOG BOARD ────────────────────────────────────────────────────
    Open sprints stacked above the queue. Each section is a card with a head
    you can fold, and the head stays put when the body goes — a collapsed
@@ -1316,6 +1385,63 @@ input.pts-edit:disabled { opacity: .55; cursor: default; }
 .risk-card .action { font-size: 12.5px; display: flex; gap: 7px; align-items: flex-start; }
 .risk-card .action::before { content: '→'; color: var(--brand-blue); flex: none; }
 .risk-card .meta { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+
+/* ── "CANNOT BE STARTED" ON THE BY-COMPONENT SHEET ────────────────────────
+   A planned column counts suites with work in this sprint; this says how much
+   of that work cannot begin. Small, red, and absent unless it applies — a
+   marker on every row is one nobody reads, and the whole point is that it is
+   unusual. */
+.stuck-mark {
+  border: none; background: none; cursor: pointer; padding: 0 2px; margin-left: 3px;
+  font: inherit; font-weight: 700; font-size: 12px; line-height: 1;
+  color: var(--risk); vertical-align: baseline;
+}
+.stuck-mark:hover { text-decoration: underline; }
+.stuck-mark:focus-visible { outline: 2px solid var(--risk); outline-offset: 2px; border-radius: 3px; }
+/* On paper it stays — a printed sheet that silently dropped the warning would
+   be the version that gets taken into the planning meeting. */
+@media print { .stuck-mark { text-decoration: none; } }
+
+/* ── THE BLOCKERS PAGE ────────────────────────────────────────────────────
+   Built on `.risk-card`, because a detected blocker and a detected risk are
+   the same object on screen — a severity, a thing, and what to do about it.
+   What differs is the picker in the drawer, which is what makes a registered
+   blocker countable rather than a sticky note. */
+.risk-card.blk .title { display: flex; align-items: baseline; gap: 7px; flex-wrap: wrap; }
+/* A resolved blocker stays readable but stops competing with the live ones —
+   it is kept on the page because "what did we get unstuck" is a question
+   worth answering at a retro. */
+.risk-card.blk.done { opacity: .62; }
+.risk-card.blk.done .title { text-decoration: line-through; text-decoration-color: var(--app-fg-3); }
+
+/* The chosen items, as removable chips — a list you can see all of without
+   scrolling the picker back to the top to find out what you have ticked. */
+.blk-picked { margin-bottom: 10px; }
+.blk-chip {
+  display: inline-flex; align-items: center; gap: 4px; margin: 0 5px 5px 0;
+  padding: 2px 4px 2px 8px; border-radius: var(--pill);
+  background: var(--app-subtle); border: 1px solid var(--app-line-soft);
+  font-size: 11.5px; font-variant-numeric: tabular-nums;
+}
+.blk-chip button {
+  border: none; background: none; cursor: pointer; padding: 0 3px;
+  font: inherit; font-size: 13px; line-height: 1; color: var(--app-fg-3);
+}
+.blk-chip button:hover { color: var(--risk); }
+
+.blk-pick {
+  max-height: 320px; overflow-y: auto; margin-top: 6px;
+  border: 1px solid var(--app-line); border-radius: var(--radius-sm);
+}
+.blk-opt {
+  display: flex; align-items: center; gap: 9px; cursor: pointer;
+  padding: 7px 10px; font-size: 12px; border-bottom: 1px solid var(--app-line-soft);
+}
+.blk-opt:last-child { border-bottom: none; }
+.blk-opt:hover { background: var(--app-subtle); }
+.blk-opt input { margin: 0; flex: none; }
+.blk-key { font-variant-numeric: tabular-nums; white-space: nowrap; color: var(--app-fg-2); }
+.blk-sum { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* mix bar */
 .mixbar { display: flex; height: 10px; border-radius: var(--pill); overflow: hidden; background: var(--app-subtle); }

@@ -31,6 +31,7 @@ const priority = require('./lib/priority');
 const componentNote = require('./lib/component-note');
 const componentRank = require('./lib/component-rank');
 const backlogLib = require('./lib/backlog-item');
+const blockersLib = require('./lib/blockers');
 const prioritization = require('./lib/prioritization');
 const keywords = require('./lib/keywords');
 const sprintDates = require('./lib/sprint-dates');
@@ -1381,6 +1382,19 @@ async function handleApi(req, res, url) {
     return json(res, 200, insights.riskView(plan, snap, { teamId: q.get('team') || null, sprintId: q.get('sprint') || null }));
   }
 
+  /* THE SPRINT IS A FILTER HERE, NOT THE SCOPE — unlike `/api/risks` above.
+     A risk is about a commitment and belongs to the sprint that carries it; a
+     blocker outlives the sprint it was noticed in, and 496 of his 543 blocked
+     items are nowhere near one. Passing no `sprint` is therefore the normal
+     case rather than the degenerate one. */
+  if (p === '/api/blockers' && req.method === 'GET') {
+    const plan = store.getPlan(), snap = store.getSnapshot();
+    return json(res, 200, blockersLib.blockerView(plan, snap, {
+      teamId: q.get('team') || null,
+      sprintId: q.get('sprint') || null,
+    }));
+  }
+
   /* ---- plan edits ---- */
   if (p === '/api/plan' && req.method === 'PUT') {
     const body = await readJsonBody(req);
@@ -1542,6 +1556,91 @@ async function handleApi(req, res, url) {
     store.savePlan(plan);
     store.audit(`risk.${req.method.toLowerCase()}`, { id: body.id || body.title });
     return json(res, 200, { ok: true, risks: plan.risks });
+  }
+
+  /**
+   * THE BLOCKER REGISTER — what he knows and Jira does not.
+   *
+   * Shaped like `/api/risk` above, and validated in ways that one is not,
+   * because this record carries ISSUE KEYS. A risk is prose and a bad field
+   * is visible the moment anybody reads it; a blocker naming AUTOKAT-9999
+   * renders perfectly, is counted in every figure on the page, and is wrong
+   * in a way nothing on screen can show.
+   *
+   * LINKED ITEMS ARE OPTIONAL. "The staging environment is down" is a real
+   * blocker before anybody has worked out which tickets it is holding, and a
+   * form that refused it would train people to invent a link.
+   *
+   * A KEY IS NOT CHECKED AGAINST THE BLOCKED LIST, only against the store.
+   * The thing he is registering is usually the reason an item is NOT yet in
+   * Refinement — an item about to be blocked is exactly what a lead wants to
+   * record — so demanding it already be stuck would refuse the most useful
+   * moment to write it down. Unknown keys are refused; wrong-status ones are
+   * his call.
+   */
+  if (p === '/api/blocker' && (req.method === 'POST' || req.method === 'PUT' || req.method === 'DELETE')) {
+    const body = await readJsonBody(req);
+    const plan = store.getPlan();
+    plan.blockers = plan.blockers || [];
+
+    if (req.method === 'DELETE') {
+      if (!plan.blockers.some(b => b.id === body.id)) return json(res, 404, { error: 'No such blocker.' });
+      plan.blockers = plan.blockers.filter(b => b.id !== body.id);
+    } else {
+      const title = String(body.title == null ? '' : body.title).trim();
+      if (!title) return json(res, 400, { error: 'A blocker needs a title — what is holding the work up.' });
+
+      /* KEYS ARE NORMALISED AND DE-DUPLICATED BEFORE THEY ARE CHECKED.
+         They arrive from a picker and from a typed box, so the same ticket
+         reaches here as `autokat-9831` and `AUTOKAT-9831 ` — stored as two,
+         it would be counted as two on every figure this page reports. */
+      const snap = store.getSnapshot();
+      const seen = new Set();
+      const items = (Array.isArray(body.items) ? body.items : [])
+        .map(k => String(k == null ? '' : k).trim().toUpperCase())
+        .filter(k => k && !seen.has(k) && seen.add(k));
+      const missing = items.filter(k => !(snap.issues || {})[k]);
+      if (missing.length) {
+        return json(res, 404, {
+          error: `${missing.slice(0, 5).join(', ')}${missing.length > 5 ? ` and ${missing.length - 5} more` : ''} `
+            + `${missing.length === 1 ? 'is' : 'are'} not in the local store — check the key, or run a sync.`,
+        });
+      }
+
+      const fields = {
+        title,
+        severity: ['high', 'medium', 'low'].includes(body.severity) ? body.severity : 'medium',
+        category: String(body.category || '').trim(),
+        owner: String(body.owner || '').trim(),
+        detail: String(body.detail || '').trim(),
+        action: String(body.action || '').trim(),
+        blockerKey: String(body.blockerKey || '').trim().toUpperCase(),
+        status: body.status === 'Resolved' ? 'Resolved' : 'Open',
+        teamId: String(body.teamId || '').trim(),
+        teamName: String(body.teamName || '').trim(),
+        items,
+      };
+
+      if (req.method === 'PUT') {
+        if (!plan.blockers.some(b => b.id === body.id)) return json(res, 404, { error: 'No such blocker.' });
+        plan.blockers = plan.blockers.map(b => (b.id === body.id
+          ? { ...b, ...fields, updatedAt: new Date().toISOString() }
+          : b));
+      } else {
+        /* NOT `b${Date.now()}` alone, which is what the risk route above
+           does. `blocker.id` is a PRIMARY KEY written with INSERT OR REPLACE,
+           so two records created inside the same millisecond — one click of
+           "Take it on" on two cards, or any scripted batch — collide, and the
+           second silently replaces the first. Somebody's typed note vanishing
+           with no error is the worst shape a bug can have. */
+        const id = `b${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
+        plan.blockers.push({ ...fields, id, createdAt: new Date().toISOString() });
+      }
+    }
+
+    store.savePlan(plan);
+    store.audit(`blocker.${req.method.toLowerCase()}`, { id: body.id || body.title });
+    return json(res, 200, { ok: true, blockers: plan.blockers });
   }
 
   if (p === '/api/team' && req.method === 'GET') {
@@ -2026,6 +2125,34 @@ async function handleApi(req, res, url) {
          column gets a bigger number than the page shows and assumes the page is
          wrong. The label says which one this is. */
       if (rows.length) rows.push(line('Sprint total (distinct)', { ...t.totals, priorityLabel: '' }));
+    } else if (what === 'blockers') {
+      const v = blockersLib.blockerView(plan, snap, { teamId: team.id });
+      name = `blockers-${team.id}`;
+      /* THE ITEMS TRAVEL WITH EVERY ROW. A CSV saying "CLICMNTIGO-11567 — 15
+         items" and not naming them is a number somebody has to come back to
+         this screen to use, which defeats exporting it. */
+      rows = v.detected.map(g => ({
+        Kind: 'Detected', Severity: g.severity, Blocker: g.key,
+        Summary: g.summary || (g.local ? '' : '(in a project this tool does not sync)'),
+        Status: g.status || '', Items: g.count, Points: g.points,
+        'Via epic': g.via.join(' '), Keys: g.items.join(' '), Owner: '', Action: '',
+      }));
+      if (v.unrecorded.count) {
+        rows.push({
+          Kind: 'Detected', Severity: 'high', Blocker: '(nothing recorded)',
+          Summary: 'In Refinement with no blocker named on the epic',
+          Status: '', Items: v.unrecorded.count, Points: v.unrecorded.points,
+          'Via epic': '', Keys: v.unrecorded.items.join(' '), Owner: '',
+          Action: 'Register a blocker against these, or refine them',
+        });
+      }
+      rows = rows.concat(v.manual.map(b => ({
+        Kind: 'Register', Severity: b.severity || 'medium', Blocker: b.blockerKey || '',
+        Summary: b.title, Status: b.status || 'Open',
+        Items: (b.items || []).length, Points: '',
+        'Via epic': b.category || '', Keys: (b.items || []).join(' '),
+        Owner: b.owner || '', Action: b.action || '',
+      })));
     } else if (what === 'risks') {
       const v = insights.riskView(plan, snap, { teamId: team.id });
       name = `risks-${team.id}`;

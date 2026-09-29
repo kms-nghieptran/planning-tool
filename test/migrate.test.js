@@ -174,6 +174,12 @@ const PLAN = () => ({
   ceremony: { 'ruby|S39': 8.5 },
   overrides: { 'ruby|S39|ruby-abiran-lopez': { planned: 30, actual: 28 } },
   risks: [{ id: 'r1', title: 'Env unstable', severity: 'High' }],
+  /* A REGISTERED BLOCKER, with the linked keys that make it different from a
+     risk. They round-trip through the JSON column, so a blocker naming three
+     items has to come back naming the same three in the same order — the
+     round-trip is the only thing standing between his typed note and a
+     silently shortened list. */
+  blockers: [{ id: 'b1', title: 'Staging down', severity: 'high', status: 'Open', items: ['AUTOKAT-1', 'AUTOKAT-2'] }],
   categoryRules: null,
   mixTargets: { ruby: { new: [45, 100], maintenance: [0, 35] } },
   // His own judgement of which suites matter. Plan data by definition — there

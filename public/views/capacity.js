@@ -374,6 +374,29 @@ const CapacityView = (() => {
     return UI.drillNumber(n, { act: 'bc-epics', row: r.component, tool, cell }, { zero: '—' });
   }
 
+  /* ── THE WARNING BESIDE A PLANNED NUMBER ──────────────────────────────
+     A planned column counts SUITES with work in this sprint. It says nothing
+     about whether that work can start — and on this board it very often
+     cannot: an item sits in Refinement, or its Automation Status reads
+     Blocked. "12 planned" and "12 planned, 5 of them stuck" are different
+     sprints, and only the first was on screen.
+
+     A BUTTON, NOT AN ICON. It opens the list, so it has to be reachable by
+     keyboard and announced as one — the same rule `UI.drillNumber` follows
+     for the numbers it sits beside.
+
+     NOTHING BLOCKED, NOTHING DRAWN. A marker that is always there is one
+     nobody reads; the whole value of this is that it is unusual. */
+  function stuckMark(r, tool, kind) {
+    const keys = ((r[tool] || {}).stuck || {})[kind] || [];
+    if (!keys.length) return '';
+    const n = keys.length;
+    return `<button type="button" class="stuck-mark" data-act="bc-epics" data-n="${n}"
+      data-row="${UI.esc(r.component)}" data-tool="${UI.esc(tool)}" data-cell="stuck-${UI.esc(kind)}"
+      title="${UI.esc(`${n} of the ${kind === 'build' ? 'new build' : 'maintenance'} work planned here cannot be started — in Refinement, or marked Blocked for automation`)}"
+      aria-label="${UI.esc(`Show the ${n} blocked ${n === 1 ? 'item' : 'items'} planned against ${r.component}`)}">!</button>`;
+  }
+
   function byComponentRow(r, tools, buckets, planned) {
     // Every key the row counted, both halves, for the component name itself.
     // The NAME still goes to Jira: it is the whole suite, which is a search
@@ -387,6 +410,12 @@ const CapacityView = (() => {
         <td>
           ${UI.componentLink(r.component, all, { what: `${r.component} epics` })}
           ${r.empty ? ' <span class="tag" title="No backlog in either tool and nothing planned this sprint">clear</span>' : ''}
+          ${/* THE ROW'S OWN COUNT, distinct across both tools and both kinds —
+                one Story blocking a suite that TrueTest and KSE both cover is
+                one blocked item. Read-only: the cell markers are where you
+                open the list, and a third way in would be a third chance for
+                the number and the list to disagree. */''}
+          ${r.stuck ? `<span class="tag risk" title="${UI.esc(`${r.stuck} ${r.stuck === 1 ? 'item' : 'items'} planned against this component cannot be started — in Refinement, or marked Blocked for automation`)}">${r.stuck} blocked</span>` : ''}
         </td>
         <td class="prio-cell"><span class="tag prio-tag prio-${UI.esc(r.priorityKey)}"
           title="${UI.esc(`${r.priorityLabel} — ${r.priorityName}`)}">${UI.esc(r.priorityLabel)}</span></td>
@@ -394,7 +423,7 @@ const CapacityView = (() => {
           ${buckets.map((b, i) => `
             <td class="${cellCls(b.key, i, ti)}">${drillNum(r[t.key][b.key], r, t.key, b.key)}</td>`).join('')}
           ${planned.map((col, i) => `
-            <td class="${cellCls(`plan-${col.key}`, i, ti)}">${drillNum(r[t.key][col.key], r, t.key, col.key)}</td>`).join('')}`).join('')}
+            <td class="${cellCls(`plan-${col.key}`, i, ti)}">${drillNum(r[t.key][col.key], r, t.key, col.key)}${stuckMark(r, t.key, col.key)}</td>`).join('')}`).join('')}
         ${byComponentNote(r)}
       </tr>`;
   }
@@ -553,11 +582,14 @@ const CapacityView = (() => {
       const what = r.half === 'backlog'
         ? `Across ${UI.esc(((r.scopes || {}).backlog || {}).label || 'all teams')}, with no work in an active sprint.`
           + ' Excluded components and the coverage allow-list are already applied.'
-        : `Reached from the work ${UI.esc(((r.scopes || {}).planned || {}).label || 'this team')}`
-          + ` planned in ${UI.esc((r.sprint && r.sprint.label) || 'this sprint')}.`;
+        : r.stuck
+          ? `Planned in ${UI.esc((r.sprint && r.sprint.label) || 'this sprint')} and not startable —`
+            + ' each one is in Refinement, or its Automation Status reads Blocked.'
+          : `Reached from the work ${UI.esc(((r.scopes || {}).planned || {}).label || 'this team')}`
+            + ` planned in ${UI.esc((r.sprint && r.sprint.label) || 'this sprint')}.`;
       UI.drawer(UI.drillDrawer({
         title: `${ds.row} — ${r.label}`,
-        meaning: `${UI.int(r.count)} ${UI.esc(String(r.scope || 'epic').toLowerCase())}${r.count === 1 ? '' : 's'}. ${what}`
+        meaning: `${UI.int(r.count)} ${UI.esc(r.kind === 'item' ? 'item' : String(r.scope || 'epic').toLowerCase())}${r.count === 1 ? '' : 's'}. ${what}`
           + (off ? ` The cell says ${UI.int(shown)} — it has been redrawn since this was opened.` : ''),
         keys: r.epics.map(e => e.key),
         catalogue: Object.fromEntries(r.epics.map(e => [String(e.key).toUpperCase(), e])),
@@ -1049,16 +1081,28 @@ const CapacityView = (() => {
       if (kind === 'bc-export-pdf') {
         e.preventDefault();
         const bc = data.byComponent || {};
+        /* LANDSCAPE. This sheet is sixteen columns wide — two tools times
+           three backlog buckets, two planned columns each, plus priority and
+           the note — and on portrait A4 the right-hand half of it either
+           shrinks to unreadable or falls onto a second sheet that has lost
+           its row labels. It is the one export here wide enough to need the
+           long edge. */
         UI.exportPdf(
           [(bc.team && bc.team.name) || '', (bc.sprint && bc.sprint.label) || '', 'by component'],
-          { only: '[data-bycomp]' },
+          { only: '[data-bycomp]', landscape: true },
         );
         return;
       }
       if (kind === 'bc-epics') {
         e.preventDefault();
-        await openByComponentCell(state, act.dataset,
-          Number(String(act.textContent).replace(/[^0-9]/g, '')) || 0);
+        /* `data-n` WHEN THE CONTROL HAS ONE. The number cells carry their
+           count as their own text, but the warning marker's text is "!" —
+           scraping digits off that yields 0, and the drawer would announce
+           that the cell had been redrawn on every single open. */
+        const shown = act.dataset.n != null
+          ? Number(act.dataset.n) || 0
+          : Number(String(act.textContent).replace(/[^0-9]/g, '')) || 0;
+        await openByComponentCell(state, act.dataset, shown);
         return;
       }
       if (kind === 'member-items') {

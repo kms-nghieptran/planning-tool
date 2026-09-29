@@ -4,7 +4,12 @@
    behind a missing estimate, and how many sprints of runway is actually here. */
 
 const BacklogView = (() => {
-  let filters = { category: null, component: null, state: null, assignee: null, q: '' };
+  /* ASSIGNEE IS A SET, not a value — the one filter here that is genuinely
+     plural. "What is on Anh and Hien" is the question a lead asks before a
+     planning meeting, and a single-select turns it into two passes with the
+     numbers held in your head. Empty means everyone, which is also the
+     cheapest thing to check. */
+  let filters = { category: null, component: null, state: null, assignee: new Set(), q: '' };
   /* THE SENTINEL for "nobody". An empty string is the All option, so the
      unassigned pile needs a value of its own — the same rule and the same
      shape the item table's own filter uses. */
@@ -55,6 +60,13 @@ const BacklogView = (() => {
     // nothing once the team picker has moved to Ruby's 77 items.
     page = 1;
     loadFold(state.teamId);
+    /* THE FACE PILE IS CHOSEN ONCE, HERE. A fresh payload is a fresh set of
+       people, and whoever was selected on the last team is not necessarily
+       on this one — so the selection is dropped with it, the same way the
+       page number is. */
+    filters.assignee = new Set();
+    whoOpen = false;
+    whoShown = pickShown(d);
 
     /* NOTHING AT ALL means nothing queued AND no sprint holding anything.
        Malphite's queue is empty and its sprints are not, and a board that
@@ -76,7 +88,18 @@ const BacklogView = (() => {
           ${UI.kpi({ label: 'Ready to plan', value: UI.int(d.ready.points), unit: 'pts', foot: `${d.ready.count} items · ${d.ready.sprints != null ? `${d.ready.sprints} sprints of work` : 'no velocity yet'}`, tone: 'brand', featured: true })}
           ${UI.kpi({ label: 'Total queued', value: UI.int(d.points), unit: 'pts', foot: `${d.total} items · ${d.runway != null ? `${d.runway} sprints at ${d.avgVelocity} pts` : 'no velocity yet'}` })}
           ${UI.kpi({ label: 'Unestimated', value: UI.int(d.unestimated.count), unit: 'items', foot: `${UI.pct(d.unestimated.pct)} of the backlog — invisible to every forecast`, tone: d.unestimated.count ? 'warn' : 'ok' })}
-          ${UI.kpi({ label: 'Blocked', value: UI.int(d.blocked.count), unit: 'items', foot: 'Cannot be pulled in as things stand', tone: d.blocked.count ? 'risk' : 'ok' })}
+          ${/* THE ONE KPI HERE THAT OPENS. "195 blocked" is where the
+                question "which ones?" is loudest, and until now the only way
+                to answer it was the Blocked chip, which filters the table
+                and loses your place. The keys travel with the count — the
+                drawer lists exactly the set the number is the size of. */''}
+          ${UI.kpi({
+    label: 'Blocked',
+    value: UI.drillNumber(d.blocked.count, { act: 'bl-blocked' }, { zero: '0' }),
+    unit: 'items',
+    foot: d.blocked.count ? 'In Refinement, or marked Blocked for automation' : 'Nothing in the queue is held up',
+    tone: d.blocked.count ? 'risk' : 'ok',
+  })}
           ${UI.kpi({ label: 'Pre-assigned', value: UI.pct(d.assigned.pct), foot: `${d.assigned.count} items already have an owner` })}
         </div>
       </section>
@@ -120,15 +143,12 @@ const BacklogView = (() => {
         <div class="filters">
           <label class="field"><span>Search</span><input type="text" id="blSearch" placeholder="key or summary" value="${UI.esc(filters.q)}" style="width:220px"></label>
           <label class="field"><span>Component</span><select id="blComponent"><option value="">All</option>${d.byComponent.map(c => `<option${filters.component === c.key ? ' selected' : ''}>${UI.esc(c.key)}</option>`).join('')}</select></label>
-          <!-- WHO IT IS ON. Built from the items actually in this backlog, not
+          <!-- WHO IT IS ON. Built from the items actually on this board, not
                from the team roster: a queue routinely carries work assigned to
                somebody who left, and a filter that cannot select them cannot
-               find it. The unassigned pile gets its own option because it is
+               find it. The unassigned pile gets its own entry because it is
                the one most people are looking for. -->
-          <label class="field"><span>Assignee</span><select id="blAssignee">
-            <option value="">All</option>
-            ${assigneeOptions(d).map(a => `<option value="${UI.esc(a.value)}"${filters.assignee === a.value ? ' selected' : ''}>${UI.esc(a.label)}</option>`).join('')}
-          </select></label>
+          <div class="field"><span>Assignee</span>${whoFilter(d)}</div>
           <div class="field"><span>State</span><div style="display:flex;gap:6px;flex-wrap:wrap">
             ${[['ready', 'Ready to plan'], ['unestimated', 'No estimate'], ['blocked', 'Blocked'], ['unassigned', 'No owner']]
               .map(([k, label]) => `<button class="chip${filters.state === k ? ' active' : ''}" data-state="${k}">${label}</button>`).join('')}
@@ -175,7 +195,80 @@ const BacklogView = (() => {
     }
     return [...by.entries()]
       .sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0])))
-      .map(([who, n]) => ({ value: who, label: `${who} (${n})` }));
+      .map(([name, count]) => ({ name, count }));
+  }
+
+  /* ── THE FACE PILE ────────────────────────────────────────────────────
+     A row of avatars you click, with the rest behind a `+N`. Jira's shape,
+     and it earns its place for a reason a dropdown does not: the people on
+     a team are recognised FASTER as faces than read as names, and the ones
+     carrying the most work are the ones you filter by, so they are the ones
+     in the row.
+
+     THE NAME IS NEVER ONLY IN THE PICTURE. Every avatar carries its person's
+     name and count in `title`, the menu spells them out in full, and the
+     grid cell does the same — initials in a coloured circle are a scanning
+     affordance, not an identifier, and two people on this project share
+     the letter N. */
+
+  /** Nine is a face pile; six is a row you can take in at a glance. */
+  const WHO_INLINE = 6;
+  let whoShown = [];        // names in the row, held stable across toggles
+  let whoOpen = false;      // is the overflow menu down
+
+  const whoLabel = (name) => (name === UNASSIGNED ? 'Unassigned' : name);
+
+  /* THE UNOWNED PILE IS NOT A PERSON, so it does not get a person's colour
+     or initials — a grey ring reads as "nobody" at the size an avatar is
+     drawn, where "UN" would read as somebody's name. */
+  const whoBadge = (name) => (name === UNASSIGNED
+    ? '<span class="avatar nobody" aria-hidden="true"></span>'
+    : UI.avatar(name));
+
+  /* WHICH FACES GET THE ROW — the busiest, up to the cap. Chosen ONCE per
+     render and then held, so the row does not reshuffle under the cursor
+     while you are clicking along it.
+   
+     Somebody picked out of the overflow menu is APPENDED rather than sorted
+     in (see `toggleWho`): a filter you cannot see is one you forget you
+     set, but a row that reorders itself on every click is worse than one
+     that grows by one. */
+  function pickShown(d) {
+    return assigneeOptions(d).slice(0, WHO_INLINE).map(a => a.name);
+  }
+
+  const whoFilter = (d) => `<div class="who" id="blWho">${whoInner(d)}</div>`;
+
+  function whoInner(d) {
+    const all = assigneeOptions(d);
+    const at = (name) => all.find(a => a.name === name) || { name, count: 0 };
+    const hidden = all.filter(a => !whoShown.includes(a.name));
+    const hiddenOn = hidden.some(a => filters.assignee.has(a.name));
+    return `
+      ${whoShown.map(name => whoChip(at(name))).join('')}
+      ${hidden.length ? `<button type="button" class="who-more${hiddenOn ? ' on' : ''}" data-who-more
+          aria-expanded="${whoOpen}" title="${hidden.length} more ${hidden.length === 1 ? 'person' : 'people'}">+${hidden.length}</button>` : ''}
+      ${all.length ? `<div class="who-menu" data-who-panel${whoOpen ? '' : ' hidden'} role="group" aria-label="Filter by assignee">
+        ${all.map(a => `<label class="who-opt">
+          <input type="checkbox" data-who-pick="${UI.esc(a.name)}"${filters.assignee.has(a.name) ? ' checked' : ''}>
+          ${whoBadge(a.name)}<span class="who-name">${UI.esc(whoLabel(a.name))}</span><span class="who-n">${a.count}</span>
+        </label>`).join('')}
+      </div>` : ''}
+      ${filters.assignee.size ? `<button type="button" class="who-clear" data-who-clear title="Show everyone again">Clear</button>` : ''}`;
+  }
+
+  function whoChip(a) {
+    const on = filters.assignee.has(a.name);
+    return `<button type="button" class="who-chip${on ? ' on' : ''}" data-who="${UI.esc(a.name)}"
+      aria-pressed="${on}" title="${UI.esc(whoLabel(a.name))} — ${a.count} ${a.count === 1 ? 'item' : 'items'}">${whoBadge(a.name)}</button>`;
+  }
+
+  /* Repaint the pile alone. The filter bar lives outside `#blTable`, so a
+     full redraw would take the table and its wiring with it — and the pile
+     has to repaint on every toggle or the pressed states go stale. */
+  function redrawWho(mount) {
+    const el = UI.$('#blWho', mount);
+    if (el) el.innerHTML = whoInner(data);
   }
 
   /* ── THE SPRINT CELL ──────────────────────────────────────────────────
@@ -258,10 +351,7 @@ const BacklogView = (() => {
     const q = filters.q.toLowerCase();
     if (filters.category && i.category !== filters.category) return false;
     if (filters.component && !(i.components || []).includes(filters.component)) return false;
-    if (filters.assignee) {
-      const who = i.assignee || UNASSIGNED;
-      if (who !== filters.assignee) return false;
-    }
+    if (filters.assignee.size && !filters.assignee.has(i.assignee || UNASSIGNED)) return false;
     if (q && !`${i.key} ${i.summary}`.toLowerCase().includes(q)) return false;
     switch (filters.state) {
       case 'ready': return i.points != null && !blockedKeys.has(i.key);
@@ -289,7 +379,7 @@ const BacklogView = (() => {
   }
 
   /** Nothing typed, nothing chipped — the board is showing everything. */
-  const unfiltered = () => !filters.q && !filters.component && !filters.state && !filters.category && !filters.assignee;
+  const unfiltered = () => !filters.q && !filters.component && !filters.state && !filters.category && !filters.assignee.size;
   const filtersOn = () => !unfiltered();
 
   const sumPoints = (rows) => rows.reduce((t, i) => t + (i.points || 0), 0);
@@ -381,7 +471,7 @@ const BacklogView = (() => {
       meta: `${countMeta(rows, all)}${sec.done ? ` · ${sec.done} done` : ''}${sec.epicsExcluded ? ` · <span class="muted" title="Epics are containers, never pulled into a sprint">${sec.epicsExcluded} epics not counted</span>` : ''}`,
       right: rows.length ? UI.openInJira(rows.map(i => i.key)) : '',
       body: rows.length
-        ? rowsTable(state, data, rows, blockedSet())
+        ? rowsTable(state, data, rows, blockedSet(), { sprintCol: false })
         : `<div class="empty">${all.length ? 'Nothing here matches these filters.' : 'Nothing planned yet — drag rows from the backlog.'}</div>`,
     });
   }
@@ -394,30 +484,71 @@ const BacklogView = (() => {
      drag is the shortcut and the select is the keyboard path; they write
      through the same route, so neither can do something the other cannot
      undo. */
-  function rowsTable(state, d, rows, blockedKeys) {
+  /* ── THE COLUMNS ──────────────────────────────────────────────────────
+     TWO COLUMNS THAT SOUND ALIKE, and they are not:
+
+       Status    what Jira says — Open, In Dev, Refinement. The workflow.
+       Readiness what this page says — ready, blocked, no estimate. Whether
+                 you could pull it into a sprint tomorrow.
+
+     The second used to be headed "State", which beside a new "Status" column
+     would have been two words for two different things, one letter apart. It
+     is the readiness question, so it says so.
+
+     THE SPRINT COLUMN IS ONLY IN THE QUEUE. Inside a sprint section it would
+     print the section's own heading on every row — the answer is the box the
+     row is sitting in. */
+  function rowsTable(state, d, rows, blockedKeys, { sprintCol = true } = {}) {
     return `
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Key</th><th>Summary</th><th>Sprint</th><th>Category</th><th>State</th><th>Component</th><th>Priority</th><th class="num">Points</th><th>Assignee</th></tr></thead>
+          <thead><tr>
+            <th>Key</th><th>Summary</th>${sprintCol ? '<th>Sprint</th>' : ''}
+            <th>Category</th><th>Status</th><th>Readiness</th>
+            <th>Component</th><th>Priority</th><th class="num">Points</th>
+            <th>Due</th><th>Assignee</th>
+          </tr></thead>
           <tbody>
             ${rows.map(i => `
               <tr draggable="true" data-row-key="${UI.esc(i.key)}">
                 <td>${UI.issueKey(i.key)}</td>
                 <td class="wrap">${UI.esc(i.summary)}</td>
-                ${sprintCell(d, i, false)}
-                <td><span class="tag"><i class="dot" style="background:${UI.CATEGORY_COLORS[i.category]}"></i>${UI.esc((state.categories[i.category] || {}).label || i.category)}</span></td>
+                ${sprintCol ? sprintCell(d, i, false) : ''}
+                <td>${categoryCell(state, i)}</td>
+                ${/* THE SAME STATUS PILL the sprint board draws, stage colour
+                      and all — a second rendering here is how one screen comes
+                      to show Refinement as amber and the other as grey. */''}
+                <td>${UI.statusText(i)}</td>
                 <td>${blockedKeys.has(i.key) ? '<span class="tag risk">blocked</span>'
     : i.points == null ? '<span class="tag warn">no estimate</span>'
       : '<span class="tag ok">ready</span>'}</td>
                 <td class="muted">${UI.esc((i.components || [])[0] || '—')}</td>
                 <td class="muted">${UI.esc(i.priority || '—')}</td>
                 <td class="num">${i.points == null ? '—' : UI.num(i.points)}</td>
-                <td class="muted">${UI.esc(i.assignee || '—')}</td>
+                ${/* `UI.dueCell` rather than a date here: it is the one that
+                      knows an overdue date from a merely late one, and that a
+                      due date on finished work is history rather than a
+                      deadline. `today` comes from the payload so the colour
+                      does not depend on when the tab was left open. */''}
+                <td class="col-due">${UI.dueCell(i, { today: d.today })}</td>
+                <td class="who-cell" title="${UI.esc(i.assignee ? i.assignee : 'Unassigned')}">${whoBadge(i.assignee || UNASSIGNED)}<span class="who-name">${UI.esc(i.assignee || '—')}</span></td>
               </tr>`).join('')}
           </tbody>
         </table>
       </div>`;
   }
+
+  /* CATEGORY, OR A HONEST BLANK. The sprint sections used to arrive with no
+     `category` at all and drew an empty cell, which reads as "nobody has
+     categorised this" — a real state, and the wrong answer. Now the server
+     classifies both halves; this still says plainly when a row genuinely has
+     none rather than drawing a coloured chip around nothing. */
+  function categoryCell(state, i) {
+    if (!i.category) return '<span class="muted" title="No category rule matched this item">—</span>';
+    const label = (state.categories[i.category] || {}).label || i.category;
+    return `<span class="tag"><i class="dot" style="background:${UI.CATEGORY_COLORS[i.category]}"></i>${UI.esc(label)}</span>`;
+  }
+
 
   function renderTable(state, mount) {
     const d = data;
@@ -676,6 +807,20 @@ const BacklogView = (() => {
      page of a set you just narrowed is still not where anyone meant to be. */
   const refilter = (state, mount) => { page = 1; renderTable(state, mount); };
 
+  /** Select or deselect one person, from either control. */
+  function toggleWho(state, mount, name) {
+    const who = String(name);
+    if (filters.assignee.has(who)) filters.assignee.delete(who); else filters.assignee.add(who);
+    /* PROMOTED INTO THE ROW, and left there when deselected. Picking
+       somebody out of the +N menu has to put their face on screen or the
+       board is filtered by a person who appears nowhere; taking it away
+       again on deselect would make the row shuffle as you worked down a
+       list of people. It goes back to the busiest N on the next render. */
+    if (filters.assignee.has(who) && !whoShown.includes(who)) whoShown = [...whoShown, who];
+    redrawWho(mount);
+    refilter(state, mount);
+  }
+
   function wire(state, mount) {
     /* ── MOVING A ROW INTO A SPRINT ───────────────────────────────────
        DELEGATED to the mount, not attached to the selects: the table is
@@ -687,6 +832,8 @@ const BacklogView = (() => {
        rather than the moment before it — the same reason the note box on the
        Capacity sheet returns its promise. */
     mount.addEventListener('change', (e) => {
+      const who = e.target.closest && e.target.closest('[data-who-pick]');
+      if (who) { toggleWho(state, mount, who.dataset.whoPick); return undefined; }
       const pick = e.target.closest && e.target.closest('[data-sprint-key]');
       return pick ? saveSprint(state, mount, pick) : undefined;
     });
@@ -696,7 +843,28 @@ const BacklogView = (() => {
        on leaving the page: there is no leaving event worth trusting, and
        the cost of writing four ids to localStorage is nothing. */
     mount.addEventListener('click', (e) => {
-      const btn = e.target.closest && e.target.closest('[data-fold]');
+      const t = e.target;
+      const near = (sel) => t.closest && t.closest(sel);
+
+      /* ── THE FACE PILE ────────────────────────────────────────────
+         Every one of these writes the same Set and repaints the same
+         region, so an avatar and its checkbox cannot disagree about
+         whether that person is selected. */
+      const chip = near('[data-who]');
+      if (chip) { toggleWho(state, mount, chip.dataset.who); return; }
+      if (near('[data-who-clear]')) {
+        filters.assignee.clear();
+        whoShown = pickShown(data);
+        redrawWho(mount);
+        refilter(state, mount);
+        return;
+      }
+      if (near('[data-who-more]')) { whoOpen = !whoOpen; redrawWho(mount); return; }
+      /* A CLICK ANYWHERE ELSE SHUTS THE MENU — except inside it, or the
+         next box you meant to tick would close the thing you are ticking. */
+      if (whoOpen && !near('[data-who-panel]')) { whoOpen = false; redrawWho(mount); }
+
+      const btn = near('[data-fold]');
       if (!btn) return;
       const id = String(btn.dataset.fold);
       if (folded.has(id)) folded.delete(id); else folded.add(id);
@@ -704,11 +872,41 @@ const BacklogView = (() => {
       renderTable(state, mount);
     });
 
+    // Escape shuts the menu, because a popover that only a click can close
+    // is a trap for anyone filtering from the keyboard.
+    /* ── THE BLOCKED DRAWER ───────────────────────────────────────────
+       Built from `data.blocked.items`, which is the list the KPI counted —
+       not a re-filter of the queue here. A second implementation of "which
+       ones are blocked" is how a drawer comes to list 193 under a number
+       saying 195, with nothing on screen to say which is right. */
+    mount.addEventListener('click', (e) => {
+      const n = e.target.closest && e.target.closest('[data-act="bl-blocked"]');
+      if (!n) return;
+      e.preventDefault();
+      const items = (data.blocked && data.blocked.items) || [];
+      UI.drawer(UI.drillDrawer({
+        /* THE NAME OFF THE PAYLOAD, which already carries it. Reaching into
+           `state.teams` would be a second way to answer "whose queue is
+           this" — and one that is empty in any caller that did not happen to
+           load the team list first. */
+        title: `Blocked in ${data.teamName || 'this'} queue`,
+        meaning: `${UI.int(items.length)} queued ${items.length === 1 ? 'item' : 'items'} cannot be pulled into a sprint as things stand — `
+          + 'each one is in Refinement, or its Automation Status reads Blocked. '
+          + 'They are counted in the queue and excluded from Ready to plan, so the runway above already leaves them out.',
+        keys: items.map(i => i.key),
+        items: data.items || [],
+        state,
+      }));
+    });
+
+    mount.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && whoOpen) { whoOpen = false; redrawWho(mount); }
+    });
+
     wireDrag(state, mount);
 
     UI.$('#blSearch', mount).addEventListener('input', e => { filters.q = e.target.value; refilter(state, mount); });
     UI.$('#blComponent', mount).addEventListener('change', e => { filters.component = e.target.value || null; refilter(state, mount); });
-    UI.$('#blAssignee', mount).addEventListener('change', e => { filters.assignee = e.target.value || null; refilter(state, mount); });
     UI.$$('[data-state]', mount).forEach(b => b.addEventListener('click', () => {
       filters.state = filters.state === b.dataset.state ? null : b.dataset.state;
       UI.$$('[data-state]', mount).forEach(x => x.classList.toggle('active', x.dataset.state === filters.state));

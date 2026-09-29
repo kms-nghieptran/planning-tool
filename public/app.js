@@ -43,6 +43,12 @@ const App = (() => {
     { id: 'reports/automation', label: 'Automation coverage', view: () => AutomationReport, hidden: true },
     { id: 'reports/coverage', label: 'Overall Coverage', view: () => CoverageReport },
     { id: 'risks', label: 'Risks', view: () => RisksView, sprintScoped: true },
+    /* NOT sprintScoped, unlike Risks directly above — and the difference is
+       the point. A risk is about a commitment and belongs to the sprint
+       carrying it; a blocker outlives the sprint it was noticed in, and 496
+       of this board's 543 blocked items are nowhere near one. The page has a
+       sprint filter of its own for when the question really is about one. */
+    { id: 'blockers', label: 'Blockers', view: () => BlockersView },
 
     { group: 'Data' },
     { id: 'sources', label: 'Data sources', view: () => SourcesView },

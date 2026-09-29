@@ -36,7 +36,7 @@ const BASE = 'https://ipipelinejira.atlassian.net';
 
 const item = (key, o = {}) => ({
   key, summary: o.summary || `Work ${key}`, issueType: 'Story',
-  category: o.category || 'new', components: o.components || ['R&D_iGO_E2E'],
+  components: o.components || ['R&D_iGO_E2E'],
   points: 'points' in o ? o.points : 3,
   /* `'assignee' in o`, NOT `o.assignee || default`. An UNOWNED item is a real
      and important case — it is what the Unassigned chip and the new assignee
@@ -44,7 +44,14 @@ const item = (key, o = {}) => ({
      fixture cannot express the thing under test. The same defect the team
      field had in the By component fixture. */
   assignee: 'assignee' in o ? o.assignee : 'Hien Phan',
-  priority: o.priority || 'Medium', status: 'Open',
+  priority: o.priority || 'Medium',
+  /* `'status' in o` and `'dueDate' in o`, never `|| default`. "No due date"
+     and "no category rule matched" are both real states with their own cell,
+     and a default applied with `||` makes them inexpressible — the same
+     fixture defect that hid the PS_iGO_Lafayette bug and the unowned one. */
+  status: 'status' in o ? o.status : 'Open',
+  dueDate: 'dueDate' in o ? o.dueDate : null,
+  category: 'category' in o ? o.category : 'new',
   sprints: o.sprints || [], sprintNames: (o.sprints || []).map(x => x.name),
 });
 
@@ -168,9 +175,18 @@ async function renderBacklog(payload = PAYLOAD, app = null, st = STATE) {
     set: (v) => { tableHtml = v; gen++; },
   });
 
+  /* THE PILE REPAINTS ITSELF IN PLACE. It sits OUTSIDE `#blTable`, so the
+     view cannot redraw it by redrawing the table — it writes `#blWho`'s
+     innerHTML directly, and a harness that handed back a node whose writes
+     went nowhere would make every repaint look like it worked. */
+  const pile = fakeEl('#blWho');
+  let pileHtml = '';
+  Object.defineProperty(pile, 'innerHTML', { get: () => pileHtml, set: (v) => { pileHtml = v; } });
+
   const keyFor = (sel) => (INSIDE_TABLE.has(sel) ? `${sel}@${gen}` : sel);
   const get = (sel) => {
     if (sel === '#blTable') return table;
+    if (sel === '#blWho') return pile;
     const k = keyFor(sel);
     if (!nodes.has(k)) {
       const n = fakeEl(sel);
@@ -231,6 +247,11 @@ async function renderBacklog(payload = PAYLOAD, app = null, st = STATE) {
      which a page number leaking between teams is invisible. */
   const ctx = app ? app.ctx : bootBacklog();
   ctx.UI.api = async () => payload;
+  /* THE DRAWER IS A REAL RENDER, not a stub that records its arguments. What
+     these checks are about is whether the list matches the number, and only
+     the rendered rows can answer that. */
+  let drawnHtml = '';
+  ctx.UI.drawer = (html) => { drawnHtml = html; };
   const puts = [];
   let failPut = null;
   ctx.UI.jsonPut = async (url, body) => {
@@ -278,6 +299,66 @@ async function renderBacklog(payload = PAYLOAD, app = null, st = STATE) {
       for (const fn of mountOn.drop || []) await fn({ target: sec, dataTransfer: dt, preventDefault() {} });
       return { allowed };
     },
+    /* ── THE FACE PILE ────────────────────────────────────────────────
+       Two controls, one Set: an avatar in the row and a checkbox in the
+       overflow menu. Both are driven here, because a harness that only
+       exercised one could not catch them disagreeing — which is the whole
+       failure a two-control filter has. */
+    who: {
+      /** Click an avatar in the row. */
+      chip(name) {
+        const node = { dataset: { who: String(name) } };
+        node.closest = (sel) => (sel === '[data-who]' ? node : null);
+        for (const fn of mountOn.click || []) fn({ target: node, preventDefault() {} });
+      },
+      /* Tick a box in the overflow menu — CLICK AND THEN CHANGE, which is
+         what a browser fires. Sending only `change` would let a handler
+         that shuts the menu on any click pass, and the menu would close
+         under the reader on every single tick. The click reports itself as
+         inside the panel, because that is where the box is. */
+      pick(name) {
+        const node = { dataset: { whoPick: String(name) } };
+        node.closest = (sel) => (sel === '[data-who-pick]' || sel === '[data-who-panel]' ? node : null);
+        for (const fn of mountOn.click || []) fn({ target: node, preventDefault() {} });
+        for (const fn of mountOn.change || []) fn({ target: node, preventDefault() {} });
+      },
+      /** Open or close the +N menu. */
+      more() {
+        const node = { dataset: {} };
+        node.closest = (sel) => (sel === '[data-who-more]' ? node : null);
+        for (const fn of mountOn.click || []) fn({ target: node, preventDefault() {} });
+      },
+      clear() {
+        const node = { dataset: {} };
+        node.closest = (sel) => (sel === '[data-who-clear]' ? node : null);
+        for (const fn of mountOn.click || []) fn({ target: node, preventDefault() {} });
+      },
+      /** A click on something that is not the pile at all. */
+      away() {
+        const node = { dataset: {} };
+        node.closest = () => null;
+        for (const fn of mountOn.click || []) fn({ target: node, preventDefault() {} });
+      },
+      esc() { for (const fn of mountOn.keydown || []) fn({ key: 'Escape', target: {}, preventDefault() {} }); },
+      /* The pile's markup. It is drawn once INTO the mount and repainted in
+         place after that, so both sources count — reading only the repaint
+         would make every check pass against an empty string until something
+         had been clicked. */
+      html() {
+        if (pileHtml) return pileHtml;
+        const at = mountHtml.indexOf('id="blWho"');
+        if (at < 0) return '';
+        const end = mountHtml.indexOf('<div class="field"><span>State', at);
+        return mountHtml.slice(at, end < 0 ? mountHtml.length : end);
+      },
+    },
+    /** Click the Blocked KPI, which is delegated on the mount like the rest. */
+    blockedKpi() {
+      const node = { dataset: { act: 'bl-blocked' } };
+      node.closest = (sel) => (sel === '[data-act="bl-blocked"]' ? node : null);
+      for (const fn of mountOn.click || []) fn({ target: node, preventDefault() {} });
+    },
+    drawn: () => drawnHtml,
     page: () => mountHtml,
     table: () => table.innerHTML,
     /** One section's markup, head and body — `backlog` or a sprint id. */
@@ -292,7 +373,6 @@ async function renderBacklog(payload = PAYLOAD, app = null, st = STATE) {
     /** The backlog section alone — what every check about "the queue" means. */
     queue() { return this.sec('backlog'); },
     search: get('#blSearch'),
-    assignee: get('#blAssignee'),
     chips: getAll('[data-state]'),
     cats: getAll('[data-cat]'),
     /* The buttons the CURRENT draw wired — see the note on INSIDE_TABLE. */
@@ -784,33 +864,178 @@ check('A REFUSED MOVE LEAVES THE ROW WHERE IT WAS', async () => {
   assert.ok(b.table().includes('>B-8<'), 'the row left the backlog on a failed move');
 });
 
-check('THE ASSIGNEE FILTER LISTS WHO IS IN THE QUEUE, with counts', async () => {
+check('THE ASSIGNEE FILTER LISTS WHO IS ON THE BOARD, with counts', async () => {
   /* Built from the items actually here, not the roster: a queue routinely
      carries work assigned to somebody who left, and a filter that cannot
      select them cannot find it. */
-  const page = (await renderBacklog()).page();
-  assert.ok(/id="blAssignee"/.test(page), 'there is no assignee filter');
-  assert.ok(/Hien Phan \(\d+\)/.test(page), 'the options do not say how much each person carries');
-  assert.ok(/— none — \(1\)/.test(page), 'the unassigned pile has no option of its own');
+  const b = await renderBacklog();
+  const pile = b.who.html();
+  assert.ok(/data-who=/.test(pile), 'there is no assignee filter');
+  assert.match(pile, /data-who-pick="Hien Phan"/, 'Hien Phan cannot be selected');
+  assert.match(pile, /Hien Phan<\/span><span class="who-n">\d+</, 'the menu does not say how much each person carries');
+  assert.match(pile, /data-who-pick="— none —"/, 'the unassigned pile has no entry of its own');
+  assert.match(pile, />Unassigned</, 'the unassigned entry is labelled with the raw sentinel');
+
 });
 
-check('AND IT CUTS THE TABLE', async () => {
+check('EVERY FACE CARRIES ITS NAME — the picture is never the only label', async () => {
+  /* Initials in a coloured circle are a scanning affordance, not an
+     identifier. Two people on this project share an initial, and a filter
+     you cannot read is one you set by accident. */
+  const pile = (await renderBacklog()).who.html();
+  const chips = [...pile.matchAll(/<button type="button" class="who-chip[^"]*" data-who="([^"]+)"[\s\S]*?title="([^"]*)"/g)];
+  assert.ok(chips.length, 'no faces in the row at all');
+  for (const [, name, title] of chips) {
+    const shown = name === '— none —' ? 'Unassigned' : name;
+    assert.ok(title.startsWith(shown), `the face for ${name} says "${title}" — the name is not in it`);
+    assert.match(title, /\d+ items?$/, `the face for ${name} does not say how much they carry`);
+  }
+});
+
+check('AND IT CUTS THE WHOLE BOARD', async () => {
   const b = await renderBacklog();
   const all = b.table();
   assert.ok(all.includes('>B-1<') && all.includes('>B-8<'), 'fixture check');
 
-  b.assignee.value = 'Anh Truong';
-  b.assignee.fire('change');
+  b.who.chip('Anh Truong');
   const some = b.table();
   assert.ok(some.includes('>B-8<') && some.includes('>B-9<'), "Anh Truong's items were filtered out");
   assert.ok(!some.includes('>B-1<'), "somebody else's item survived the filter");
 
   // And the unassigned sentinel selects exactly the ownerless one.
-  b.assignee.value = '— none —';
-  b.assignee.fire('change');
+  b.who.chip('Anh Truong');           // off again
+  b.who.chip('— none —');
   const none = b.table();
   assert.ok(none.includes('>B-5<'), 'the unassigned item was filtered out');
   assert.ok(!none.includes('>B-1<'), 'an assigned item matched the unassigned filter');
+});
+
+check('SEVERAL PEOPLE AT ONCE — the question this filter is actually asked', async () => {
+  /* "What is on Anh and Hien" is what a lead asks before planning. A
+     single-select turns that into two passes with the numbers held in your
+     head, which is the reason this is a Set. */
+  const b = await renderBacklog();
+  b.who.chip('Anh Truong');
+  b.who.chip('— none —');
+  const t = b.table();
+  assert.ok(t.includes('>B-8<') && t.includes('>B-9<'), "Anh Truong's rows were dropped by the second pick");
+  assert.ok(t.includes('>B-5<'), 'the unassigned row was dropped by the first pick');
+  assert.ok(!t.includes('>B-1<'), "somebody in neither selection survived");
+  assert.strictEqual(saidCount(b.queue()), 3, 'the count does not match the union of the two');
+});
+
+check('THE AVATAR AND ITS CHECKBOX ARE ONE SELECTION, not two', async () => {
+  /* The failure a two-control filter has: the face says selected and the
+     box says not, and which one is true depends on which you clicked last.
+     Both write the same Set and repaint the same markup. */
+  const b = await renderBacklog();
+  b.who.chip('Anh Truong');
+  assert.match(b.who.html(), /data-who="Anh Truong"\s+aria-pressed="true"/, 'the face does not show as selected');
+  assert.match(b.who.html(), /data-who-pick="Anh Truong" checked/, 'the box disagrees with the face');
+
+  b.who.pick('Anh Truong');           // untick from the menu
+  assert.match(b.who.html(), /data-who="Anh Truong"\s+aria-pressed="false"/, 'unticking the box left the face selected');
+  assert.ok(!/data-who-pick="Anh Truong" checked/.test(b.who.html()), 'the box stayed ticked');
+  assert.ok(b.table().includes('>B-1<'), 'the rows never came back');
+});
+
+check('A SELECTED PERSON IS PROMOTED INTO THE ROW — a filter you cannot see is one you forget', async () => {
+  /* The row shows the busiest six. Picking somebody out of the overflow
+     menu has to put their face on screen, or the board sits filtered by a
+     person who appears nowhere on it — and the only clue is a row count
+     that looks like a small team. */
+  const many = { ...PAYLOAD };
+  many.items = ITEMS.map((i, n) => ({ ...i, assignee: `Person ${String.fromCharCode(65 + n)}` }));
+  many.items.push(item('B-RARE', { assignee: 'Zoe Last' }));
+  many.total = many.items.length;
+  const b = await renderBacklog(many);
+  assert.ok(!/data-who="Zoe Last"/.test(b.who.html()),
+    'fixture check: Zoe carries the least, so she starts in the overflow');
+
+  /* THE MENU LISTS EVERYONE, not just the faces that fit in the row. Ten
+     people and six slots: the row is capped and the menu is the only way
+     past it, so a menu holding the same six is a control with nothing
+     behind it and the other four are unreachable by any means. Asserted
+     HERE rather than against the small fixture, where three people fit in
+     six slots and truncation would change nothing. */
+  const everyone = new Set(everyRowOf(many).map(i => i.assignee || '— none —'));
+  assert.ok(everyone.size > 6, `fixture check: ${everyone.size} people is not more than the row holds`);
+  const pile = b.who.html();
+  for (const name of everyone) {
+    assert.ok(pile.includes(`data-who-pick="${name}"`), `${name} is on the board and not in the menu`);
+  }
+  assert.ok((pile.match(/data-who="/g) || []).length <= 6, 'the row is not capped at all, so nothing is behind the +N');
+
+  b.who.pick('Zoe Last');
+  assert.match(b.who.html(), /data-who="Zoe Last"\s+aria-pressed="true"/,
+    'picking from the menu left her face off the row');
+  assert.ok(b.table().includes('>B-RARE<'), 'and the filter did not take');
+
+  /* AND SHE STAYS when deselected — pulling the face back out would make
+     the row shuffle as you worked down a list of people. */
+  b.who.pick('Zoe Last');
+  assert.match(b.who.html(), /data-who="Zoe Last"\s+aria-pressed="false"/,
+    'deselecting pulled her face out from under the cursor');
+});
+
+check('THE +N MENU OPENS, SHUTS ON ESCAPE, AND STAYS OPEN WHILE YOU TICK', async () => {
+  /* A popover that closed on every tick would make selecting three people
+     three round trips; one that only a click could close is a trap for
+     anyone filtering from the keyboard. */
+  const b = await renderBacklog();
+  assert.match(b.who.html(), /data-who-panel hidden/, 'the menu starts open');
+
+  b.who.more();
+  assert.ok(!/data-who-panel hidden/.test(b.who.html()), 'the +N button did not open the menu');
+  b.who.pick('Hien Phan');
+  assert.ok(!/data-who-panel hidden/.test(b.who.html()), 'ticking a box closed the menu you were ticking in');
+
+  b.who.esc();
+  assert.match(b.who.html(), /data-who-panel hidden/, 'Escape did not shut the menu');
+
+  b.who.more();
+  b.who.away();
+  assert.match(b.who.html(), /data-who-panel hidden/, 'a click elsewhere did not shut the menu');
+});
+
+check('CLEAR PUTS EVERYONE BACK, and only appears when there is something to clear', async () => {
+  const b = await renderBacklog();
+  assert.ok(!/data-who-clear/.test(b.who.html()), 'a Clear button offered with nothing selected');
+
+  b.who.chip('Anh Truong');
+  assert.match(b.who.html(), /data-who-clear/, 'no way to undo the filter');
+  b.who.clear();
+  assert.ok(!/data-who-clear/.test(b.who.html()), 'Clear survived clearing');
+  assert.strictEqual(saidCount(b.queue()), ITEMS.length, 'clearing did not restore the board');
+});
+
+check('AND A FRESH TEAM STARTS WITH NOBODY SELECTED', async () => {
+  /* Whoever was selected on the last team is not necessarily on this one,
+     so the selection is dropped with the payload — the same as the page
+     number. Leaving it would show an empty board for a filter naming
+     somebody who does not work here. */
+  const b = await renderBacklog();
+  b.who.chip('Anh Truong');
+  assert.strictEqual(saidCount(b.queue()), 2, 'fixture check');
+
+  const again = await renderBacklog(PAYLOAD, b.app);
+  assert.strictEqual(saidCount(again.queue()), ITEMS.length, "the new team's board opened filtered by the old team's people");
+  assert.ok(!/data-who-clear/.test(again.who.html()), 'and it still offers to clear a filter nobody set');
+});
+
+check('THE ASSIGNEE CELL SHOWS A FACE ON SCREEN AND A NAME ON PAPER', async () => {
+  /* `.avatar` is display:none in print. A cell holding ONLY an avatar would
+     print an empty Assignee column on every exported PDF — silently, since
+     nothing on screen would look wrong. */
+  const b = await renderBacklog();
+  const row = b.queue().split('<tr ').find(r => r.includes('>B-1<'));
+  assert.match(row, /<td class="who-cell" title="Hien Phan">/, 'the cell does not name its person on hover');
+  assert.match(row, /class="avatar"/, 'there is no avatar in the cell');
+  assert.match(row, /<span class="who-name">Hien Phan<\/span>/, 'the cell has no printable name');
+
+  const nobody = b.queue().split('<tr ').find(r => r.includes('>B-5<'));
+  assert.match(nobody, /title="Unassigned"/, 'an unowned row does not say so on hover');
+  assert.match(nobody, /class="avatar nobody"/, 'the unowned row got a person\'s avatar');
 });
 
 
@@ -856,6 +1081,9 @@ const BOARD = {
     SEC('S41', 'Ruby Sprint 41', { items: S41_ITEMS }),
   ],
 };
+
+/** Every row on a payload, sprints and queue alike. */
+const everyRowOf = (p) => [...(p.items || []), ...(p.sections || []).flatMap(s => s.items || [])];
 
 /** The row keys a stretch of markup actually drew. */
 const rowsIn = (html) => [...html.matchAll(/data-row-key="([^"]+)"/g)].map(m => m[1]);
@@ -999,14 +1227,24 @@ check('A MOVED ROW NOW SAYS WHERE IT IS — or the NEXT move is refused', async 
      server, comparing it against Jira, refuses it. */
   const b = await renderBacklog(BOARD);
   await b.drag('B-1', 'S41');
-  const row = b.sec('S41').split('<tr ').find(r => r.includes('>B-1<'));
-  assert.ok(row, 'fixture check: the row moved');
-  assert.match(row, /data-was="Ruby Sprint 41"/, 'the moved row still claims to be where it was');
-  assert.match(row, /<option value="S41" selected>/, 'and its picker shows the wrong sprint');
+  assert.ok(b.sec('S41').includes('>B-1<'), 'fixture check: the row moved');
 
-  // So the second move is accepted, with the right `was`.
+  /* ASSERTED THROUGH THE NEXT MOVE, not off the row's markup. A sprint
+     section no longer draws the Sprint picker — inside one, that column
+     printed the section's own heading on every row — so `data-was` is not on
+     screen there to read. What matters was never the attribute: it is that
+     the item's own sprint list was rewritten, and the only way to see that
+     is to move it again and look at what gets sent. */
   await b.drag('B-1', 'S40');
-  assert.deepEqual(b.puts[1].body, { key: 'B-1', teamId: 'ruby', sprintId: 'S40', was: 'Ruby Sprint 41' });
+  assert.deepEqual(b.puts[1].body, { key: 'B-1', teamId: 'ruby', sprintId: 'S40', was: 'Ruby Sprint 41' },
+    'the second move sent a stale `was` — the moved row still thinks it is where it was');
+
+  /* AND BACK IN THE QUEUE THE PICKER IS RIGHT, because that is where it is
+     drawn. A row returned to the backlog must offer Backlog as its selected
+     option or the next keyboard move sends a `was` naming a sprint it left. */
+  await b.drag('B-1', 'backlog');
+  const queued = b.queue().split('<tr ').find(r => r.includes('>B-1<'));
+  assert.match(queued, /data-was=""/, 'a row back in the queue still claims a sprint');
 });
 
 check('AND A ROW SENT BACK KEEPS ITS CLOSED SPRINTS — that is where it HAS been', async () => {
@@ -1026,8 +1264,7 @@ check('THE FILTERS NARROW THE WHOLE BOARD, not just the queue', async () => {
   const b = await renderBacklog(BOARD);
   assert.ok(b.sec('S40').includes('>S-1<'), 'fixture check');
 
-  b.assignee.value = 'Anh Truong';
-  b.assignee.fire('change');
+  b.who.chip('Anh Truong');
   assert.deepStrictEqual(rowsIn(b.sec('S40')), ['S-1'], "the sprint kept somebody else's rows");
   assert.strictEqual(rowsIn(b.sec('S41')).length, 0, 'a sprint with no match for the filter still drew rows');
   assert.ok(rowsIn(b.queue()).includes('B-8'), 'the queue lost the rows that do match');
@@ -1037,8 +1274,7 @@ check('AND EVERY HEAD SAYS HOW MANY OF ITS OWN IT IS SHOWING', async () => {
   /* "1 of 2 items" — both numbers, so a filtered board can never be mistaken
      for a smaller sprint. */
   const b = await renderBacklog(BOARD);
-  b.assignee.value = 'Anh Truong';
-  b.assignee.fire('change');
+  b.who.chip('Anh Truong');
   assert.match(b.sec('S40'), /1 of 2 items/, 'the sprint head hid the fact that it is filtered');
   assert.match(b.sec('S41'), /0 of 1 items/);
   assert.match(b.sec('S41'), /Nothing here matches these filters/,
@@ -1048,10 +1284,10 @@ check('AND EVERY HEAD SAYS HOW MANY OF ITS OWN IT IS SHOWING', async () => {
 check('THE ASSIGNEE PICKER OFFERS EVERYONE ON THE BOARD, not just the queue', async () => {
   /* An option that could select nothing in the sprints would make a person
      with only committed work appear to have none. */
-  const page = (await renderBacklog(BOARD)).page();
   // Two queued (B-8, B-9) and one committed (S-1). Counting the queue
   // alone would say 2, which is the failure this is here for.
-  assert.match(page, /Anh Truong \(3\)/, 'the picker counts only the queue');
+  const pile = (await renderBacklog(BOARD)).who.html();
+  assert.match(pile, /Anh Truong<\/span><span class="who-n">3</, 'the picker counts only the queue');
 });
 
 check('A SECTION EXISTS FOR EVERY SPRINT THE PICKER OFFERS', async () => {
@@ -1118,4 +1354,129 @@ check('AND THE TWISTY IS A BUTTON A KEYBOARD CAN REACH', async () => {
   const head = b.sec('S40');
   assert.match(head, /<button class="bl-fold"[^>]*aria-expanded="true"/,
     'the twisty is not a button, or does not announce its state');
+});
+
+/* ── THE COLUMNS, AND THE KPI THAT OPENS ──────────────────────────────────
+ *
+ * Four changes, one theme: a number or a cell on this page should answer the
+ * question it raises without making you go somewhere else. "195 blocked"
+ * opens. A row says what Jira calls it and when it is due. And the Sprint
+ * column stops printing the section's own heading on every row inside it.
+ */
+
+/** A payload whose rows exercise every "nothing here" case a cell has. */
+const COLUMNS = (() => {
+  const rows = [
+    item('C-1', { status: 'Refinement', dueDate: '2026-01-15', category: 'maintenance' }),
+    item('C-2', { category: null, dueDate: null }),       // no category, no due date
+    item('C-3', { status: '', dueDate: '2099-12-31' }),   // no status, far-future due date
+  ];
+  return {
+    ...PAYLOAD,
+    items: rows,
+    total: rows.length,
+    blocked: { count: 1, items: [{ key: 'C-1' }] },
+    today: '2026-06-01',
+    sections: [
+      { ...PAYLOAD.sections[0], count: 1, points: 3, items: [item('S-1', { status: 'In Dev', dueDate: '2026-02-01', category: 'maintenance' })] },
+      PAYLOAD.sections[1],
+    ],
+  };
+})();
+
+const rowFor = (html, key) => html.split('<tr ').find(r => r.includes(`>${key}<`)) || '';
+const headsOf = (html) => [...html.matchAll(/<th[^>]*>(.*?)<\/th>/g)].map(m => m[1].replace(/<[^>]*>/g, ''));
+
+check('A ROW SAYS WHAT JIRA CALLS IT, AND WHEN IT IS DUE', async () => {
+  const b = await renderBacklog(COLUMNS);
+  const heads = headsOf(b.queue());
+  for (const h of ['Status', 'Due']) {
+    assert.ok(heads.includes(h), `the queue has no ${h} column — it has ${JSON.stringify(heads)}`);
+  }
+  const row = rowFor(b.queue(), 'C-1');
+  assert.match(row, /Refinement/, 'the row does not show its Jira status');
+  assert.match(row, /2026-01-15/, 'the row does not show its due date');
+});
+
+check('AND BOTH COLUMNS ARE IN THE SPRINT SECTIONS TOO', async () => {
+  /* The whole point of the two halves on one screen is that they read
+     across. A column on one and not the other makes the comparison a
+     translation exercise. */
+  const b = await renderBacklog(COLUMNS);
+  const heads = headsOf(b.sec('S40'));
+  for (const h of ['Status', 'Due', 'Category']) {
+    assert.ok(heads.includes(h), `the sprint section has no ${h} column`);
+  }
+  const row = rowFor(b.sec('S40'), 'S-1');
+  assert.match(row, /In Dev/, 'the sprint row does not show its status');
+  assert.match(row, /2026-02-01/, 'the sprint row does not show its due date');
+});
+
+check('THE SPRINT COLUMN IS ONLY IN THE QUEUE', async () => {
+  /* Inside a sprint section it would print the section's own heading on
+     every row — the answer is the box the row is sitting in. */
+  const b = await renderBacklog(COLUMNS);
+  assert.ok(headsOf(b.queue()).includes('Sprint'), 'the queue lost its Sprint picker');
+  assert.ok(!headsOf(b.sec('S40')).includes('Sprint'),
+    'a sprint section still draws the Sprint column');
+  assert.ok(!/data-sprint-key/.test(b.sec('S40')),
+    'a sprint section still draws the picker itself');
+  assert.match(b.queue(), /data-sprint-key/, 'the queue lost the picker');
+});
+
+check('TWO COLUMNS THAT SOUND ALIKE ARE NAMED APART', async () => {
+  /* Status is what Jira says; Readiness is what this page says. Side by side
+     as "Status" and "State" they would be two words for two different
+     things, one letter apart. */
+  const heads = headsOf((await renderBacklog(COLUMNS)).queue());
+  assert.ok(heads.includes('Readiness'), 'the readiness column is still called something else');
+  assert.ok(!heads.includes('State'), '"State" is still there beside "Status"');
+});
+
+check('AN ABSENT CATEGORY, STATUS OR DUE DATE READS AS ITSELF', async () => {
+  /* Each of these is a real state on real rows. An empty cell reads as a
+     rendering fault, and a coloured chip around nothing is worse. */
+  const b = await renderBacklog(COLUMNS);
+  const none = rowFor(b.queue(), 'C-2');
+  assert.match(none, /No category rule matched/, 'a row with no category drew a blank cell');
+  assert.ok(!/class="tag"><i class="dot" style="background:undefined/.test(none),
+    'a row with no category drew a chip around nothing');
+  const noStatus = rowFor(b.queue(), 'C-3');
+  assert.match(noStatus, /—/, 'a row with no status drew an empty cell');
+});
+
+check('THE BLOCKED KPI OPENS', async () => {
+  /* "195 blocked" is where the question "which ones?" is loudest, and the
+     only answer used to be the Blocked chip, which filters the table and
+     loses your place. */
+  const b = await renderBacklog(COLUMNS);
+  assert.match(b.page(), /data-act="bl-blocked"/, 'the Blocked KPI is not a control');
+  assert.match(b.page(), /<button[^>]*data-act="bl-blocked"/, 'it is not a real button');
+});
+
+check('AND IT LISTS EXACTLY THE SET THE NUMBER COUNTED', async () => {
+  /* Built from the list the KPI counted, not from a second filter over the
+     queue — a second implementation of "which ones are blocked" is how a
+     drawer comes to list 193 under a number saying 195. */
+  const b = await renderBacklog(COLUMNS);
+  b.blockedKpi();
+  const d = b.drawn();
+  assert.ok(d, 'clicking the KPI opened nothing');
+  assert.match(d, /C-1/, 'the drawer does not list the blocked item');
+  assert.ok(!/C-2/.test(d), 'the drawer listed an item that is not blocked');
+  assert.match(d, /Refinement/, 'the drawer does not say what blocked means here');
+});
+
+check('THE BLOCKED LIST IS NOT CAPPED — the count and the list agree at any size', async () => {
+  /* It was capped at 50 when nothing read it. With Titan at 195 the drawer
+     would have listed 50 under a number saying 195, with nothing on screen
+     to say why. */
+  const many = Array.from({ length: 120 }, (_, i) => item(`BLK-${String(i).padStart(3, '0')}`, { status: 'Refinement' }));
+  const big = { ...COLUMNS, items: many, total: many.length, blocked: { count: many.length, items: many.map(i => ({ key: i.key })) } };
+  const b = await renderBacklog(big);
+  b.blockedKpi();
+  const d = b.drawn();
+  const listed = (d.match(/BLK-\d{3}/g) || []).length;
+  assert.strictEqual(new Set(d.match(/BLK-\d{3}/g) || []).size, 120,
+    `the drawer listed ${listed} of the 120 the KPI counted`);
 });

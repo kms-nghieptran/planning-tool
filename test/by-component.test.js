@@ -140,7 +140,18 @@ function withSprints(bySprint) {
   for (const [sid, items] of Object.entries(bySprint || {})) {
     for (const it of items) {
       snap.issues[it.key] = {
-        key: it.key, summary: it.key, issueType: it.type, status: 'In Dev',
+        key: it.key, summary: it.key, issueType: it.type,
+        /* `'status' in it`, not `it.status || 'In Dev'`. A planned item in
+           Refinement is the whole point of the warning marker, and a default
+           applied with `||` makes that case inexpressible — the same fixture
+           defect that hid the PS_iGO_Lafayette bug and the unassigned one. */
+        status: 'status' in it ? it.status : 'In Dev',
+        automationStatus: 'automationStatus' in it ? it.automationStatus : null,
+        /* CARRIED, or "done" is inexpressible here. `isDone` reads this field
+           first, so a finished item sitting in a Refinement-named column —
+           the exact case the warning must NOT flag — could not be written
+           down at all without it. */
+        statusCategory: 'statusCategory' in it ? it.statusCategory : null,
         parentKey: it.epic || null, components: [], labels: [], team: it.team || 'Katalon PS Squad',
         relatesTo: (it.relates || []).map(k => ({ key: k, summary: `linked ${k}`, type: 'Epic' })),
       };
@@ -867,8 +878,20 @@ check('AN UNKNOWN CELL IS REFUSED, and says what would have worked', () => {
   assert.strictEqual(at({ tool: 'katalon' }).ok, false);
   assert.strictEqual(at({ component: 'PS_iGO_Columbus' }).ok, false, 'an unranked component got a drawer');
   assert.deepStrictEqual(at({ cell: 'automated' }).known,
-    ['maintenance', 'ready', 'blocked', 'build', 'maint']);
+    ['maintenance', 'ready', 'blocked', 'build', 'maint', 'stuck-build', 'stuck-maint']);
   assert.strictEqual(at({ cell: 'automated' }).count, 0, 'a refusal still returned a count');
+
+  /* THE WARNING MARKERS ARE CELLS TOO, and refusable the same way. They list
+     the sprint's blocked ITEMS rather than the epics the column counts, so a
+     near-miss like `stuck` or `stuck-ready` must be refused rather than
+     quietly answered with an empty list. */
+  assert.strictEqual(at({ cell: 'stuck-build' }).ok, true, 'the build warning has no drawer');
+  assert.strictEqual(at({ cell: 'stuck-maint' }).ok, true, 'the maintenance warning has no drawer');
+  assert.strictEqual(at({ cell: 'stuck' }).ok, false, 'a half-named marker was answered');
+  assert.strictEqual(at({ cell: 'stuck-ready' }).ok, false, 'a marker for a column that has none was answered');
+  assert.strictEqual(at({ cell: 'stuck-build' }).kind, 'item',
+    'the drawer would announce Stories as epics');
+  assert.strictEqual(at({ cell: 'build' }).kind, 'epic');
 });
 
 /* ── 7. the shared walk ───────────────────────────────────────────────── */
@@ -941,6 +964,139 @@ check('an empty plan is an empty sheet, not an exception', () => {
 });
 
 /* ── run ──────────────────────────────────────────────────────────────── */
+
+/* ── 8. "this is planned, and it cannot be started" ───────────────────────
+ *
+ * A planned column counts SUITES with work in this sprint. It says nothing
+ * about whether that work can begin, and on this board it very often cannot:
+ * the item is in Refinement, or its Automation Status reads Blocked. "12
+ * planned" and "12 planned, 5 of them stuck" are different sprints, and only
+ * the first was ever on screen.
+ *
+ * The failures these pin are the quiet ones — a marker counting epics instead
+ * of items, a count that does not match the list it opens, a warning that
+ * leaks from the build column onto the maintenance one.
+ */
+
+/** A sprint where some of the planned work cannot be started. */
+const stuckSprint = () => withSprints({
+  s40: [
+    { key: 'S-OK', type: 'Story', epic: 'A-3' },                              // fine
+    { key: 'S-REF', type: 'Story', epic: 'A-3', status: 'Refinement' },       // the column
+    { key: 'S-AUTO', type: 'Story', epic: 'A-5', automationStatus: 'Blocked' }, // the field
+    { key: 'S-DONE', type: 'Story', epic: 'A-7', status: 'Refinement', statusCategory: 'done' },
+    { key: 'B-OK', type: 'Bucket Story', epic: 'A-99', relates: ['A-1'] },
+    { key: 'B-REF', type: 'Bucket Story', epic: 'A-99', relates: ['A-2'], status: 'Refinement' },
+  ],
+});
+
+const cellOf = (v, component, tool) => rowFor(v, component)[tool];
+
+check('A BLOCKED PLANNED ITEM IS FLAGGED AGAINST THE SUITE IT IS AGAINST', () => {
+  const v = build(stuckSprint(), PLAN());
+  /* ACROSS BOTH TOOLS. Which tool a suite lands on is a fact about the
+     fixture's component lists, not about the marker — pinning it here would
+     make this check a statement about the wrong thing. */
+  const flagged = v.tools.flatMap(t2 => cellOf(v, 'PS_iGO_NLG', t2.key).stuck.build);
+  assert.deepStrictEqual([...new Set(flagged)].sort(), ['S-AUTO', 'S-REF'],
+    'the blocked planned items were not recorded against their suites');
+  assert.ok(rowFor(v, 'PS_iGO_NLG').planned > 0, 'fixture check: there is planned work here');
+});
+
+check('BOTH SIGNALS COUNT — the Refinement column AND the automation field', () => {
+  /* Neither subsumes the other. In his store 226 open items carry the field
+     and only 131 are also in Refinement, so a marker reading one of them is
+     right about part of the sheet and silently wrong about the rest. */
+  const v = build(stuckSprint(), PLAN());
+  const stuck = v.tools.flatMap(t2 => cellOf(v, 'PS_iGO_NLG', t2.key).stuck.build);
+  assert.ok(stuck.includes('S-REF'), 'an item in Refinement was not flagged');
+  assert.ok(stuck.includes('S-AUTO'), 'an item marked Blocked for automation was not flagged');
+});
+
+check('AND FINISHED WORK IS NEVER FLAGGED', () => {
+  /* A done item in a Refinement-named column is a workflow quirk. Flagging it
+     would make the warning rise as the team finished work, which is the one
+     behaviour that would teach him to ignore it. */
+  const v = build(stuckSprint(), PLAN());
+  const all = v.tools.flatMap(t2 => ['build', 'maint'].flatMap(k => cellOf(v, 'PS_iGO_NLG', t2.key).stuck[k]));
+  assert.ok(!all.includes('S-DONE'), 'finished work in a Refinement column was flagged as blocked');
+});
+
+check('THE WARNING DOES NOT LEAK BETWEEN BUILD AND MAINTENANCE', () => {
+  /* One epic can be reached both ways in a sprint — a Story building it and a
+     Bucket Story maintaining it are two different cells. A marker keyed only
+     by epic would report one blocked item in both columns. */
+  const v = build(stuckSprint(), PLAN());
+  const nlg = cellOf(v, 'PS_iGO_NLG', 'kse');
+  assert.ok(!nlg.stuck.maint.includes('S-REF'),
+    'a blocked BUILD item was reported against the maintenance column');
+  const tt = cellOf(v, 'PS_iGO_NLG', 'truetest');
+  assert.ok(!tt.stuck.maint.includes('S-REF'));
+  assert.ok(tt.stuck.maint.includes('B-REF') || tt.stuck.build.length === 0,
+    'the blocked maintenance item is not against the maintenance column');
+});
+
+check('THE KEYS TRAVEL WITH THE MARKER — the count IS the list', () => {
+  /* Every other figure on this sheet already follows this. A marker saying 3
+     over a drawer of 2 is the failure mode that makes a warning worse than
+     none, because the reader stops believing the numbers beside it too. */
+  const snap = stuckSprint(), plan = PLAN();
+  const v = build(snap, plan);
+  for (const t of v.tools) {
+    for (const k of ['build', 'maint']) {
+      const keys = cellOf(v, 'PS_iGO_NLG', t.key).stuck[k];
+      const drawer = pz.sprintComponentCell(snap, plan, {
+        team: RUBY, sprint: sprintOf(plan, 's40'),
+        component: 'PS_iGO_NLG', tool: t.key, cell: `stuck-${k}`,
+      });
+      assert.strictEqual(drawer.count, keys.length,
+        `${t.key}/${k}: the marker says ${keys.length} and the drawer lists ${drawer.count}`);
+      assert.deepStrictEqual(drawer.epics.map(e => e.key).sort(), keys.slice().sort());
+    }
+  }
+});
+
+check('THE DRAWER LISTS ITEMS, NOT THE EPICS THE COLUMN COUNTS', () => {
+  /* The column counts suites; the marker counts the sprint's own Stories. A
+     drawer that listed the epics would be answering a question nobody asked,
+     under a heading promising the other one. */
+  const snap = stuckSprint(), plan = PLAN();
+  const d = pz.sprintComponentCell(snap, plan, {
+    team: RUBY, sprint: sprintOf(plan, 's40'),
+    component: 'PS_iGO_NLG', tool: 'kse', cell: 'stuck-build',
+  });
+  assert.strictEqual(d.kind, 'item');
+  assert.strictEqual(d.stuck, true);
+  assert.match(d.label, /blocked/i, 'the drawer heading does not say what it is listing');
+  for (const e of d.epics) assert.ok(/^S-/.test(e.key), `${e.key} is an epic, not a planned item`);
+});
+
+check('A CLEAN SPRINT CARRIES NO MARKER AT ALL', () => {
+  /* Empty arrays, not absent keys — the view reads `.stuck[kind].length` on
+     every cell it draws, and an undefined there is a blank column rather than
+     a zero. And a marker that is always present is one nobody reads. */
+  const v = build(withSprints({ s40: [{ key: 'S-1', type: 'Story', epic: 'A-3' }] }), PLAN());
+  for (const t of v.tools) {
+    for (const k of ['build', 'maint']) {
+      assert.deepStrictEqual(cellOf(v, 'PS_iGO_NLG', t.key).stuck[k], [],
+        `${t.key}/${k} has no stuck list on a clean sprint`);
+    }
+  }
+  assert.strictEqual(rowFor(v, 'PS_iGO_NLG').stuck, 0, 'a clean row reported blocked work');
+});
+
+check("THE ROW'S OWN COUNT IS DISTINCT ACROSS TOOLS", () => {
+  /* One Story blocking a suite that TrueTest and KSE both cover is ONE
+     blocked item. Summing the cells would make the row shout louder than the
+     truth — and A-2 is on both tools in this fixture, deliberately. */
+  const v = build(stuckSprint(), PLAN());
+  const row = rowFor(v, 'PS_iGO_NLG');
+  const summed = v.tools.reduce((n, t) => n
+    + row[t.key].stuck.build.length + row[t.key].stuck.maint.length, 0);
+  const distinct = new Set(v.tools.flatMap(t => [...row[t.key].stuck.build, ...row[t.key].stuck.maint])).size;
+  assert.strictEqual(row.stuck, distinct, 'the row count is not the distinct set');
+  assert.ok(summed >= distinct, 'fixture sanity');
+});
 
 for (const [name, fn] of checks) {
   try { fn(); console.log(`  \u001b[32m✓\u001b[0m ${name}`); passed++; }

@@ -240,19 +240,110 @@ check('cycle time is the median of created→resolved, ignoring absurd values', 
 /* ── backlog health ───────────────────────────────────────────────────── */
 
 check('ready to plan means estimated AND not blocked', () => {
+  /* WHAT "BLOCKED" IS HERE CHANGED, and this fixture was encoding the old
+     answer. It used to be `(i.blockedBy || []).length` — Jira's own link on
+     the item — and seven of the 5,418 non-epic issues in his store have one.
+     So this KPI read "0 blocked" for every team while 32 of Ruby's queue and
+     195 of Titan's sat in Refinement, and every estimated item was counted as
+     ready to plan, which is the figure the runway forecast is built on.
+
+     Now it is `insights.isBlocked`: in Refinement, or marked Blocked for
+     automation. B-3 keeps its link and is NOT blocked by it, which is the
+     point — that link is read on the EPIC by `epics.blockersFor`, and
+     counting it here too would represent one fact twice. */
   const { plan, snap } = delivery([{ number: 1, committed: 10, delivered: 10 }]);
-  snap.issues['B-1'] = { key: 'B-1', summary: 'ready', issueType: 'Story', status: 'Open', statusCategory: 'new', points: 5, components: [], labels: [], sprints: [], sprintNames: [], blockedBy: [] };
-  snap.issues['B-2'] = { key: 'B-2', summary: 'no estimate', issueType: 'Story', status: 'Open', statusCategory: 'new', points: null, components: [], labels: [], sprints: [], sprintNames: [], blockedBy: [] };
-  snap.issues['B-3'] = { key: 'B-3', summary: 'blocked', issueType: 'Story', status: 'Open', statusCategory: 'new', points: 8, components: [], labels: [], sprints: [], sprintNames: [], blockedBy: ['X-1'] };
-  snap.boardBacklogByTeam = { t1: ['B-1', 'B-2', 'B-3'] };
+  const row = (key, o) => ({
+    key, summary: key, issueType: 'Story', status: 'Open', statusCategory: 'new',
+    points: 5, components: [], labels: [], sprints: [], sprintNames: [], blockedBy: [], ...o,
+  });
+  snap.issues['B-1'] = row('B-1', {});                                        // ready
+  snap.issues['B-2'] = row('B-2', { points: null });                          // no estimate
+  snap.issues['B-3'] = row('B-3', { points: 8, blockedBy: ['X-1'] });         // a link, and NOT blocked
+  snap.issues['B-4'] = row('B-4', { points: 3, status: 'Refinement' });       // blocked: the column
+  snap.issues['B-5'] = row('B-5', { points: 2, automationStatus: 'Blocked' }); // blocked: the field
+  snap.issues['B-6'] = row('B-6', { points: 2, automationStatus: 'Ready for Automation' }); // ready
+  snap.boardBacklogByTeam = { t1: ['B-1', 'B-2', 'B-3', 'B-4', 'B-5', 'B-6'] };
   snap.byTeam = r.buildTeamIndex(plan, snap);
 
   const b = m.backlogHealth(plan, snap, TEAM);
-  assert.strictEqual(b.total, 3);
-  assert.strictEqual(b.ready.count, 1, 'only B-1 is both estimated and unblocked');
-  assert.strictEqual(b.ready.points, 5);
+  assert.strictEqual(b.total, 6);
+  assert.strictEqual(b.blocked.count, 2, 'the Blocked KPI does not count both signals');
+  const blocked = b.blocked.items.map(i => i.key).sort();
+  assert.deepStrictEqual(blocked, ['B-4', 'B-5'],
+    `the Blocked KPI counted ${JSON.stringify(blocked)} — a bare "is blocked by" link is not the signal here`);
+  assert.strictEqual(b.ready.count, 3, 'B-1, B-3 and B-6 are estimated and unblocked');
+  assert.strictEqual(b.ready.points, 15);
   assert.strictEqual(b.unestimated.count, 1);
-  assert.strictEqual(b.blocked.count, 1);
+});
+
+check('THE BLOCKED LIST IS THE WHOLE SET, not the first 50', () => {
+  /* It was capped when nothing read it. The Blocked KPI now opens a drawer
+     built from exactly these keys, and Titan's queue holds 195 of them — a
+     cap puts "195" over a list of 50 with nothing on screen to say why, which
+     is the failure every drill-in on this tool exists to prevent.
+
+     Sixty rows, because fifty would pass against the cap itself. */
+  const { plan, snap } = delivery([{ number: 1, committed: 10, delivered: 10 }]);
+  const keys = [];
+  for (let n = 0; n < 60; n++) {
+    const key = `BLK-${String(n).padStart(3, '0')}`;
+    keys.push(key);
+    snap.issues[key] = {
+      key, summary: key, issueType: 'Story', status: 'Refinement', statusCategory: 'new',
+      points: 1, components: [], labels: [], sprints: [], sprintNames: [], blockedBy: [],
+    };
+  }
+  snap.boardBacklogByTeam = { t1: keys };
+  snap.byTeam = r.buildTeamIndex(plan, snap);
+
+  const b = m.backlogHealth(plan, snap, TEAM);
+  assert.strictEqual(b.blocked.count, 60, 'fixture check: all sixty are blocked');
+  assert.strictEqual(b.blocked.items.length, b.blocked.count,
+    `the KPI counts ${b.blocked.count} and ships ${b.blocked.items.length} keys — the drawer cannot list what it was not sent`);
+});
+
+check('EVERY SPRINT SECTION ROW CARRIES A CATEGORY', () => {
+  /* THE BLANK-COLUMN BUG. The queue gets its category from `backlogHealth`,
+     which maps each item through `cls.classify` on the way out; the sprint
+     sections were reading the snapshot straight and arrived with no
+     `category` at all. On screen that is an empty cell in the column the
+     reader uses to tell new build from maintenance — which looks like
+     "uncategorised work", a real state, and the wrong answer.
+
+     Checked against the QUEUE's own classification rather than a hard-coded
+     label, because the point is not which category each row gets; it is that
+     the two halves of one screen are classified by the same rule. */
+  const { plan, snap } = delivery([{ number: 1, committed: 10, delivered: 10, state: 'active' }]);
+  const row = (key, o) => ({
+    key, summary: key, issueType: 'Story', status: 'Open', statusCategory: 'new',
+    points: 5, components: [], labels: [], sprints: [], sprintNames: [], blockedBy: [], ...o,
+  });
+  /* A SECTION NEEDS AN OPEN SPRINT WITH A JIRA ID — the same two conditions
+     the board applies, stated here rather than hoped for, so a fixture that
+     stops meeting them fails on the line above rather than as a silent zero. */
+  const sp = plan.sprints[0];
+  const jiraId = '501';
+  sp.byTeam = { [TEAM.id]: { jiraId, name: sp.name, state: 'active' } };
+  snap.issues['P-1'] = row('P-1', { sprints: [{ id: jiraId, name: sp.name, state: 'active' }] });
+  snap.issues['P-2'] = row('P-2', { issueType: 'Bucket Story', sprints: [{ id: jiraId, name: sp.name, state: 'active' }] });
+  snap.boardBacklogByTeam = { t1: [] };
+  snap.byTeam = r.buildTeamIndex(plan, snap);
+
+  const board = insights.backlogBoard(plan, snap, TEAM);
+  const rows = board.sections.flatMap(s => s.items);
+  assert.ok(rows.length >= 2, `fixture check: the sprint sections hold ${rows.length} rows`);
+  for (const i of rows) {
+    assert.ok(i.category, `${i.key} reached the sprint section with no category, so its cell draws blank`);
+  }
+
+  /* AND THE SAME RULE AS THE QUEUE. Classifying with a second copy of the
+     rules is how one screen comes to call a Bucket Story maintenance and the
+     other call it new. */
+  const cls = require('../lib/classify');
+  for (const i of rows) {
+    assert.strictEqual(i.category, cls.classify(snap.issues[i.key], plan.categoryRules),
+      `${i.key} is classified differently in the sprint section than everywhere else`);
+  }
 });
 
 check('AN EPIC IS NOT A BACKLOG ITEM, on this page either', () => {

@@ -331,6 +331,17 @@ async function renderCapacity(snap = SNAP, plan = PLAN, sprint = SPRINT, opts = 
   };
   const body = mkNode();
   const printOnly = mkNode();          // the node `[data-bycomp]` resolves to
+  /* A REAL <head> THAT KEEPS WHAT IS APPENDED. Paper orientation cannot be a
+     class — `@page` is a document-level at-rule and no selector reaches it —
+     so it is injected as a style element for the duration of one print and
+     removed again. That makes "is it there AT print time" and "is it gone
+     afterwards" two different questions, and a head that swallowed appends
+     could answer neither. */
+  const head = {
+    kids: [],
+    appendChild(n) { n.parentNode = head; head.kids.push(n); return n; },
+    removeChild(n) { head.kids = head.kids.filter(x => x !== n); n.parentNode = null; return n; },
+  };
   const ctx = {
     console, Promise, setTimeout, clearTimeout, encodeURIComponent, CSS: { escape: String },
     App: { refresh() {} },
@@ -338,7 +349,10 @@ async function renderCapacity(snap = SNAP, plan = PLAN, sprint = SPRINT, opts = 
     document: {
       title: 'Planning Tool',
       body,
-      createElement: () => el(),
+      head,
+      createElement: (tag) => (tag === 'style'
+        ? { tag, textContent: '', attrs: {}, setAttribute(k, v) { this.attrs[k] = v; }, parentNode: null }
+        : el()),
       querySelector: (sel) => (sel === '[data-bycomp]' ? printOnly : el()),
       querySelectorAll: () => [],
     },
@@ -351,6 +365,8 @@ async function renderCapacity(snap = SNAP, plan = PLAN, sprint = SPRINT, opts = 
           title: ctx.document.title,
           body: classesOf(body),
           section: classesOf(printOnly),
+          // What the page rule says AT PRINT TIME — the only moment it matters.
+          page: head.kids.filter(n => n.tag === 'style').map(n => n.textContent),
         });
       },
     },
@@ -478,7 +494,7 @@ async function renderCapacity(snap = SNAP, plan = PLAN, sprint = SPRINT, opts = 
   }, mount);
   // `html` is read through a getter so a check that clicks and then reads
   // sees the redrawn page, not the one captured at render time.
-  return { get html() { return html; }, payload, mount, printed, puts };
+  return { get html() { return html; }, payload, mount, printed, puts, head, ctx };
 }
 
 /**
@@ -662,7 +678,10 @@ const BC_PLAN = {
   ...PLAN,
   sprints: [BC_SPRINT, BC_NEXT],
   teams: [{ ...TEAM, jiraTeams: ['Katalon Auto Titan'] }],
-  componentPriority: { PS_iGO_NLG: 1, KAT_Common: 2, PS_RES_NLG: 3 },
+  /* A FOURTH RANKED SUITE, for the one-item-many-cells case below. It could
+     not go on PS_iGO_NLG (half a dozen checks pin those cells) nor on
+     PS_RES_NLG (which is the designated CLEAR row three more checks need). */
+  componentPriority: { PS_iGO_NLG: 1, KAT_Common: 2, PS_RES_NLG: 3, PS_MAINT_NLG: 4 },
   /* A note on a BUSY row and a note on a CLEAR one. The clear row folds
      away by default, so a fixture whose only note sits there makes every
      check on the note box assert against markup that was never drawn. */
@@ -691,6 +710,45 @@ const BC_SNAP = {
       key: 'S-1', summary: 'S-1', issueType: 'Story', status: 'In Dev', parentKey: 'E-4',
       components: [], labels: [], team: 'Katalon Auto Titan', relatesTo: [],
     },
+    /* PLANNED AND UNSTARTABLE — one per signal, so a marker reading only the
+       Refinement column and one reading only the automation field are
+       distinguishable. Both build E-2, which is on KSE only, so the marker
+       lands on a real cell rather than on a row that draws nothing. */
+    'S-3': {
+      key: 'S-3', summary: 'S-3', issueType: 'Story', status: 'Refinement', parentKey: 'E-2',
+      components: [], labels: [], team: 'Katalon Auto Titan', relatesTo: [],
+    },
+    'S-4': {
+      key: 'S-4', summary: 'S-4', issueType: 'Story', status: 'In Dev', parentKey: 'E-2',
+      automationStatus: 'Blocked',
+      components: [], labels: [], team: 'Katalon Auto Titan', relatesTo: [],
+    },
+    /* ── ONE BLOCKED ITEM, SEVERAL DESTINATIONS ──────────────────────
+       A Bucket Story maintaining THREE epics on PS_MAINT_NLG — E-7 and E-10
+       on KSE, E-8 on TrueTest. It is ONE blocked item, and it reaches the
+       KSE cell TWICE and the TrueTest cell once.
+
+       ON ITS OWN RANKED COMPONENT, so it cannot disturb the PS_iGO_NLG
+       cells half a dozen other checks pin, nor PS_RES_NLG which three more
+       need to stay clear.
+   
+       Without a row like this, "de-duplicate within a cell" and "count the
+       row distinctly across tools" are both unfalsifiable — dropping either
+       changes no number in the fixture, which is exactly how both survived a
+       mutation run. */
+    'E-7': bcEpic('E-7', ['PS_MAINT_NLG'], 'Maintenance'),
+    'E-8': bcEpic('E-8', ['PS_MAINT_NLG', 'TrueTest'], 'Maintenance'),
+    'B-1': {
+      key: 'B-1', summary: 'B-1', issueType: 'Bucket Story', status: 'Refinement', parentKey: 'E-9',
+      components: [], labels: [], team: 'Katalon Auto Titan',
+      relatesTo: [
+        { key: 'E-7', summary: 'E-7', type: 'Epic' },
+        { key: 'E-8', summary: 'E-8', type: 'Epic' },
+        { key: 'E-10', summary: 'E-10', type: 'Epic' },
+      ],
+    },
+    'E-9': bcEpic('E-9', ['KAT_Common'], 'Automated'),
+    'E-10': bcEpic('E-10', ['PS_MAINT_NLG'], 'Maintenance'),
     // Queued for the FUTURE sprint against a backlog epic: it must stay in
     // the backlog AND be reported as earmarked.
     'E-5': bcEpic('E-5', ['PS_iGO_NLG'], 'Ready for Automation'),
@@ -703,7 +761,7 @@ const BC_SNAP = {
      `capacityView` takes the fast path through this index, so indexing only
      S-1 would quietly shrink the item table to one row and take several
      checks on that table with it. */
-  byTeam: { titan: { sprintIssues: { 900: [...Object.keys(SNAP.issues), 'S-1'], 901: ['S-2'] } } },
+  byTeam: { titan: { sprintIssues: { 900: [...Object.keys(SNAP.issues), 'S-1', 'S-3', 'S-4', 'B-1'], 901: ['S-2'] } } },
 };
 
 const renderByComp = () => renderCapacity(BC_SNAP, BC_PLAN, BC_SPRINT);
@@ -1147,6 +1205,49 @@ check('EXPORT PDF PRINTS THIS SECTION ALONE, under a name you can file', async (
   assert.match(at.title, /Katalon Titan Sprint 40/, 'nor which sprint');
   assert.match(at.title, /by component/i, 'nor which table');
   assert.ok(!/[\\/:*?"<>|]/.test(at.title), 'a filename cannot carry path characters');
+});
+
+check('AND IT PRINTS LANDSCAPE, because the sheet is sixteen columns wide', async () => {
+  /* Two tools times three backlog buckets, two planned columns each, plus
+     priority and the note. On portrait A4 the right-hand half either shrinks
+     to unreadable or lands on a second sheet that has lost its row labels.
+
+     READ AT PRINT TIME. The rule is a style element injected for this print
+     and removed again — asserting on it afterwards would find nothing and
+     say nothing, which is how a check on this could pass against an export
+     that came out portrait. */
+  const r = await renderByComp();
+  await r.mount.click({ act: 'bc-export-pdf' });
+  const at = r.printed[0];
+  assert.ok(at.page.length, 'no page rule was in force when the browser printed');
+  assert.match(at.page.join(' '), /@page\s*\{[^}]*landscape/,
+    `the sheet printed portrait — the page rule said "${at.page.join(' ')}"`);
+  assert.match(at.page.join(' '), /margin/,
+    'landscape without a narrower margin gives back less width than the rotation gained');
+});
+
+check('AND THE ORIENTATION RULE DOES NOT OUTLIVE THE PRINT', async () => {
+  /* `@page` is document-level: a leftover node here silently rotates the
+     next export somebody runs from a different screen, and nothing on that
+     screen would explain it. */
+  const r = await renderByComp();
+  await r.mount.click({ act: 'bc-export-pdf' });
+  assert.ok(r.head.kids.some(n => n.tag === 'style'), 'fixture check: the rule was injected at all');
+
+  r.ctx.window._on.afterprint();
+  assert.deepStrictEqual(r.head.kids.filter(n => n.tag === 'style'), [],
+    'the landscape rule is still in the document, so every later export is rotated too');
+});
+
+check('AND ONLY THE EXPORT THAT ASKED FOR IT IS ROTATED', async () => {
+  /* The narrow one-column screens would waste half a sheet in landscape, so
+     orientation is asked for per export rather than set once in the
+     stylesheet — where it would apply to every print in the app. */
+  const r = await renderByComp();
+  r.ctx.UI.exportPdf('something narrow', { only: '[data-bycomp]' });
+  const at = r.printed[r.printed.length - 1];
+  assert.deepStrictEqual(at.page, [],
+    'an export that did not ask for landscape got it anyway');
 });
 
 check('AND IT PUTS THE PAGE BACK AFTERWARDS', async () => {
@@ -3329,3 +3430,170 @@ check('A CLOSED SPRINT WIRES NO SAVE HANDLER, belt as well as braces', async () 
   fs.rmSync(SCRATCH, { recursive: true, force: true });
   process.exit(failed ? 1 : 0);
 })();
+
+/* ── THE "CANNOT BE STARTED" MARKER ───────────────────────────────────────
+ *
+ * The By-component sheet counts SUITES with work planned this sprint. It says
+ * nothing about whether that work can begin — and on this board it often
+ * cannot: the item is in Refinement, or its Automation Status reads Blocked.
+ * "12 planned" and "12 planned, 5 of them stuck" are different sprints, and
+ * only the first was ever on screen.
+ *
+ * The model checks live in by-component.test.js. These are about the RENDER:
+ * that the marker is drawn where the data says it should be, that it is a
+ * control a keyboard can reach, and that it is absent when nothing is stuck —
+ * a warning that is always there is one nobody reads.
+ */
+
+/** Every marker the sheet drew, as {row, tool, cell, n}. */
+const marksIn = (html) => [...html.matchAll(/<button type="button" class="stuck-mark"[^>]*>/g)]
+  .map(m => ({
+    n: Number((m[0].match(/data-n="(\d+)"/) || [])[1]),
+    row: (m[0].match(/data-row="([^"]*)"/) || [])[1],
+    tool: (m[0].match(/data-tool="([^"]*)"/) || [])[1],
+    cell: (m[0].match(/data-cell="([^"]*)"/) || [])[1],
+  }));
+
+check('A PLANNED NUMBER WITH BLOCKED WORK BEHIND IT CARRIES A MARKER', async () => {
+  const r = await renderByComp();
+  const bc = r.payload.byComponent;
+  /* DRIVEN OFF THE PAYLOAD, not off a hand-written expectation. The sheet's
+     own numbers decide where a marker belongs; a check asserting a fixed list
+     would go stale the first time the fixture's sprint changed and would then
+     be testing the fixture rather than the render. */
+  const want = [];
+  for (const row of bc.rows) {
+    for (const t of bc.tools) {
+      for (const col of bc.plannedCols) {
+        const keys = ((row[t.key] || {}).stuck || {})[col.key] || [];
+        if (keys.length) want.push({ row: row.component, tool: t.key, cell: `stuck-${col.key}`, n: keys.length });
+      }
+    }
+  }
+  const got = marksIn(r.html);
+  assert.deepStrictEqual(
+    got.slice().sort((a, b) => `${a.row}${a.tool}${a.cell}`.localeCompare(`${b.row}${b.tool}${b.cell}`)),
+    want.slice().sort((a, b) => `${a.row}${a.tool}${a.cell}`.localeCompare(`${b.row}${b.tool}${b.cell}`)),
+    'the markers drawn do not match the blocked work the sheet counted');
+});
+
+check('AND NO MARKER IS DRAWN WHERE NOTHING IS BLOCKED', async () => {
+  /* The property that makes the marker worth having. One on every planned
+     cell is furniture; the whole signal is that it is unusual. */
+  const r = await renderByComp();
+  const bc = r.payload.byComponent;
+  const cells = bc.rows.length * bc.tools.length * bc.plannedCols.length;
+  const marks = marksIn(r.html).length;
+  assert.ok(marks < cells, `every one of the ${cells} planned cells drew a marker`);
+  for (const m of marksIn(r.html)) {
+    assert.ok(m.n > 0, `${m.row}/${m.tool}/${m.cell} drew a marker for zero blocked items`);
+  }
+});
+
+check('THE MARKER CARRIES ITS OWN COUNT, because its text is "!"', async () => {
+  /* The drawer compares what the cell SHOWED against what the route returns,
+     so that a stale redraw is reported rather than silently papered over. It
+     reads that number off the control's text — and this control's text is an
+     exclamation mark, which scrapes to 0. Without `data-n` every open would
+     announce that the sheet had changed since it was clicked. */
+  const html = (await renderByComp()).html;
+  const marks = [...html.matchAll(/<button type="button" class="stuck-mark"[^>]*>(.*?)<\/button>/g)];
+  assert.ok(marks.length, 'fixture check: the sheet has at least one marker');
+  for (const m of marks) {
+    assert.strictEqual(m[1], '!', 'the marker is no longer an exclamation mark');
+    assert.match(m[0], /data-n="\d+"/, 'the marker does not carry its count');
+  }
+});
+
+check('IT IS A BUTTON A KEYBOARD CAN REACH, and it says what it opens', async () => {
+  /* The same rule `UI.drillNumber` follows for the numbers it sits beside:
+     this opens a list, so it is an action, and an action has to be reachable
+     and announced. A styled <span> would be neither. */
+  const html = (await renderByComp()).html;
+  const marks = [...html.matchAll(/<button type="button" class="stuck-mark"[^>]*>/g)].map(m => m[0]);
+  assert.ok(marks.length, 'fixture check');
+  for (const m of marks) {
+    assert.match(m, /aria-label="[^"]+"/, 'the marker has no accessible name');
+    assert.match(m, /title="[^"]*Refinement[^"]*"/,
+      'the tooltip does not say what "blocked" means here');
+    assert.match(m, /data-act="bc-epics"/, 'the marker does not open the drill-in');
+  }
+});
+
+check('AND THE ROW SAYS HOW MUCH OF ITS OWN PLAN IS STUCK', async () => {
+  const r = await renderByComp();
+  const bc = r.payload.byComponent;
+  const html = r.html;
+  for (const row of bc.rows.filter(x => x.stuck)) {
+    assert.ok(html.includes(`>${row.stuck} blocked<`),
+      `${row.component} has ${row.stuck} blocked planned items and no tag on the row`);
+  }
+  for (const row of bc.rows.filter(x => !x.stuck)) {
+    const at = html.indexOf(`>${row.component}<`);
+    if (at < 0) continue;
+    const near = html.slice(at, at + 400);
+    assert.ok(!/ blocked</.test(near), `${row.component} has nothing stuck and drew a tag anyway`);
+  }
+});
+
+check('ONE BLOCKED ITEM REACHING A CELL TWICE IS COUNTED ONCE', async () => {
+  /* B-1 maintains E-7 and E-10, both KSE suites on PS_MAINT_NLG. It is ONE
+     Bucket Story sitting in Refinement. Recorded per epic without a guard it
+     lands in that one cell twice, and the marker beside a number reading 2
+     says 2 while the drawer behind it lists one row. */
+  const r = await renderByComp();
+  const row = r.payload.byComponent.rows.find(x => x.component === 'PS_MAINT_NLG');
+  assert.ok(row, 'fixture check: the component is ranked');
+  assert.deepStrictEqual(row.kse.stuck.maint, ['B-1'],
+    `the KSE maintenance cell recorded ${JSON.stringify(row.kse.stuck.maint)} — it maintains two suites there, but it is one item`);
+  assert.deepStrictEqual(row.truetest.stuck.maint, ['B-1'],
+    'the TrueTest suite it also maintains did not get the marker');
+});
+
+check("AND THE ROW'S OWN COUNT IS DISTINCT ACROSS TOOLS", async () => {
+  /* Same item, both tools. Summing the cells makes the row shout 2 about one
+     blocked Bucket Story — and the row tag is the figure he reads first. */
+  const r = await renderByComp();
+  const row = r.payload.byComponent.rows.find(x => x.component === 'PS_MAINT_NLG');
+  const summed = r.payload.byComponent.tools.reduce((n, tl) => n
+    + row[tl.key].stuck.build.length + row[tl.key].stuck.maint.length, 0);
+  assert.strictEqual(summed, 2, 'fixture check: the item has to reach both tools, or this proves nothing');
+  assert.strictEqual(row.stuck, 1, `the row reports ${row.stuck} blocked items for one Bucket Story`);
+  assert.ok(r.html.includes('>1 blocked<'), 'the row tag does not show the distinct count');
+});
+
+check('CLICKING A MARKER OPENS ITS OWN LIST, and does not cry stale', async () => {
+  /* End to end. Two things at once: the drawer lists the blocked ITEMS
+     rather than the epics the column counts, and it does not announce that
+     the sheet has been redrawn — which it would on every single open if the
+     count were scraped off the control's text, because that text is "!". */
+  const r = await renderByComp();
+  const row = r.payload.byComponent.rows.find(x => x.component === 'PS_MAINT_NLG');
+  const n = row.kse.stuck.maint.length;
+  assert.ok(n, 'fixture check: there is something to open');
+
+  await r.mount.click({ act: 'bc-epics', row: 'PS_MAINT_NLG', tool: 'kse', cell: 'stuck-maint', n: String(n), __text: '!' });
+  const d = r.mount.drawn;
+  assert.ok(d, 'no drawer opened');
+  for (const k of row.kse.stuck.maint) assert.ok(d.includes(k), `the drawer does not list ${k}`);
+  assert.ok(!/redrawn since this was opened/.test(d),
+    'the drawer claims the sheet changed — the count was read off the "!" instead of data-n');
+  assert.ok(/Refinement/.test(d), 'the drawer does not say why these are blocked');
+  assert.ok(!/epics\./.test(d), 'the drawer calls the planned items epics');
+});
+
+check('AND A STALE MARKER SAYS SO, which is the whole reason it carries a count', async () => {
+  /* The drawer compares what the control SHOWED against what the route
+     returns, so a sheet redrawn under the reader is reported rather than
+     silently papered over. That comparison needs the marker's own count —
+     and the marker's text is "!", which scrapes to 0. Zero reads as "no
+     count given", so the warning would never fire: the failure is not a
+     wrong message, it is a missing one, on the only occasion it matters.
+
+     Driven by handing the click a count the route will disagree with, which
+     is the one way to tell "compared and agreed" from "never compared". */
+  const r = await renderByComp();
+  await r.mount.click({ act: 'bc-epics', row: 'PS_MAINT_NLG', tool: 'kse', cell: 'stuck-maint', n: '99', __text: '!' });
+  assert.match(r.mount.drawn, /The cell says 99/,
+    'a marker showing a stale count opened its drawer without a word about it');
+});
