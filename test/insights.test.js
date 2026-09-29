@@ -94,6 +94,14 @@ const SNAP = {
     issue({ key: 'D-1', assignee: 'Hien Phan', points: 8, components: ['R&D_iGO_E2E'] }),
     issue({ key: 'D-2', points: 5, components: ['R&D_iGO_E2E'], team: 'Katalon Auto Titan' }),
     issue({ key: 'D-3', points: null, components: ['R&D_iGO_E2E'], team: 'Katalon Auto Titan' }),
+    /* EPICS IN THE BACKLOG POOL. They satisfy every other backlog condition —
+       no sprint, not done, this team's work — and they are NOT backlog items:
+       an epic is the container, never the thing pulled into a sprint. On his
+       data 1,283 of Titan's 1,857 "backlog items" were epics, so the page
+       claimed seven sprints of work where there were two. Two of them, with
+       points, so a leak shows in `count` AND in `totalPoints`. */
+    issue({ key: 'E-1', issueType: 'Epic', points: 21, components: ['R&D_iGO_E2E'], team: 'Katalon Auto Titan' }),
+    issue({ key: 'E-2', issueType: 'Epic', points: 13, components: ['R&D_iGO_E2E'], team: 'Katalon Auto Titan' }),
   ].map(i => [i.key, i])),
   testops: { projects: [] }, github: {}, verification: [],
 };
@@ -553,6 +561,38 @@ await check('future days have no actual value, so the line stops at today', () =
 });
 
 /* ── backlog ──────────────────────────────────────────────────────────── */
+await check('AN EPIC IS NOT A BACKLOG ITEM', () => {
+  /* The container is never the thing you pull into a sprint — it is finished
+     when its children are. Counting epics made Titan's queue read 1,857 when
+     the real number was 574, which is the difference between "two sprints of
+     work" and "seven". */
+  const v = insights.backlogView(PLAN, SNAP, { teamId: 'titan' }).teams[0];
+  assert.ok(!v.items.some(i => /^epic$/i.test(i.issueType)), 'an epic is in the backlog list');
+  assert.ok(!v.items.some(i => i.key === 'E-1' || i.key === 'E-2'), 'by key, too');
+  // It has to come out of the derived numbers as well, not just the list —
+  // a points total that still carries them misreports the sprints of work.
+  assert.strictEqual(v.count, 3, 'the count still includes epics');
+  assert.strictEqual(v.totalPoints, 13, 'the points total still includes epics');
+});
+
+await check('and the epics it left out are COUNTED, not dropped in silence', () => {
+  /* A figure that falls by two thirds between releases has to explain
+     itself, or the page is the hardest kind of report to trust again. */
+  const v = insights.backlogView(PLAN, SNAP, { teamId: 'titan' }).teams[0];
+  assert.strictEqual(v.epicsExcluded, 2, 'the page cannot say how many it removed');
+  assert.strictEqual(v.scanned, v.count + v.epicsExcluded, 'the two numbers do not reconcile');
+});
+
+await check('THE UNCLAIMED PILE USES THE SAME DEFINITION', () => {
+  /* It is "backlog work on nobody's board", so it has to mean the same thing
+     by "backlog work" — otherwise two numbers on one screen answer different
+     questions and the epics reappear in the pile beside the list that
+     deliberately excluded them. */
+  const v = insights.backlogView(PLAN, SNAP, {});
+  assert.ok(!v.unclaimed.items.some(i => /^epic$/i.test(i.issueType)),
+    'an epic reappeared in the unclaimed pile');
+});
+
 await check('backlog excludes anything already committed to a sprint', () => {
   const v = insights.backlogView(PLAN, SNAP, { teamId: 'titan' }).teams[0];
   assert.ok(!v.items.some(i => i.key.startsWith('A-')), 'sprint items must not appear in the backlog');

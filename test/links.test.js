@@ -125,8 +125,15 @@ check('THE BASE URL IS SET FROM /api/state ON EVERY ADOPT, NOT ONLY AT BOOT', ()
   const adopt = app.slice(app.indexOf('function adopt(s)'), app.indexOf('function adopt(s)') + 900);
   assert.match(adopt, /UI\.setJiraBase\(/, 'adopt() is what runs on every state fetch');
 
+  /* BOUNDED BY THE NEXT ROUTE, not by a byte count. This slice was a fixed
+     2,600 characters, which is a check that fails when somebody adds a
+     COMMENT to the route — and it did. A behavioural assertion that breaks on
+     prose is one people learn to edit around rather than read. */
   const server = read(__dirname, '..', 'server.js');
-  const state = server.slice(server.indexOf("p === '/api/state'"), server.indexOf("p === '/api/state'") + 2600);
+  const at = server.indexOf("p === '/api/state'");
+  assert.ok(at > 0, 'the /api/state route has moved or been renamed');
+  const nextRoute = server.indexOf("if (p === '", at + 10);
+  const state = server.slice(at, nextRoute > at ? nextRoute : server.length);
   assert.match(state, /jiraBase:/, '/api/state must carry the base, or the UI has nothing to set');
 });
 
@@ -554,6 +561,8 @@ check('NO VIEW PRINTS AN ISSUE KEY WITHOUT GOING THROUGH THE HELPER', () => {
     // f.key — a component family's slug ('ps', 'rnd'); b.key — a coverage
     // bucket's slug ('automated', 'blocked'), on the column switches.
     'prioritization.js': ['f', 'b'],
+    // f.key — the same component-family slug, on the "By component" chips.
+    'capacity.js': ['f'],
   };
 
   const offenders = [];

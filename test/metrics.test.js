@@ -12,6 +12,8 @@
 const assert = require('node:assert');
 const m = require('../lib/metrics');
 const r = require('../lib/reconcile');
+const insights = require('../lib/insights');
+const backlogLib = require('../lib/backlog-item');
 
 let passed = 0, failed = 0;
 function check(name, fn) {
@@ -251,6 +253,109 @@ check('ready to plan means estimated AND not blocked', () => {
   assert.strictEqual(b.ready.points, 5);
   assert.strictEqual(b.unestimated.count, 1);
   assert.strictEqual(b.blocked.count, 1);
+});
+
+check('AN EPIC IS NOT A BACKLOG ITEM, on this page either', () => {
+  /* THE 1,857 DEFECT. The Backlog screen and the Backlog view read the same
+     index through two different pieces of code, and an epic filter added to
+     one of them leaves the other reporting the old number — which is exactly
+     how Titan's page claimed 1,857 items and seven sprints of runway when
+     574 items and two sprints was the truth. */
+  const { plan, snap } = delivery([{ number: 1, committed: 10, delivered: 10 }]);
+  const item = (key, o) => ({
+    key, summary: key, issueType: 'Story', status: 'Open', statusCategory: 'new',
+    points: 5, components: [], labels: [], sprints: [], sprintNames: [], blockedBy: [], ...o,
+  });
+  snap.issues['B-1'] = item('B-1');
+  // Estimated epics, so a leak shows in the points and the runway too, not
+  // only in the count.
+  snap.issues['E-1'] = item('E-1', { issueType: 'Epic', points: 21 });
+  snap.issues['E-2'] = item('E-2', { issueType: 'Epic', points: 13 });
+  snap.boardBacklogByTeam = { t1: ['B-1', 'E-1', 'E-2'] };
+  snap.byTeam = r.buildTeamIndex(plan, snap);
+
+  const b = m.backlogHealth(plan, snap, TEAM);
+  assert.strictEqual(b.total, 1, 'the page still counts epics as backlog items');
+  assert.strictEqual(b.points, 5, 'and still adds their points into the runway');
+  assert.strictEqual(b.ready.count, 1);
+  // Counted rather than dropped in silence — a figure that falls by two
+  // thirds has to explain itself.
+  assert.strictEqual(b.epicsExcluded, 2, 'the page cannot say how many it removed');
+  assert.strictEqual(b.scanned, 3, 'nor what it started from');
+  assert.strictEqual(b.scanned, b.total + b.epicsExcluded, 'the two numbers do not reconcile');
+});
+
+check('EVERY READER OF THE BACKLOG AGREES ON WHAT IT COUNTS', () => {
+  /* THE 1,877-vs-594 DEFECT, and the check that would have caught it.
+     The same index has four readers — the Backlog view's list, this page's
+     KPIs, the team index the SIDEBAR shows, and reconcile's own setup
+     summary. Fixing two of them left the sidebar 1,283 ahead of the page,
+     which is the worst version: both numbers on screen at once, neither
+     wrong-looking alone, and the one a reader trusts is whichever they saw
+     first. They now share `lib/backlog-item.js`, and this compares them. */
+  const { plan, snap } = delivery([{ number: 1, committed: 10, delivered: 10 }]);
+  const item = (key, o) => ({
+    key, summary: key, issueType: 'Story', status: 'Open', statusCategory: 'new',
+    points: 5, components: [], labels: [], sprints: [], sprintNames: [], blockedBy: [], ...o,
+  });
+  snap.issues['B-1'] = item('B-1');
+  snap.issues['B-2'] = item('B-2', { points: 3 });
+  snap.issues['E-1'] = item('E-1', { issueType: 'Epic', points: 21 });
+  snap.issues['E-2'] = item('E-2', { issueType: 'Epic', points: 13 });
+  snap.boardBacklogByTeam = { t1: ['B-1', 'B-2', 'E-1', 'E-2'] };
+  snap.byTeam = r.buildTeamIndex(plan, snap);
+
+  const page = m.backlogHealth(plan, snap, TEAM);
+  const view = insights.backlogView(plan, snap, { teamId: TEAM.id }).teams[0];
+  const idx = snap.byTeam[TEAM.id];
+
+  assert.strictEqual(page.total, 2, 'the page counts epics');
+  assert.strictEqual(view.count, 2, 'the view counts epics');
+  assert.strictEqual(idx.backlogCount, 2, 'the SIDEBAR counts epics');
+  assert.strictEqual(idx.backlogPoints, 8, 'and adds their points into the sidebar total');
+  // The three agree — which is the property, not the individual numbers.
+  assert.strictEqual(page.total, view.count, 'the page and the view disagree');
+  assert.strictEqual(page.total, idx.backlogCount, 'the page and the sidebar disagree');
+  assert.strictEqual(page.points, idx.backlogPoints, 'their points disagree');
+
+  // And each says what it left out, so a count that fell can explain itself.
+  assert.strictEqual(idx.backlogEpics, 2);
+  assert.strictEqual(idx.backlogScanned, 4);
+  assert.strictEqual(page.epicsExcluded, 2);
+  assert.strictEqual(view.epicsExcluded, 2);
+  // The RAW list stays raw: `backlogSource: 'board'` is a claim about it.
+  assert.strictEqual((idx.backlog || []).length, 4, 'the board\'s own list was rewritten');
+
+  /* AND THE SIDEBAR'S OWN READ AGREES — the figures the bootstrap route
+     computes at READ time, which is what makes a correction land before the
+     next full sync rather than after it. */
+  const side = backlogLib.figuresFor(snap, idx);
+  assert.strictEqual(side.count, page.total, 'the sidebar read disagrees with the page');
+  assert.strictEqual(side.points, page.points);
+  assert.strictEqual(side.scanned, 4);
+  assert.strictEqual(side.excluded, 2);
+});
+
+check('AND IT IS RIGHT BEFORE A RE-SYNC, off a STALE index', () => {
+  /* The whole reason the count is computed at read time. An index written by
+     an older build carries the old `backlogCount`; the sidebar must not show
+     it. Simulated by writing the pre-fix numbers back onto the index. */
+  const { plan, snap } = delivery([{ number: 1, committed: 10, delivered: 10 }]);
+  const item = (key, o) => ({
+    key, summary: key, issueType: 'Story', status: 'Open', statusCategory: 'new',
+    points: 5, components: [], labels: [], sprints: [], sprintNames: [], blockedBy: [], ...o,
+  });
+  snap.issues['B-1'] = item('B-1');
+  snap.issues['E-1'] = item('E-1', { issueType: 'Epic', points: 21 });
+  snap.boardBacklogByTeam = { t1: ['B-1', 'E-1'] };
+  snap.byTeam = r.buildTeamIndex(plan, snap);
+  // What a pre-fix sync would have stored.
+  snap.byTeam[TEAM.id].backlogCount = 2;
+  snap.byTeam[TEAM.id].backlogPoints = 26;
+
+  const side = backlogLib.figuresFor(snap, snap.byTeam[TEAM.id]);
+  assert.strictEqual(side.count, 1, 'the sidebar read the stale stored count');
+  assert.strictEqual(side.points, 5, 'and the stale stored points');
 });
 
 check('THE BOARD FILTER REACHES THE BACKLOG PAYLOAD, index and all', () => {

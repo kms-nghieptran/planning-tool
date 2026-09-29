@@ -186,6 +186,12 @@ const PLAN = () => ({
   // nowhere else at all, so a migration that drops it cannot be repaired by
   // re-syncing anything.
   componentNote: { 'R&D_Sig_Regression': 'client asked us to hold until the Q3 release' },
+  /* And the order he dragged them into WITHIN a level. Same argument again:
+     nothing in Jira expresses "of my P1s, this one first", so a migration that
+     drops it drops a judgement that cannot be rebuilt from any sync. Two
+     entries, so a round-trip that silently collapsed the map to one key — or
+     renumbered it — is visible. */
+  componentRank: { 'R&D_Sig_Regression': 1, 'KAT_Common_Maintenance': 2 },
   // Components that are not automation suites. Plan data for the same reason
   // as the priorities above: a decision, with nothing in Jira to rederive it
   // from, so a migration that drops it drops it for good.
@@ -479,6 +485,7 @@ check('ROSTER DECISIONS SURVIVE — who you put on a sprint and who you took off
   same(plan.sprintRoster, project.plan().sprintRoster, 'sprintRoster');
   same(plan.componentPriority, project.plan().componentPriority, 'componentPriority');
   same(plan.componentNote, project.plan().componentNote, 'componentNote');
+  same(plan.componentRank, project.plan().componentRank, 'componentRank');
 });
 
 check('a saved scenario survives with its numbers intact', () => {

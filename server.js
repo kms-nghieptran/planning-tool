@@ -29,6 +29,8 @@ const backlogProfile = require('./lib/backlog-profile');
 const covHistory = require('./lib/coverage-history');
 const priority = require('./lib/priority');
 const componentNote = require('./lib/component-note');
+const componentRank = require('./lib/component-rank');
+const backlogLib = require('./lib/backlog-item');
 const prioritization = require('./lib/prioritization');
 const keywords = require('./lib/keywords');
 const sprintDates = require('./lib/sprint-dates');
@@ -320,14 +322,29 @@ async function handleApi(req, res, url) {
       boards: snap.boards || [],
       ignoredBoards: plan.ignoredBoards || [],
       jiraSprints: Object.fromEntries(plan.teams.map(t => [t.id, sprints.filter(x => x.byTeam && x.byTeam[t.id]).length])),
+      /* ── THE SIDEBAR'S BACKLOG COUNT ──────────────────────────────────
+         COUNTED HERE, FROM THE STORED KEY LIST, rather than read off
+         `backlogCount`. The index is written at SYNC time, so a correction to
+         what counts as a backlog item would otherwise not reach the sidebar
+         until the next full sync — and in the meantime the sidebar would say
+         1,877 beside a page saying 594. Both numbers on screen at once, neither
+         wrong-looking on its own.
+
+         `buildTeamIndex` now computes the same thing, so a synced index and
+         this read agree; this is what makes the fix land immediately, and the
+         shared `backlogLib` is what keeps the two from drifting. */
       teamIndex: Object.fromEntries(plan.teams.map(t => {
         const i = (snap.byTeam || {})[t.id] || {};
+        const b = backlogLib.figuresFor(snap, i);
         return [t.id, {
           members: (t.members || []).filter(m => m.status !== 'Released').length,
           sprints: (i.sprints || []).length,
-          backlog: i.backlogCount || 0,
-          backlogPoints: i.backlogPoints || 0,
+          backlog: b.count,
+          backlogPoints: b.points,
           backlogSource: i.backlogSource || null,
+          // What the raw list held, so the setup screen can explain a count
+          // that is much smaller than the board's own.
+          backlogScanned: b.scanned,
           excluded: ((plan.excluded || {})[t.id] || []).length,
         }];
       })),
@@ -363,7 +380,40 @@ async function handleApi(req, res, url) {
     const plan = store.getPlan(), snap = store.getSnapshot();
     const team = findTeam(plan, q.get('team'));
     const sprint = findSprint(plan, q.get('sprint'), team.id);
-    return json(res, 200, insights.capacityView(plan, snap, team, sprint));
+    const grid = insights.capacityView(plan, snap, team, sprint);
+    /* THE "BY COMPONENT" SHEET IS ATTACHED HERE, not inside `capacityView`.
+       `prioritization` already requires `insights` — for the sprint index and
+       the epic walk — so building it there would close a require cycle. This
+       is the composition point: the route knows both halves and neither
+       module has to know the other twice. */
+    grid.byComponent = prioritization.sprintComponents(snap, plan, { team, sprint });
+    return json(res, 200, grid);
+  }
+
+  /* ONE CELL OF THE "BY COMPONENT" SHEET, LISTED.
+     It re-runs the sheet and reads the cell's own key list rather than
+     rebuilding the filter from this query string — see the note on
+     `sprintComponentCell`. So the drawer cannot list a different set from the
+     number that opened it, whatever changes about the counting rules later. */
+  if (p === '/api/capacity/bycomponent/epics' && req.method === 'GET') {
+    const plan = store.getPlan(), snap = store.getSnapshot();
+    const team = findTeam(plan, q.get('team'));
+    const sprint = findSprint(plan, q.get('sprint'), team.id);
+    const out = prioritization.sprintComponentCell(snap, plan, {
+      team, sprint,
+      component: q.get('row') || null,
+      tool: q.get('tool') || null,
+      cell: q.get('cell') || null,
+    });
+    // Refused rather than ignored: an unknown column answering with an empty
+    // list is a drawer that says 0 under a number saying 12.
+    if (!out.ok) {
+      return json(res, 400, {
+        error: `No cell "${q.get('tool')}/${q.get('cell')}" on row "${q.get('row')}".`,
+        known: out.known,
+      });
+    }
+    return json(res, 200, { ...out, project: cfg.jira.projectKey || null });
   }
 
   /* ── THE ONE ROUTE THAT WRITES TO JIRA ────────────────────────────────
@@ -881,6 +931,41 @@ async function handleApi(req, res, url) {
      same two shapes: one row edited, or a whole map replaced. A blank note
      DELETES the key, so "has a note" means one thing however the row got
      there — see lib/component-note.js. */
+  /* ── THE ORDER OF ONE PRIORITY LEVEL ──────────────────────────────────
+     The body is the components of ONE level, in the order he dragged them
+     into. The server numbers them — see lib/component-rank.js for why the
+     browser does not send positions.
+
+     THE LEVEL IS CHECKED, NOT TRUSTED. Every component in the list has to
+     actually carry the level the request names, or a reordering of the P1s
+     could renumber a P3 that happened to be in the payload — which would move
+     a row on a screen nobody was looking at. A mismatch is refused with the
+     offending component named, rather than partially applied.
+
+     UNRANKED COMPONENTS IN OTHER LEVELS ARE UNTOUCHED, because `reorder`
+     rewrites only the keys it is given. That is what lets this route take one
+     level at a time instead of the whole sheet. */
+  if (p === '/api/component-rank' && req.method === 'PUT') {
+    const body = await readJsonBody(req);
+    const plan = store.getPlan();
+
+    /* THE GUARDS LIVE IN THE MODEL, so they are testable without a server and
+       so a second caller cannot apply a reorder that skips them. */
+    const checked = componentRank.validateOrder(plan, body.level, body.order);
+    if (!checked.ok) return json(res, checked.status, { error: checked.error });
+    const { order } = checked;
+    const level = Number(body.level);
+
+    const next = componentRank.reorder(plan.componentRank || {}, order);
+    const { map, errors } = componentRank.validate(next);
+    if (errors.length) return json(res, 400, { error: errors.map(e => e.message).join(' · '), errors });
+
+    plan.componentRank = map;
+    store.savePlan(plan);
+    store.audit('componentRank.set', { level, components: order.length, total: Object.keys(map).length });
+    return json(res, 200, { ok: true, componentRank: map, level, order });
+  }
+
   if (p === '/api/component-note' && req.method === 'PUT') {
     const body = await readJsonBody(req);
     const plan = store.getPlan();
@@ -1717,6 +1802,71 @@ async function handleApi(req, res, url) {
           { Component: `Total — ${v.rows.length} components`, Priority: '', Family: '' },
           Object.assign({}, ...v.tools.map(t => Object.fromEntries(
             v.buckets.map(b => [`${t.label} — ${b.label}`, v.totals[t.key][b.key]])))),
+          { Notes: '' },
+        ));
+      }
+    } else if (what === 'bycomponent') {
+      /* THE CAPACITY SHEET, in the shape it is read on screen — one row per
+         ranked suite, the backlog trio then the planned pair under each tool,
+         and his note last. Built from the same `sprintComponents` the screen
+         renders, so the file and the page cannot disagree about a number.
+
+         WHAT THE FILE FOLLOWS AND WHAT IT DOES NOT — the same split the
+         Prioritization export makes. Team and sprint are SCOPES: they decide
+         which epics were counted at all, so both travel and both are in the
+         filename. The family chip and the clear-row fold are LENSES: they
+         hide rows without changing a number, so the file carries the WHOLE
+         list plus a Family column and a Clear column, and the reader filters
+         in the spreadsheet. A CSV that is silently whichever twenty rows
+         somebody was looking at is the trap every other export here avoids.
+
+         THE KEYS TRAVEL WITH THE COUNTS, as they do in the test-case export.
+         On screen every number opens a drawer listing exactly what it
+         counted; a file of the numbers alone is the one copy of this table
+         nobody can audit, and the first question asked of a spreadsheet is
+         always "which ones". Semicolon-joined so a cell stays one cell. */
+      const v = prioritization.sprintComponents(snap, plan, {
+        team, sprint, scope: (cfg.metrics || {}).coverageScope || 'Epic',
+      });
+      name = `by-component-${team.id}-${sprint.id}`;
+      /* THE HEADINGS CARRY THEIR OWN SCOPE, because the two halves are
+         counted over different populations and a forwarded spreadsheet has no
+         scope line to read. "Backlog (all teams)" beside "<Sprint> Planned"
+         says it in the only place the file can. */
+      const cols = [
+        ...v.backlogBuckets.map(b => ({ key: b.key, label: `Backlog (all teams) — ${b.label}` })),
+        ...v.plannedCols.map(c => ({ key: c.key, label: `${v.sprint ? v.sprint.label : 'Sprint'} Planned — ${c.label}` })),
+      ];
+      const grid = (r) => Object.assign({}, ...v.tools.map(t => Object.fromEntries(
+        cols.map(c => [`${t.label} — ${c.label}`, r[t.key][c.key]]))));
+      const keyCols = (r) => Object.assign({}, ...v.tools.map(t => Object.fromEntries(
+        cols.map(c => [`${t.label} — ${c.label} keys`, ((r[t.key].keys || {})[c.key] || []).join('; ')]))));
+      rows = v.rows.map(r => Object.assign(
+        {
+          Component: r.component,
+          Priority: r.priorityLabel || '',
+          // The short name, not "PS — client delivery": this is a column to
+          // group by in a pivot, and the explanation belongs on the screen.
+          Family: coverage.familyShort(r.family),
+          /* THE FOLD, AS A COLUMN. The screen hides these rows by default and
+             the file keeps them — so the column says which ones they are,
+             rather than leaving a reader to work out why the sheet has 129
+             rows and the screen showed seventeen. */
+          Clear: r.empty ? 'yes' : '',
+        },
+        grid(r),
+        { Notes: r.note || '' },
+        keyCols(r),
+      ));
+      /* The totals the screen shows, labelled as a total rather than left for
+         the reader to sum — an epic in two components is counted in both
+         rows, so the column does not add up to the distinct figure and
+         somebody will try. */
+      if (rows.length) {
+        rows.push(Object.assign(
+          { Component: `Total — ${v.rows.length} components`, Priority: '', Family: '', Clear: '' },
+          Object.assign({}, ...v.tools.map(t => Object.fromEntries(
+            cols.map(c => [`${t.label} — ${c.label}`, v.totals[t.key][c.key]])))),
           { Notes: '' },
         ));
       }

@@ -24,6 +24,8 @@ const CapacityView = (() => {
 
   async function render(state, mount) {
     data = await UI.api(`/api/capacity?team=${encodeURIComponent(state.teamId)}&sprint=${encodeURIComponent(state.sprintId)}`);
+    // Recorded from the SAME state the payload was fetched with — see bcState.
+    bcState = { teamId: state.teamId, sprintId: state.sprintId };
     const t = data.totals, s = data.settings;
     const raw = state.sprints.find(x => x.id === state.sprintId) || {};
     const sprint = { ...raw, ...((raw.byTeam || {})[state.teamId] || {}) };
@@ -198,6 +200,8 @@ const CapacityView = (() => {
         </div>
       </section>
 
+      ${byComponentSection(data.byComponent, sprint)}
+
       ${/* The same table the Active sprint screen shows, from the same helper.
            Balancing a sprint ends in the tickets — you move work between people
            by picking specific items — and having to change screens to see them
@@ -228,6 +232,487 @@ const CapacityView = (() => {
     `;
 
     wire(state, mount);
+  }
+
+  /* ── "BY COMPONENT": THE SHEET HE KEEPS BY HAND ───────────────────────
+     Per ranked suite, what is still to do in each tool and what this sprint
+     has taken on. The two halves are one table because neither is worth much
+     alone: "11 in Maintenance" is a fact, "11 in Maintenance and 2 planned"
+     is a decision.
+
+     BOTH HALVES COUNT EPICS (test cases). A row has to read left to right in
+     one unit or the comparison it exists for is not available — see the long
+     note in lib/prioritization.js for why the planned half resolves Jira
+     items to the suites behind them rather than counting the tickets.
+
+     THE PLANNED COLUMNS ARE NAMED AFTER THE SELECTED SPRINT, from the
+     payload rather than the picker: the header must name the sprint the
+     numbers actually came from, and those are two different facts the moment
+     a request is in flight. */
+  const BACKLOG_SHORT = { maintenance: 'Maint', ready: 'Ready', blocked: 'Blocked' };
+  /* THE PLANNED PAIR COMES OFF THE PAYLOAD, not a constant in this file. The
+     drawer that opens from one of these cells titles itself with the same
+     label, and it gets it from the model — a second list here is how the
+     header reads "New build" over a drawer headed something else. */
+  const plannedCols = (d) => (d && d.plannedCols) || [];
+
+  /* THE RANKED LIST IS PORTFOLIO-WIDE AND MOST TEAMS TOUCH A SLICE OF IT.
+     Ruby's sheet has 129 ranked rows and something in about twenty of them;
+     drawing all 129 by default buries the twenty that need reading under a
+     hundred rows of dashes. So the clear rows are folded away and COUNTED —
+     the count is the point, because "83 of your priorities have nothing
+     against them this sprint" is itself a finding — and one click brings
+     them back. Folded, never dropped: a ranked suite with nothing against it
+     is finished or forgotten, and that is a question only he can answer. */
+  let bcShowAll = false;
+  /* THE FAMILY LENS. null is "All" and is not a family key, so a family that
+     ever gets named `null` cannot silently mean "no filter". The chips are a
+     LENS, not a scope: they narrow what is drawn out of a payload that was
+     already counted, so switching one is a redraw of this section and never a
+     refetch — the same distinction the Prioritization page draws between its
+     chips and its team picker. */
+  let bcFamily = null;
+  /* THE SCOPES THIS SHEET WAS BUILT FOR, kept beside the payload. The export
+     link is rendered from inside the section, which is also redrawn from a
+     click handler — so the team and sprint have to be reachable without a
+     `state` argument threaded through every one of these helpers. Set once
+     per render, from the same state the payload was fetched with, so the file
+     a reader downloads is the table they are looking at. */
+  let bcState = { teamId: '', sprintId: '' };
+
+  function byComponentSection(d, sprint) {
+    if (!d) return '';
+    const name = (d.sprint && d.sprint.label) || sprint.name || '';
+    const tools = d.tools || [];
+    const buckets = d.backlogBuckets || [];
+    const planned = plannedCols(d);
+    const all = (d.rows || []).filter(r => bcFamily == null || r.familyKey === bcFamily);
+    const rows = bcShowAll ? all : all.filter(r => !r.empty);
+    const hidden = all.length - rows.length;
+
+    return `
+      <section class="section" data-bycomp>
+        <div class="card">
+          <h3>By component</h3>
+          <div class="sub">The whole backlog against what ${UI.esc(name || 'this sprint')} picked up · one row per ranked suite</div>
+          ${byComponentFamilies(d)}
+          ${byComponentScope(d, name, hidden)}
+          <div class="table-wrap">
+            <!-- NOT SORTABLE, for the same reason the Prioritization grid is
+                 not: UI.sortable maps header cells to body columns by index
+                 and this header's first row is four cells wide because of the
+                 colspans, so every column it offered would sort by the wrong
+                 one. The order here is the answer — P1 first, then by name. -->
+            <table class="pz bycomp" data-nosort>
+              <thead>
+                <tr>
+                  <th rowspan="3">Component</th>
+                  <th rowspan="3">Priority</th>
+                  ${tools.map((t, ti) => `
+                    <th class="num tool-start tool-head band-${ti % 2 ? 'b' : 'a'}" colspan="${buckets.length + planned.length}"
+                      ><i class="pz-chip" style="background:${t.color}"></i>${UI.esc(t.label)}</th>`).join('')}
+                  <th rowspan="3" class="tool-start note-col">Notes</th>
+                </tr>
+                <tr>
+                  ${tools.map((t, ti) => `
+                    <th class="num tool-start sub band-${ti % 2 ? 'b' : 'a'}" colspan="${buckets.length}"
+                        title="${UI.esc(backlogTitle(d))}">Backlog <span class="muted">· all teams</span></th>
+                    <th class="num tool-start sub band-${ti % 2 ? 'b' : 'a'}" colspan="${planned.length}"
+                        title="Suites this sprint has work against">${UI.esc(name || 'Sprint')} Planned</th>`).join('')}
+                </tr>
+                <tr>
+                  ${tools.map((t, ti) => `
+                    ${buckets.map((b, i) => `
+                      <th class="${cellCls(b.key, i, ti)} sub" title="${UI.esc(b.label)}"
+                        ><i class="pz-chip" style="background:${b.color}"></i>${UI.esc(BACKLOG_SHORT[b.key] || b.label)}</th>`).join('')}
+                    ${planned.map((c, i) => `
+                      <th class="${cellCls(`plan-${c.key}`, i, ti)} sub" title="${UI.esc(c.title)}">${UI.esc(c.label)}</th>`).join('')}`).join('')}
+                </tr>
+              </thead>
+              <tbody>
+                ${rows.length
+    ? rows.map(r => byComponentRow(r, tools, buckets, planned)).join('')
+    : `<tr><td colspan="${2 + tools.length * (buckets.length + planned.length) + 1}" class="muted" style="padding:14px">
+                        ${all.length
+      ? `All ${all.length} ranked components are clear this sprint — nothing in either backlog and nothing planned.`
+      : 'No components have a priority yet — set them on the Prioritization screen and they appear here.'}</td></tr>`}
+              </tbody>
+              ${rows.length > 1 ? byComponentFoot(rows, tools, buckets, planned) : ''}
+            </table>
+          </div>
+          ${byComponentNotes(d)}
+        </div>
+      </section>`;
+  }
+
+  /** One cell's classes — the band and the colour both travel with the column. */
+  function cellCls(key, i, toolIndex) {
+    return [
+      'num',
+      key.startsWith('plan-') ? `plan ${key}` : `cov-${key}`,
+      `band-${toolIndex % 2 ? 'b' : 'a'}`,
+      i === 0 ? 'tool-start' : '',
+    ].filter(Boolean).join(' ');
+  }
+
+  /* A NUMBER THAT OPENS THE SET IT COUNTED — IN A DRAWER, not straight to
+     Jira. The link was an anchor and it was the wrong door: you click a 16 to
+     find out WHICH sixteen, and getting the answer meant a tab switch, a Jira
+     page load and a trip back. The drawer answers in place — key, summary,
+     status, what is blocking it — and carries its own "Open in Jira" for when
+     that is actually what you wanted. Same reasoning, and the same
+     `UI.drillNumber` control, as every other number on the Coverage and
+     Prioritization screens; this table was the odd one out.
+
+     A REAL <button>, not a styled span: this is an action, so it has to be
+     reachable by keyboard and announce itself as one. `UI.drillNumber`
+     handles that.
+
+     ZERO STAYS A DASH and does not open. An empty drawer under a zero is a
+     round trip to learn nothing. */
+  function drillNum(n, r, tool, cell) {
+    return UI.drillNumber(n, { act: 'bc-epics', row: r.component, tool, cell }, { zero: '—' });
+  }
+
+  function byComponentRow(r, tools, buckets, planned) {
+    // Every key the row counted, both halves, for the component name itself.
+    // The NAME still goes to Jira: it is the whole suite, which is a search
+    // rather than one cell's answer, and it is what you would search for.
+    const all = [];
+    for (const t of tools) {
+      for (const k of Object.keys(r[t.key].keys || {})) all.push(...r[t.key].keys[k]);
+    }
+    return `
+      <tr${r.empty ? ' class="untracked"' : ''}>
+        <td>
+          ${UI.componentLink(r.component, all, { what: `${r.component} epics` })}
+          ${r.empty ? ' <span class="tag" title="No backlog in either tool and nothing planned this sprint">clear</span>' : ''}
+        </td>
+        <td class="prio-cell"><span class="tag prio-tag prio-${UI.esc(r.priorityKey)}"
+          title="${UI.esc(`${r.priorityLabel} — ${r.priorityName}`)}">${UI.esc(r.priorityLabel)}</span></td>
+        ${tools.map((t, ti) => `
+          ${buckets.map((b, i) => `
+            <td class="${cellCls(b.key, i, ti)}">${drillNum(r[t.key][b.key], r, t.key, b.key)}</td>`).join('')}
+          ${planned.map((col, i) => `
+            <td class="${cellCls(`plan-${col.key}`, i, ti)}">${drillNum(r[t.key][col.key], r, t.key, col.key)}</td>`).join('')}`).join('')}
+        ${byComponentNote(r)}
+      </tr>`;
+  }
+
+  /* THE NOTE IS EDITABLE HERE, and it is THE SAME NOTE the Prioritization
+     screen edits — one entry per component in the plan, through one route.
+     Not a second, capacity-only note: "waiting on the migration" is a fact
+     about the suite, not about this sprint, and two boxes holding two
+     versions of it is how the one you are not looking at goes stale.
+
+     A CLOSED SPRINT DOES NOT MAKE IT READ-ONLY, unlike the points and due
+     date above. Those write to Jira and rewrite a finished sprint's history;
+     this is plan data about a suite, and noticing something about
+     PS_iGO_NLG while reading a closed sprint is a perfectly good reason to
+     write it down.
+
+     The same `textarea.note` markup the Prioritization grid uses, so the two
+     look and behave identically — and `maxlength` comes off the payload
+     rather than being typed here, or one screen offers a length the server
+     then refuses. */
+  function byComponentNote(r) {
+    const v = r.note || '';
+    return `
+      <td class="note-col tool-start">
+        <textarea class="note" rows="1" maxlength="${Number((data.byComponent || {}).noteMax) || 600}"
+          data-bc-note="${UI.esc(r.component)}" data-was="${UI.esc(v)}"
+          placeholder="Add a note…">${UI.esc(v)}</textarea>
+      </td>`;
+  }
+
+  /* SAVED ON BLUR, and only when it actually changed — clicking into a box
+     and out again is not an edit, and treating it as one writes an audit
+     entry per glance. The row object is updated in place as well as the
+     dataset, so the redraw a chip click causes does not resurrect the old
+     text. */
+  async function saveByComponentNote(box) {
+    const name = box.dataset.bcNote;
+    const was = box.dataset.was == null ? '' : box.dataset.was;
+    const value = String(box.value || '').trim();
+    if (value === was.trim()) return;
+    box.disabled = true;
+    try {
+      await UI.jsonPut('/api/component-note', { component: name, note: value });
+      box.dataset.was = value;
+      box.value = value;
+      const r = ((data.byComponent || {}).rows || []).find(x => x.component === name);
+      if (r) r.note = value || null;
+      UI.toast(value ? `${name} — note saved` : `${name} — note cleared`);
+    } catch (err) {
+      // Put the old text back rather than leaving the box showing something
+      // that was refused: a box that keeps what you typed reads as saved.
+      box.value = was;
+      UI.toast(err.message, true);
+    } finally {
+      box.disabled = false;
+    }
+  }
+
+  /* SUMMED FROM THE ROWS ON SCREEN, never from the payload's own totals.
+     The clear rows are folded away by default, so `d.totals.components` says
+     129 under a table showing twenty — every individual figure on the page
+     correct, and the one line a reader actually quotes in a status update
+     wrong. The same rule, for the same reason, as the Prioritization foot.
+
+     THE COLUMN SUMS ARE THE ONE PART THAT CANNOT DIFFER TODAY — a folded row
+     is zero in every cell by definition, so summing the shown rows and
+     summing the payload give the same figures, and no test can tell the two
+     apart. The COUNT can and does differ, which is why it is checked. Summing
+     from the rows anyway, because the day the fold criterion becomes anything
+     other than "all zero" — say, "below a threshold" — the payload version
+     starts lying and nothing here would say so. */
+  function byComponentFoot(rows, tools, buckets, planned) {
+    const sum = (tool, k) => rows.reduce((n, r) => n + r[tool][k], 0);
+    return `
+      <tfoot><tr>
+        <td><strong>${rows.length} component${rows.length === 1 ? '' : 's'}</strong></td>
+        <td class="muted">all levels</td>
+        ${tools.map((tool, ti) => `
+          ${buckets.map((b, i) => `<td class="${cellCls(b.key, i, ti)}"><strong>${sum(tool.key, b.key) || '<span class="muted">—</span>'}</strong></td>`).join('')}
+          ${planned.map((c, i) => `<td class="${cellCls(`plan-${c.key}`, i, ti)}"><strong>${sum(tool.key, c.key) || '<span class="muted">—</span>'}</strong></td>`).join('')}`).join('')}
+        <td class="tool-start"></td>
+      </tr></tfoot>`;
+  }
+
+  /* ── THE FAMILY CHIPS ─────────────────────────────────────────────────
+     PS is client delivery, R&D is product regression, KAT is the shared
+     framework — three genuinely different conversations that happen to share
+     a table. "All" is first and is the default, because the unfiltered sheet
+     is the one you arrive at.
+
+     EVERY DECLARED FAMILY GETS A CHIP, including one with no rows this
+     sprint: a filter whose buttons appear and disappear as the data moves is
+     one you cannot learn. An empty family is drawn disabled and says zero
+     rather than vanishing, which is itself the answer to "what is R&D doing
+     this sprint".
+
+     THE CHIP COUNTS WHAT THE TABLE WILL DRAW. The clear rows fold away by
+     default, so the chip reads the `busy` count while they are folded and the
+     full count once they are shown — otherwise "R&D 41" sits above a table
+     with three rows in it and one of the two numbers is a lie. */
+  function byComponentFamilies(d) {
+    const fams = d.families || [];
+    if (!fams.length) return '';
+    /* THE SAME `.chip` / `.active` markup the Prioritization page uses, on
+       purpose. These two screens sit next to each other in the same head and
+       a filter that looks different on one of them reads as a different
+       control. */
+    const n = (f) => (bcShowAll ? f.count : f.busy);
+    const total = fams.reduce((t, f) => t + n(f), 0);
+    return `
+      <div class="field" style="margin:6px 0 2px"><span>Family</span>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <button class="chip${bcFamily == null ? ' active' : ''}" data-bc-family=""
+            title="Every ranked suite on this sheet">All <strong>${UI.int(total)}</strong></button>
+          ${fams.map(f => `<button class="chip${bcFamily === f.key ? ' active' : ''}${n(f) ? '' : ' muted'}"
+            data-bc-family="${UI.esc(f.key)}" title="${UI.esc(f.label)}"${n(f) || bcFamily === f.key ? '' : ' disabled'}
+            >${UI.esc(f.short)} <strong>${UI.int(n(f))}</strong></button>`).join('')}
+        </div>
+      </div>`;
+  }
+
+  /* ONE SECTION, REDRAWN IN PLACE. `App.refresh()` would refetch the capacity
+     payload, rebuild the grid and lose the item table's filters — for a lens
+     that changes nothing but which rows of one table are drawn. Both the
+     family chips and the fold are lenses over a payload that is already in
+     hand, so neither costs a request. */
+  function redrawByComponent(state, mount) {
+    const host = mount.querySelector('[data-bycomp]');
+    if (!host) return;
+    const raw = state.sprints.find(x => x.id === state.sprintId) || {};
+    host.outerHTML = byComponentSection(data.byComponent, { ...raw, ...((raw.byTeam || {})[state.teamId] || {}) });
+  }
+
+  /* ONE CELL, LISTED.
+     The server re-runs the sheet and reads that cell's own key list, so the
+     drawer cannot list a set the number did not count — see the note on
+     `sprintComponentCell`. The count is sent back and compared against what
+     the button still says: they can differ if the table was redrawn while the
+     drawer was opening, and saying so is better than showing a heading that
+     quietly disagrees with the page behind it. */
+  async function openByComponentCell(state, ds, shown) {
+    const qs = [
+      `team=${encodeURIComponent(state.teamId)}`,
+      `sprint=${encodeURIComponent(state.sprintId)}`,
+      `row=${encodeURIComponent(ds.row)}`,
+      `tool=${encodeURIComponent(ds.tool)}`,
+      `cell=${encodeURIComponent(ds.cell)}`,
+    ].join('&');
+    UI.drawer('<div class="empty">Reading…</div>');
+    try {
+      const r = await UI.api(`/api/capacity/bycomponent/epics?${qs}`);
+      const off = shown && shown !== r.count;
+      /* THE DRAWER SAYS WHICH POPULATION IT IS LISTING. The two halves are
+         counted over different scopes, and a drawer that explained them the
+         same way would make the backlog's extra rows look like a bug. */
+      const what = r.half === 'backlog'
+        ? `Across ${UI.esc(((r.scopes || {}).backlog || {}).label || 'all teams')}, with no work in an active sprint.`
+          + ' Excluded components and the coverage allow-list are already applied.'
+        : `Reached from the work ${UI.esc(((r.scopes || {}).planned || {}).label || 'this team')}`
+          + ` planned in ${UI.esc((r.sprint && r.sprint.label) || 'this sprint')}.`;
+      UI.drawer(UI.drillDrawer({
+        title: `${ds.row} — ${r.label}`,
+        meaning: `${UI.int(r.count)} ${UI.esc(String(r.scope || 'epic').toLowerCase())}${r.count === 1 ? '' : 's'}. ${what}`
+          + (off ? ` The cell says ${UI.int(shown)} — it has been redrawn since this was opened.` : ''),
+        keys: r.epics.map(e => e.key),
+        catalogue: Object.fromEntries(r.epics.map(e => [String(e.key).toUpperCase(), e])),
+        state,
+      }));
+    } catch (err) {
+      UI.drawer(`<div class="empty">Could not read the ${UI.esc(ds.cell)} epics — ${UI.esc(err.message)}</div>`);
+    }
+  }
+
+  /* THE SCOPE SITS ON THE LINE THE NUMBERS ARE ON. A team-scoped backlog read
+     as a portfolio one once already on the Prioritization screen; the fix
+     there was to put the scope beside the figures rather than in a picker at
+     the top of the page, and this table inherits it. */
+  /** The payload's own statement of who each half was counted over. */
+  const s = (d) => (d && d.scopes) || {};
+
+  function byComponentScope(d, name, hidden) {
+    const x = d.backlogExcludes || {};
+    const t = d.totals || {};
+    return `
+      <div class="muted" style="display:flex;align-items:center;gap:10px;margin:2px 0 8px;font-size:12px;flex-wrap:wrap">
+        <!-- EACH FIGURE CARRIES ITS OWN SCOPE. One team name at the front of
+             this line, with two numbers after it, reads as though both were
+             that team's — and the backlog is the whole portfolio. So the
+             scope is attached to the number it belongs to, which is the same
+             fix the Prioritization screen made when a team-scoped 9 was read
+             as a portfolio 25. -->
+        <span>${UI.int(t.backlog || 0)} in backlog
+          <strong>${UI.esc((s(d).backlog || {}).label || 'all teams')}</strong></span>
+        <span>· ${UI.int(t.planned || 0)} planned by
+          <strong>${UI.esc((s(d).planned || {}).label || 'this team')}</strong>
+          in ${UI.esc(name || 'this sprint')}</span>
+        ${hidden ? `<button class="btn ghost sm" data-act="bc-show-all"
+          title="A ranked suite with no backlog and nothing planned. Folded away, not dropped — it is either finished or forgotten."
+          >${UI.int(hidden)} clear ${hidden === 1 ? 'suite' : 'suites'} hidden — show</button>` : ''}
+        ${bcShowAll && (d.rows || []).some(r => r.empty)
+    ? '<button class="btn ghost sm" data-act="bc-show-busy">hide the clear ones</button>' : ''}
+        <span class="spacer"></span>
+        <span title="${UI.esc(scopeTitle(x))}">backlog excludes ${UI.int(x.epics || 0)} ${(x.epics === 1 ? 'suite' : 'suites')} in flight
+          in ${UI.int((x.sprints || []).length)} active sprint${(x.sprints || []).length === 1 ? '' : 's'}</span>
+        <!-- EARMARKED, AND STILL COUNTED ABOVE. Reported rather than
+             subtracted: taking these out would make the backlog shrink every
+             time somebody fills in a future sprint, which is the opposite of
+             what filling one in means. -->
+        ${(d.queuedAhead || {}).epics ? `<span title="${UI.esc(queuedTitle(d.queuedAhead))}"
+          >· ${UI.int(d.queuedAhead.epics)} of them already queued for a later sprint</span>` : ''}
+        <!-- EPICS WITH NO JIRA TEAM AT ALL. "All teams" has to include the
+             ones nobody assigned a team to, or the queue hides part of
+             itself — it hid 295 across 16 ranked suites. Counted out loud,
+             because it is also the one number on this line a reader can act
+             on: an untriaged epic is a triage job. -->
+        ${((d.scopes || {}).backlog || {}).noTeam ? `<span title="${UI.esc(noTeamTitle(d))}"
+          >· ${UI.int(d.scopes.backlog.noTeam)} carry no Jira Team</span>` : ''}
+        ${byComponentExports(d)}
+      </div>`;
+  }
+
+  /* ── THE TWO EXPORTS ──────────────────────────────────────────────────
+     BOTH CARRY THE SCOPES AND NEITHER CARRIES THE LENSES. Team and sprint
+     decide which epics were counted at all, so both travel; the family chip
+     and the clear-row fold only hide rows, so the CSV carries the whole list
+     with Family and Clear as columns and the reader filters in the
+     spreadsheet. That is what a spreadsheet is for, and it avoids shipping a
+     file that is silently whichever twenty rows somebody was looking at.
+
+     THE PDF IS THE OPPOSITE, deliberately. It is a picture of this table as
+     it stands — chips, fold and all — because that is what "print what I am
+     looking at" means, and a PDF nobody can filter is no use as raw data
+     anyway. The CSV is the data; the PDF is the page.
+
+     A LINK FOR THE CSV, A BUTTON FOR THE PDF. The CSV is a URL the browser
+     can fetch, which means it works on a middle click and can be copied; the
+     PDF is an action on this document and has no address. */
+  function byComponentExports(d) {
+    const href = `/api/export?what=bycomponent&team=${encodeURIComponent(bcState.teamId)}`
+      + `&sprint=${encodeURIComponent(bcState.sprintId)}`;
+    return `
+      <span class="print-hide" style="display:inline-flex;gap:6px">
+        <a class="btn ghost sm" href="${UI.esc(href)}"
+          title="Every ranked suite, both halves, with the keys behind each number — whatever the chips are set to">Export CSV</a>
+        <button class="btn ghost sm" data-act="bc-export-pdf"
+          title="This table as it stands, on its own page">Export PDF</button>
+      </span>`;
+  }
+
+  /* THE HEADER SAYS "ALL TEAMS" IN WORDS, not only in a tooltip. The two
+     halves of this table are counted over different populations, and a reader
+     who assumes both are the selected team's reads the backlog as a fifth of
+     what it is. Colour and a hover cannot carry that; the column heading can. */
+  function backlogTitle(d) {
+    const s = (d.scopes || {}).backlog || {};
+    return `Epics in these statuses across ${s.label || 'all teams'}, with no work in an ACTIVE sprint. `
+      + 'The whole queue for the suite — not only the part carrying this team\'s Jira Team field, '
+      + 'because what is left to automate in a suite is not a per-team fact. '
+      + 'A future sprint is a plan, not progress, so an epic earmarked for one is still in this column.';
+  }
+
+  /** Which sprints the backlog left out, named — so the rule can be checked. */
+  function scopeTitle(x) {
+    /* EVERY TEAM'S ACTIVE SPRINT, named with whose it is. The backlog counts
+       the whole portfolio, so its exclusion does too — an epic Titan is
+       working right now is not "nobody has picked this up" because Ruby is
+       the team on screen — and a list of bare sprint names would leave a
+       reader unable to tell why a sprint they have never heard of is in it. */
+    const list = (x.sprints || []).map(v => `${v.label}${v.team ? ` — ${v.team}` : ''}`);
+    if (!list.length) return 'No active sprints anywhere, so nothing is excluded from the backlog.';
+    return 'Backlog counts epics with no work in an ACTIVE sprint, on any team. '
+      + `Read: ${list.join(', ')}. `
+      + 'A FUTURE sprint is a plan, not progress — an epic earmarked for Sprint 43 is still work not being done, '
+      + 'so it stays in the backlog and is counted separately. Closed sprints are history and are not excluded either.';
+  }
+
+  /* WHY THIS NUMBER DIFFERS FROM THE PRIORITIZATION PAGE, said where the
+     difference shows. The two screens get read side by side and agreed
+     exactly until this: the backlog counts epics with an empty Team field
+     and that page does not, because a coverage PERCENTAGE should not move
+     for an epic nobody has declared either way, while a QUEUE that hides
+     them is hiding real work. Two different questions, one stated
+     difference — far better than two numbers and no explanation. */
+  function noTeamTitle(d) {
+    const n = ((d.scopes || {}).backlog || {}).noTeam || 0;
+    return `${n} of the epics counted above have an empty Jira Team field. `
+      + 'They are counted here because "all teams" has to include the ones nobody assigned a team to — '
+      + 'an epic sitting in Ready for Automation is work in the queue however it is tagged. '
+      + 'The Coverage and Prioritization screens leave them out, so their totals are lower by this amount; '
+      + 'setting the Team field on these would bring the three screens back into line.';
+  }
+
+  /** Which later sprints the earmarked suites are sitting in. */
+  function queuedTitle(q) {
+    const list = (q.sprints || []).map(v => `${v.label}${v.team ? ` — ${v.team}` : ''}`);
+    return `${q.epics} of the suites counted above already have work queued in a later sprint. `
+      + 'They are still backlog — nobody is working them yet — but they are not the ones nobody has looked at. '
+      + (list.length ? `Queued in: ${list.join(', ')}.` : '');
+  }
+
+  /* WHAT THE TABLE COULD NOT PLACE, said out loud rather than absorbed into
+     the totals. Both numbers are real effort that appears in no row, and a
+     reader adding the planned column up against the sprint's ticket count is
+     owed the difference. */
+  function byComponentNotes(d) {
+    const n = d.plannedNotes || {};
+    const bits = [];
+    if (n.unlinked) {
+      bits.push(`${UI.int(n.unlinked)} maintenance ticket${n.unlinked === 1 ? '' : 's'} in this sprint name no suite, so ${n.unlinked === 1 ? 'it is' : 'they are'} in no row`);
+    }
+    if (n.outOfScope) {
+      bits.push(`${UI.int(n.outOfScope)} suite${n.outOfScope === 1 ? '' : 's'} the sprint reaches ${n.outOfScope === 1 ? 'is' : 'are'} outside this team's coverage scope`);
+    }
+    if ((d.excluded || []).length) {
+      bits.push(`${d.excluded.length} ranked component${d.excluded.length === 1 ? ' is' : 's are'} on the excluded list and not shown`);
+    }
+    if (!bits.length) return '';
+    return `<p class="muted" style="font-size:12px;margin:8px 0 0">${bits.map(UI.esc).join(' · ')}.</p>`;
   }
 
   function row(r, s, state) {
@@ -515,10 +1000,67 @@ const CapacityView = (() => {
       App.refresh();
     });
 
+    /* THE NOTE SAVES ON BLUR, wired on the MOUNT for the same reason the
+       chips are: the section replaces itself on every chip click and the fold
+       toggle, so a handler attached to the textarea would go with the markup
+       that replaced it. `focusout` rather than `blur`, because blur does not
+       bubble and a delegated listener would never hear it. */
+    mount.addEventListener('focusout', (e) => {
+      const box = e.target.closest && e.target.closest('[data-bc-note]');
+      // RETURNED, not fired and forgotten. The browser ignores the promise
+      // either way, but a caller that can await it — a test — then observes
+      // the save rather than the moment before it, which is the difference
+      // between checking the refusal path and checking nothing.
+      return box ? saveByComponentNote(box) : undefined;
+    });
+
+    /* THE FAMILY CHIPS, wired on the MOUNT rather than on the buttons. The
+       section redraws itself on every chip click, so handlers attached to the
+       buttons would go with the markup that replaced them and the second
+       click would do nothing. */
+    mount.addEventListener('click', (e) => {
+      const fam = e.target.closest && e.target.closest('[data-bc-family]');
+      if (!fam || fam.disabled) return;
+      const want = fam.dataset.bcFamily || null;
+      // Clicking the chip you are on clears it, which is how every other chip
+      // row in this app behaves; "All" is already the cleared state.
+      bcFamily = bcFamily === want ? null : want;
+      redrawByComponent(state, mount);
+    });
+
     mount.addEventListener('click', async (e) => {
       const act = e.target.closest('[data-act]');
       if (!act) return;
       const kind = act.dataset.act;
+      /* HANDLED FIRST, and it redraws ONE SECTION rather than the page.
+         `App.refresh()` would refetch the capacity payload, rebuild the grid
+         and lose the item table's filters — for a fold that changes nothing
+         but which rows of one table are drawn. The payload already holds
+         every row, so the toggle is a local redraw. */
+      if (kind === 'bc-show-all' || kind === 'bc-show-busy') {
+        e.preventDefault();
+        bcShowAll = kind === 'bc-show-all';
+        return redrawByComponent(state, mount);
+      }
+      /* HANDLED BEFORE ANYTHING THAT REDRAWS. `UI.exportPdf` marks the
+         section, prints, and unmarks it on `afterprint` — a redraw in between
+         would replace the marked node with an unmarked one and leave the page
+         hidden with nothing to put back. */
+      if (kind === 'bc-export-pdf') {
+        e.preventDefault();
+        const bc = data.byComponent || {};
+        UI.exportPdf(
+          [(bc.team && bc.team.name) || '', (bc.sprint && bc.sprint.label) || '', 'by component'],
+          { only: '[data-bycomp]' },
+        );
+        return;
+      }
+      if (kind === 'bc-epics') {
+        e.preventDefault();
+        await openByComponentCell(state, act.dataset,
+          Number(String(act.textContent).replace(/[^0-9]/g, '')) || 0);
+        return;
+      }
       if (kind === 'member-items') {
         e.preventDefault();
         const r = data.rows.find(x => x.memberId === act.dataset.member);

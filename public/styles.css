@@ -968,6 +968,63 @@ select.prio option[value="4"] { color: var(--app-fg-3); }
 .pz th.sub.cov-none        { color: var(--cov-none-ink); }
 .pz tfoot td strong { font-variant-numeric: tabular-nums; }
 
+/* ── ORDER WITHIN A LEVEL ─────────────────────────────────────────────────
+   The grip says "this row moves"; the arrows are how it moves without a
+   mouse. Both are in one narrow column so the table does not grow a hand-
+   shaped gap down its left edge. */
+.pz .rank-col { width: 1%; white-space: nowrap; }
+.pz .rank-cell { white-space: nowrap; vertical-align: middle; padding-right: 2px; }
+.pz .rank-grip { cursor: grab; color: var(--app-fg-3); font-size: 13px; letter-spacing: -1px; }
+.pz tr[draggable="true"]:active .rank-grip { cursor: grabbing; }
+.pz .rank-pos {
+  display: inline-block; min-width: 1.4em; text-align: right; margin: 0 4px 0 2px;
+  font-variant-numeric: tabular-nums; font-size: 11.5px; color: var(--app-fg-3);
+}
+/* The arrows stay out of the way until the row is touched — a table with 129
+   rows of permanently visible controls reads as a form, not a report — but
+   they are NEVER display:none, because a control a keyboard can reach has to
+   be a control a screen reader can find. Opacity keeps it in the tab order. */
+.pz .rank-moves { opacity: 0; transition: opacity .12s ease; }
+.pz tr:hover .rank-moves,
+.pz .rank-moves:focus-within { opacity: 1; }
+.pz .rank-moves .btn { padding: 0 5px; line-height: 1.6; }
+/* The row being dragged, and the one it would land on. Two different states,
+   so the answer to "where will this go" is on screen rather than guessed. */
+.pz tr.rank-dragging td { opacity: .45; }
+.pz tr.rank-over td { box-shadow: inset 0 2px 0 var(--brand-blue); }
+@media print {
+  .pz .rank-col, .pz .rank-cell { display: none; }
+}
+
+/* ── "BY COMPONENT" ON CAPACITY PLANNING ──────────────────────────────────
+   Same grid, one more division: within each tool band, what is LEFT sits
+   beside what this sprint TOOK ON. Those are two different kinds of fact, so
+   the seam between them is drawn — a dashed rule, lighter than the solid one
+   between tools, which puts the two seams in the right order of importance
+   without spending another colour.
+
+   THE PLANNED PAIR IS NOT ON THE COVERAGE RAMP. Its numbers are commitments,
+   not statuses, and borrowing `--cov-maintenance` for the Maintenance column
+   would claim the two Maintenance columns in a row are the same measurement.
+   They are very nearly opposites: one is the queue, the other is the part of
+   it being worked this sprint. So the planned pair takes its own wash. */
+.pz.bycomp td.plan, .pz.bycomp th.plan { background-image: linear-gradient(var(--cov-outside), var(--cov-outside)); }
+.pz.bycomp .plan.tool-start { border-left: 1px dashed var(--app-line); }
+.pz.bycomp td.plan-build .comp-link { color: var(--brand-blue); }
+.pz.bycomp td.plan-maint .comp-link { color: var(--cov-maintenance-ink); }
+.pz.bycomp th.sub.plan-build { color: var(--brand-blue); }
+.pz.bycomp th.sub.plan-maint { color: var(--cov-maintenance-ink); }
+.pz.bycomp thead tr:nth-child(2) th { text-align: center; }
+/* A row with nothing in either half. NOT hidden — a ranked suite that is
+   clear is a real answer, and the one you would otherwise go looking for —
+   but it should not compete with the rows that need reading. */
+.pz.bycomp tr.untracked td { opacity: .72; }
+.pz.bycomp .note-col { font-size: 12px; max-width: 260px; white-space: normal; }
+@media print {
+  .pz.bycomp td.plan, .pz.bycomp th.plan { background-image: none; }
+  .pz.bycomp tr.untracked td { opacity: 1; }
+}
+
 /* NEVER COLOUR ALONE. Every heading keeps its word and its title text, and
    this dot repeats the hue beside it — so the grid reads the same to someone
    who cannot tell teal from blue, and the legend below names all seven. */
@@ -1445,6 +1502,25 @@ svg text { font-family: var(--font-family-sans, Poppins, system-ui, sans-serif);
 
   .shell, .main-col { display: block; }
   main { padding: 0 !important; max-width: none !important; }
+
+  /* ── ONE SECTION, PRINTED ALONE ────────────────────────────────────
+     `UI.exportPdf(title, { only })` puts `.print-only` on the section the
+     button meant and `.print-only-on` on <body>. The Capacity screen is a
+     KPI strip, a day grid, a roster and three tables, so "Export PDF" on one
+     of those tables cannot mean "print all of that".
+
+     HIDE THE SIBLINGS, NOT THE ANCESTORS. `display: none` on a parent takes
+     its children with it however they are marked, so the rule hides every
+     `.section` that is not the chosen one and leaves the chain above it
+     alone. The chosen section is then un-hidden explicitly, for the case
+     where it is nested inside one of the hidden ones. */
+  body.print-only-on .section:not(.print-only) { display: none !important; }
+  body.print-only-on .print-only { display: block !important; }
+  /* The buttons inside the printed section go with every other control —
+     already covered by the `.btn` rule above, and said here because the
+     section is now the whole page and an unprintable control in the middle
+     of it is more conspicuous. */
+  body.print-only-on .print-only .btn { display: none !important; }
 
   /* A scroll container clips at the page edge instead of wrapping onto the
      next one, which silently truncates the widest tables. */

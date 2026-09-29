@@ -776,7 +776,16 @@ function boot() {
   vm.runInContext(`${fs.readFileSync(path.join(PUBLIC, 'ui.js'), 'utf8')}\n;globalThis.UI = UI;`, ctx);
   ctx.UI.setJiraBase(BASE);
   ctx.UI.api = async (url) => { urls.push(url); return payload; };
-  ctx.UI.jsonPut = async (url, body) => { puts.push({ url, body: out(body) }); return { ok: true }; };
+  /* `failPut` lets a check exercise the REFUSAL path. Without it the only
+     thing testable about a save is the happy one, and "the row goes back when
+     the server says no" is the half that actually protects the screen from
+     showing a value nobody stored. */
+  let failPut = null;
+  ctx.UI.jsonPut = async (url, body) => {
+    puts.push({ url, body: out(body) });
+    if (failPut) throw new Error(failPut);
+    return { ok: true };
+  };
   ctx.UI.toast = () => {};
   ctx.UI.drawer = () => {};
   /* `exportPdf` is an EXPORT, so stubbing it here really does replace what the
@@ -785,7 +794,7 @@ function boot() {
   const prints = [];
   ctx.UI.exportPdf = (title) => { prints.push(title); return 'x'; };
   vm.runInContext(`${fs.readFileSync(path.join(PUBLIC, 'views', 'prioritization.js'), 'utf8')}\n;globalThis.__v = PrioritizationView;`, ctx);
-  return { ctx, puts, urls, store, prints, setPayload: (p) => { payload = p; } };
+  return { ctx, puts, urls, store, prints, setPayload: (p) => { payload = p; }, failPut: (m) => { failPut = m; } };
 }
 
 /** One render, onto a FRESH mount — the node App hands a view each time. */
@@ -857,7 +866,34 @@ async function mountOnce(app, state = {}) {
     prints: app.prints,
     puts: app.puts,
     urls: app.urls,
+    failPut: app.failPut,
     fire,
+    /** Press one of a row's ↑/↓ buttons the way the delegated listener finds it. */
+    clickMove: (component, dir) => {
+      const node = { dataset: { rankMove: dir, component }, disabled: false };
+      node.closest = (sel) => (sel === '[data-rank-move]' ? node : null);
+      return fire('click', { target: { closest: node.closest } });
+    },
+    /** Drag one row onto another, as the browser's four events would. */
+    drag: (fromC, ontoC, levels = {}) => {
+      const rowNode = (c) => {
+        const n = { dataset: { rankRow: c, rankLevel: String(levels[c] == null ? 1 : levels[c]) },
+          classList: { add() {}, remove() {}, contains: () => false } };
+        n.closest = (sel) => (sel === '[data-rank-row]' ? n : null);
+        return n;
+      };
+      const from = rowNode(fromC), onto = rowNode(ontoC);
+      const dt = { setData() {}, effectAllowed: '', dropEffect: '' };
+      let defaulted = false;
+      fire('dragstart', { target: { closest: from.closest }, dataTransfer: dt });
+      fire('dragover', { target: { closest: onto.closest }, dataTransfer: dt,
+        preventDefault() { defaulted = true; } });
+      fire('drop', { target: { closest: onto.closest }, dataTransfer: dt });
+      // `dragover` calling preventDefault is what makes a row a drop target —
+      // a refused drag is refused by NOT calling it, so this is the flag that
+      // says whether the browser would have allowed the drop at all.
+      return { allowed: defaulted };
+    },
   };
 }
 
@@ -1674,3 +1710,186 @@ check('and the team on screen is the team in the link', async () => {
   console.log(`\n${passed} passed, ${failed} failed\n`);
   process.exit(failed ? 1 : 0);
 })();
+
+
+/* ── ORDER WITHIN A LEVEL ─────────────────────────────────────────────────
+   The order of this table is the answer it gives, and four levels is a coarse
+   way to say it. What is checked here is the part only the rendered page can
+   answer: that the control exists, that it is reachable without a mouse, that
+   a move sends the right thing, and that a drag cannot cross a level. The
+   model behind it is checked in test/component-rank.test.js. */
+
+/* UNESCAPED, because the attribute is. `R&D_Charlie` is written into the
+   markup as `R&amp;D_Charlie`, and a helper that compared the raw attribute
+   would force every expectation in this file to spell it that way — which
+   reads as a bug in the page rather than in the helper. */
+const rankRows = (html) => (html.match(/data-rank-row="([^"]+)"/g) || [])
+  .map(m => m.replace(/.*="|"$/g, ''))
+  .map(v => v.replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>'));
+
+check('THE ORDER COLUMN IS THERE, and every row can be picked up', async () => {
+  const r = await renderPage(PAYLOAD());
+  const t = r.table();
+  assert.ok(/class="rank-col"/.test(t), 'there is no Order column');
+  // Two P1s and a P2 in the fixture — KAT_Engineering is excluded.
+  assert.deepStrictEqual(rankRows(t), ['PS_iGO_NLG', 'PS_RES_NLG', 'PS_iGO_Lincoln']);
+  assert.ok(/draggable="true"/.test(t), 'the rows cannot be dragged');
+  assert.ok(/data-rank-level="1"/.test(t) && /data-rank-level="2"/.test(t),
+    'a row does not say which level it belongs to, so a drag cannot be confined to one');
+});
+
+check('IT IS REACHABLE WITHOUT A MOUSE — the arrows are real buttons', async () => {
+  /* Every other control on this screen works from the keyboard. A drag-only
+     row would be the first that does not, which is why the arrows are the
+     primary control and the drag is the shortcut on top. */
+  const t = (await renderPage(PAYLOAD())).table();
+  const moves = t.match(/<button[^>]*data-rank-move="[^"]*"[^>]*>/g) || [];
+  assert.strictEqual(moves.length, 6, 'expected an up and a down on each of the three rows');
+  assert.ok(moves.every(m => /aria-label="/.test(m)), 'a move button has no accessible name');
+  assert.ok(/aria-label="Move PS_iGO_NLG, P1, position 1 of 2 up"/.test(t),
+    'the label does not say what moving would do');
+});
+
+check('the ends are disabled — first cannot go up, last cannot go down', async () => {
+  const t = (await renderPage(PAYLOAD())).table();
+  const btn = (c, dir) => (t.match(new RegExp(`<button[^>]*data-rank-move="${dir}" data-component="${c}"[^>]*>`)) || [''])[0];
+  assert.ok(/disabled/.test(btn('PS_iGO_NLG', 'up')), 'the first P1 could be moved up');
+  assert.ok(!/disabled/.test(btn('PS_iGO_NLG', 'down')));
+  assert.ok(/disabled/.test(btn('PS_RES_NLG', 'down')), 'the last P1 could be moved down');
+  // The lone P2 is both first and last of its level.
+  assert.ok(/disabled/.test(btn('PS_iGO_Lincoln', 'up')) && /disabled/.test(btn('PS_iGO_Lincoln', 'down')),
+    'a level with one row offered a move that goes nowhere');
+});
+
+check('PRESSING DOWN MOVES THE ROW AND SAVES THE WHOLE LEVEL', async () => {
+  /* The level's FULL list, not the rows on screen: a family chip can be
+     hiding some of them, and sending a subset would renumber the level using
+     part of it. */
+  const r = await renderPage(PAYLOAD());
+  r.clickMove('PS_iGO_NLG', 'down');
+  await new Promise(res => setTimeout(res, 0));
+
+  assert.strictEqual(r.puts.length, 1, 'nothing was saved');
+  assert.strictEqual(r.puts[0].url, '/api/component-rank');
+  assert.strictEqual(r.puts[0].body.level, 1, 'the level did not travel');
+  assert.deepStrictEqual(r.puts[0].body.order, ['PS_RES_NLG', 'PS_iGO_NLG'],
+    'the saved order is not the new one');
+  // And the table redrew in the new order rather than waiting for a reload.
+  assert.deepStrictEqual(rankRows(r.table()).slice(0, 2), ['PS_RES_NLG', 'PS_iGO_NLG'],
+    'the screen still shows the old order');
+});
+
+check('A DRAG DOES EXACTLY WHAT THE ARROWS DO', async () => {
+  /* One implementation of "what does moving a row mean", or the two drift. */
+  const r = await renderPage(PAYLOAD());
+  const d = r.drag('PS_iGO_NLG', 'PS_RES_NLG', { PS_iGO_NLG: 1, PS_RES_NLG: 1 });
+  await new Promise(res => setTimeout(res, 0));
+  assert.strictEqual(d.allowed, true, 'the browser would not have accepted the drop');
+  assert.strictEqual(r.puts.length, 1);
+  assert.deepStrictEqual(r.puts[0].body.order, ['PS_RES_NLG', 'PS_iGO_NLG']);
+});
+
+check('A DRAG CANNOT CROSS A LEVEL — the design, at the seam', async () => {
+  /* Dragging is not a way to change a priority: the Priority column does
+     that, visibly. A cross-level drop is refused by NOT making the row a drop
+     target, so the cursor says no rather than the drop landing and being
+     quietly discarded. */
+  const r = await renderPage(PAYLOAD());
+  const d = r.drag('PS_iGO_NLG', 'PS_iGO_Lincoln', { PS_iGO_NLG: 1, PS_iGO_Lincoln: 2 });
+  await new Promise(res => setTimeout(res, 0));
+  assert.strictEqual(d.allowed, false, 'a P1 could be dropped onto a P2');
+  assert.strictEqual(r.puts.length, 0, 'and it saved something');
+  assert.deepStrictEqual(rankRows(r.table()), ['PS_iGO_NLG', 'PS_RES_NLG', 'PS_iGO_Lincoln'],
+    'the order moved anyway');
+});
+
+check('A REFUSED MOVE PUTS THE ROW BACK', async () => {
+  /* The screen must never be left showing an order the server did not accept:
+     it looks identical to a saved one, and the next reload silently replaces
+     it without anything having said so. */
+  const app = boot();
+  app.setPayload(PAYLOAD());
+  const r = await mountOnce(app);
+  r.failPut('refused');
+  r.clickMove('PS_iGO_NLG', 'down');
+  await new Promise(res => setTimeout(res, 0));
+  assert.strictEqual(r.puts.length, 1, 'fixture check: it tried to save');
+  assert.deepStrictEqual(rankRows(r.table()).slice(0, 2), ['PS_iGO_NLG', 'PS_RES_NLG'],
+    'the screen kept an order the server refused');
+});
+
+check('a move that goes nowhere writes nothing', async () => {
+  /* Pressing up on the first row, or dropping a row on itself. Both are
+     no-ops, and a save for each would write an audit entry per stray click. */
+  const r = await renderPage(PAYLOAD());
+  r.clickMove('PS_iGO_NLG', 'up');
+  r.drag('PS_RES_NLG', 'PS_RES_NLG', { PS_RES_NLG: 1 });
+  await new Promise(res => setTimeout(res, 0));
+  assert.strictEqual(r.puts.length, 0, 'a no-op move was saved');
+});
+
+/* A LEVEL SPLIT ACROSS TWO FAMILIES — the only arrangement in which a family
+   chip hides part of a level, which is what makes "the order sent is the
+   level's, not the screen's" testable at all. Three P1s in two families, plus
+   a P2 that is not first in its own level. */
+const SPLIT_SNAP = {
+  issues: Object.fromEntries([
+    epic('S-1', { components: ['PS_Alpha'], automationStatus: 'Automated' }),
+    epic('S-2', { components: ['PS_Bravo'], automationStatus: 'Automated' }),
+    epic('S-3', { components: ['R&D_Charlie'], automationStatus: 'Automated' }),
+    epic('S-4', { components: ['PS_Delta'], automationStatus: 'Automated' }),
+    epic('S-5', { components: ['PS_Echo'], automationStatus: 'Automated' }),
+  ].map(i => [i.key, i])),
+};
+const SPLIT_PLAN = {
+  componentPriority: { PS_Alpha: 1, PS_Bravo: 1, 'R&D_Charlie': 1, PS_Delta: 2, PS_Echo: 2 },
+  componentNote: {}, excludedComponents: [], coverageTeams: [],
+};
+const SPLIT_PAYLOAD = () => ({ ...pz.view(SPLIT_SNAP, SPLIT_PLAN), noteMax: notes.MAX, project: 'AUTOKAT' });
+
+check('A FILTERED VIEW STILL SENDS THE WHOLE LEVEL', async () => {
+  /* A family chip can be hiding part of a level. Reading the order off the
+     rows ON SCREEN would renumber the level using a subset — so the two rows
+     the chip hid would be silently reassigned positions nobody chose. The
+     order comes from the level's full list instead. */
+  const r = await renderPage(SPLIT_PAYLOAD());
+  r.clickFamily('ps');                        // hides R&D_Charlie, a P1
+  const shownRows = rankRows(r.table());
+  assert.ok(!shownRows.includes('R&D_Charlie'), 'fixture check: the chip hid a P1');
+  assert.ok(shownRows.includes('PS_Alpha') && shownRows.includes('PS_Bravo'));
+
+  r.clickMove('PS_Alpha', 'down');
+  await new Promise(res => setTimeout(res, 0));
+  assert.strictEqual(r.puts.length, 1, 'nothing was saved');
+  assert.deepStrictEqual(r.puts[0].body.order.slice().sort(),
+    ['PS_Alpha', 'PS_Bravo', 'R&D_Charlie'],
+    'the hidden P1 was dropped from the order, so its position was reassigned');
+  assert.strictEqual(r.puts[0].body.order.length, 3, 'the level was renumbered with a subset');
+});
+
+check('THE DROP RE-CHECKS THE LEVEL, not only the dragover', async () => {
+  /* Two guards, because they answer different questions: `dragover` decides
+     whether the browser shows a drop target, and `drop` decides what happens
+     if one arrives anyway. Dropping the SECOND P1 onto the FIRST P2 — so the
+     target index differs from the source index, and a missing guard would
+     actually move something rather than falling into the no-op path that
+     masks it. */
+  const r = await renderPage(SPLIT_PAYLOAD());
+  const d = r.drag('PS_Bravo', 'PS_Delta', { PS_Bravo: 1, PS_Delta: 2 });
+  await new Promise(res => setTimeout(res, 0));
+  assert.strictEqual(d.allowed, false, 'the browser would have accepted a cross-level drop');
+  assert.strictEqual(r.puts.length, 0, 'a cross-level drop was saved');
+  assert.deepStrictEqual(rankRows(r.table()),
+    ['PS_Alpha', 'PS_Bravo', 'R&D_Charlie', 'PS_Delta', 'PS_Echo'],
+    'the order moved anyway');
+});
+
+check('and a drag WITHIN a level still works in the same fixture', async () => {
+  // Or the two checks above pass against a page where dragging does nothing.
+  const r = await renderPage(SPLIT_PAYLOAD());
+  const d = r.drag('PS_Alpha', 'R&D_Charlie', { PS_Alpha: 1, 'R&D_Charlie': 1 });
+  await new Promise(res => setTimeout(res, 0));
+  assert.strictEqual(d.allowed, true);
+  assert.strictEqual(r.puts.length, 1);
+  assert.deepStrictEqual(r.puts[0].body.order, ['PS_Bravo', 'R&D_Charlie', 'PS_Alpha']);
+});

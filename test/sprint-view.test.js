@@ -30,6 +30,7 @@ process.env.STORE_DIR = SCRATCH;
 
 const insights = require('../lib/insights');
 const priority = require('../lib/priority');
+const prioritization = require('../lib/prioritization');
 
 let passed = 0, failed = 0;
 const checks = [];
@@ -286,36 +287,185 @@ const CAPACITY_VIEW = fs.readFileSync(path.join(__dirname, '..', 'public', 'view
  * both screens rather than on the one it started life in — the whole point of
  * sharing it being that the two cannot drift apart.
  */
-async function renderCapacity(snap = SNAP, plan = PLAN) {
+async function renderCapacity(snap = SNAP, plan = PLAN, sprint = SPRINT, opts = {}) {
   /* TODAY IS PINNED, like the Active sprint harness pins it. The capacity
      payload now carries a `today` for the Due column's overdue reading, and
      left to the wall clock these checks would pass today and fail whenever
      somebody ran them after the fixture's dates went by. */
-  const payload = insights.capacityView(plan, snap, TEAM, SPRINT, { today: MID_SPRINT });
+  const payload = insights.capacityView(plan, snap, TEAM, sprint, { today: MID_SPRINT });
+  /* THE SAME COMPOSITION THE ROUTE PERFORMS. `/api/capacity` attaches the "By
+     component" sheet to the grid rather than building it inside
+     `capacityView` — `prioritization` already requires `insights`, so doing
+     it there would close a require cycle. A harness that skipped this step
+     would render the screen with no sheet at all, and every check on that
+     section would pass against nothing. */
+  /* THE TEAM COMES OFF THE PLAN, as `findTeam` gives it to the route. The
+     module-level TEAM has no `jiraTeams` — the older checks in this file do
+     not need it — so passing that constant here made the sheet report a team
+     that cannot claim an epic, and six checks on it passed against the
+     explanation card instead of the grid. */
+  const bcTeam = (plan.teams || []).find(t => t.id === TEAM.id) || TEAM;
+  payload.byComponent = prioritization.sprintComponents(snap, plan, { team: bcTeam, sprint });
   let html = '';
   const el = () => ({
     addEventListener() {}, value: '', hidden: false, dataset: {}, style: {}, setAttribute() {},
     classList: { toggle() {}, add() {}, remove() {}, contains: () => false }, select() {},
     getAttribute: () => null, querySelector: () => el(), querySelectorAll: () => [],
   });
+  /* A <body> AND A window.print, so "Export PDF" is testable at all. What
+     matters about that button is the state of the document AT PRINT TIME —
+     the title it saves under, and whether the section it meant is the only
+     one showing — so the stub records both at that moment and nothing else
+     about it can be checked after the fact. */
+  const printed = [];
+  const classesOf = (node) => [...node._cls];
+  const mkNode = () => {
+    const _cls = new Set();
+    return {
+      _cls,
+      classList: {
+        add: (c) => _cls.add(c), remove: (c) => _cls.delete(c),
+        toggle: () => {}, contains: (c) => _cls.has(c),
+      },
+    };
+  };
+  const body = mkNode();
+  const printOnly = mkNode();          // the node `[data-bycomp]` resolves to
   const ctx = {
     console, Promise, setTimeout, clearTimeout, encodeURIComponent, CSS: { escape: String },
     App: { refresh() {} },
     Charts: new Proxy({}, { get: () => () => '' }),
-    document: { createElement: () => el(), querySelector: () => el(), querySelectorAll: () => [] },
+    document: {
+      title: 'Planning Tool',
+      body,
+      createElement: () => el(),
+      querySelector: (sel) => (sel === '[data-bycomp]' ? printOnly : el()),
+      querySelectorAll: () => [],
+    },
+    window: {
+      _on: {},
+      addEventListener(t, fn) { this._on[t] = fn; },
+      removeEventListener(t) { delete this._on[t]; },
+      print() {
+        printed.push({
+          title: ctx.document.title,
+          body: classesOf(body),
+          section: classesOf(printOnly),
+        });
+      },
+    },
   };
   vm.createContext(ctx);
   vm.runInContext(`${fs.readFileSync(path.join(__dirname, '..', 'public', 'ui.js'), 'utf8')}\n;globalThis.UI = UI;`, ctx);
   ctx.UI.setJiraBase('https://ipipelinejira.atlassian.net');
   // The screen fetches the roster and scenarios alongside the grid; neither
   // bears on the item table, and both are allowed to be absent in the app.
-  ctx.UI.api = async (p) => (p.startsWith('/api/capacity') ? payload : null);
+  /* THE DRAWER'S ROUTE TOO, answered from the same module the route calls —
+     so a check on the drawer exercises the real composition rather than a
+     canned reply. `drawn` keeps the last thing handed to UI.drawer. */
+  let drawn = null;
+  const api = async (p) => {
+    if (p.startsWith('/api/capacity/bycomponent/epics')) {
+      const qp = new URLSearchParams(p.slice(p.indexOf('?') + 1));
+      const out = prioritization.sprintComponentCell(snap, plan, {
+        team: bcTeam, sprint,
+        component: qp.get('row'), tool: qp.get('tool'), cell: qp.get('cell'),
+      });
+      if (!out.ok) throw new Error(`No cell "${qp.get('tool')}/${qp.get('cell')}".`);
+      return out;
+    }
+    return p.startsWith('/api/capacity') ? payload : null;
+  };
 
   vm.runInContext(`${CAPACITY_VIEW}\n;globalThis.__c = CapacityView;`, ctx);
+  ctx.UI.api = api;
+  ctx.UI.drawer = (h) => { drawn = h; };
+  /* THE NOTE'S WRITE, recorded rather than performed. `jsonPut` is
+     module-private inside ui.js and cannot be stubbed from out here — the
+     lesson the points-edit checks already learned — so the seam is `fetch`,
+     which is what it actually calls. */
+  ctx.fetch = async (url, init = {}) => {
+    puts.push({ url, method: init.method || 'GET', body: JSON.parse(init.body || '{}') });
+    /* `request` reads the body with `.text()` and parses it itself — a stub
+       offering `.json()` looks right and is never called, so the refusal path
+       silently succeeds and "puts the old text back" passes against nothing. */
+    return opts.failSave
+      ? { ok: false, status: 409, statusText: 'Conflict', text: async () => JSON.stringify({ error: 'refused' }) }
+      : { ok: true, status: 200, statusText: 'OK', text: async () => JSON.stringify({ ok: true }) };
+  };
+
+  /* ── A MOUNT THAT CAN ACTUALLY BE CLICKED ──────────────────────────
+     The "By component" chips and the fold redraw ONE section in place
+     rather than refreshing the page, so neither is reachable through
+     `innerHTML` alone: with a mount that swallows listeners, a mutation
+     removing the family filter outright passed every check in this file.
+     This records the delegated handlers and lets a check fire one, and
+     `querySelector('[data-bycomp]')` hands back a node whose `outerHTML`
+     setter splices the new markup into the page the same way a browser
+     would. */
+  const handlers = {};
+  const puts = [];
+  const section = () => {
+    const i = html.indexOf('<section class="section" data-bycomp>');
+    if (i < 0) return null;
+    const end = html.indexOf('</section>', i) + '</section>'.length;
+    return { i, end };
+  };
+  /* An element that answers `closest` for whichever data-attribute it carries.
+
+     `extra` IS THE ELEMENT, not a template copied into one. A handler that
+     writes back to the node it was handed — the note box putting its old text
+     back after a refused save — must be writing to the object the check can
+     then read, or the check asserts against a copy nobody touched and passes
+     whatever the handler did. */
+  const targetFor = (data, extra = {}) => {
+    const node = Object.assign(extra, {
+      dataset: data,
+      textContent: data.__text || '',
+      disabled: 'disabled' in extra ? extra.disabled : false,
+    });
+    node.closest = (sel) => {
+      const attr = (sel.match(/\[([\w-]+)/) || [])[1];
+      const camel = String(attr || '').replace(/^data-/, '').replace(/-(\w)/g, (_, c) => c.toUpperCase());
+      return Object.prototype.hasOwnProperty.call(data, camel) ? node : null;
+    };
+    return node;
+  };
+
   const mount = {
-    style: {}, addEventListener() {},
-    querySelector: () => el(), querySelectorAll: () => [],
+    style: {},
+    addEventListener(type, fn) { (handlers[type] = handlers[type] || []).push(fn); },
+    querySelector: (sel) => {
+      if (sel !== '[data-bycomp]') return el();
+      const at = section();
+      if (!at) return null;
+      return { set outerHTML(v) { html = html.slice(0, at.i) + v + html.slice(at.end); } };
+    },
+    querySelectorAll: () => [],
     set innerHTML(v) { html = v; }, get innerHTML() { return html; },
+    /** Fire a click at an element carrying `data`, as the browser would. */
+    async click(data, extra) { return mount.fire('click', data, extra); },
+    /** Any event type — the note box saves on `focusout`, which a click-only
+        harness could not deliver at all. */
+    async fire(type, data, extra = {}) {
+      const target = targetFor(data, extra);
+      for (const fn of (handlers[type] || []).slice()) await fn({ target, preventDefault() {} });
+      return target;
+    },
+    get drawn() { return drawn; },
+    get printed() { return printed; },
+    get puts() { return puts; },
+    /* The two marks the scoped print puts on the document, read AFTER the
+       fact — so a check can confirm the page was put back, which is the one
+       failure of printing a single section that is worse than not offering
+       it at all. */
+    get bodyClasses() { return classesOf(body); },
+    get sectionClasses() { return classesOf(printOnly); },
+    /** What the browser fires when the print dialogue closes. */
+    afterprint() {
+      const fn = ctx.window._on.afterprint;
+      if (fn) fn();
+    },
   };
   await ctx.__c.render({
     teamId: 'titan', sprintId: 'S40', categories: {},
@@ -324,9 +474,11 @@ async function renderCapacity(snap = SNAP, plan = PLAN) {
        decide what is late — so a stripped-down copy makes that column render
        and never colour anything, which looks exactly like a sprint with no
        late work. It did, until a check asked. */
-    sprints: [{ ...SPRINT, byTeam: {} }],
+    sprints: [{ ...sprint, byTeam: sprint.byTeam || {} }],
   }, mount);
-  return { html, payload };
+  // `html` is read through a getter so a check that clicks and then reads
+  // sees the redrawn page, not the one captured at render time.
+  return { get html() { return html; }, payload, mount, printed, puts };
 }
 
 /**
@@ -476,6 +628,726 @@ check('the capacity payload carries the items at all', async () => {
   const { payload: sprint } = await renderHtml();
   assert.ok(Array.isArray(payload.items) && payload.items.length === sprint.items.length,
     'the capacity screen must carry the same items the sprint screen does');
+});
+
+/* ── "BY COMPONENT" ON CAPACITY PLANNING ──────────────────────────────────
+   The model behind this section is checked in test/by-component.test.js. What
+   is checked HERE is the part only the rendered page can answer: that the
+   three-row header adds up, that the planned columns are named after the
+   sprint the numbers came from, and that a number opens the set it counted. */
+
+/** The By component section alone, bounded at its own closing table. */
+const byCompSection = (html) => {
+  const i = html.indexOf('>By component<');
+  if (i < 0) return '';
+  const end = html.indexOf('</table>', i);
+  return html.slice(i, end < 0 ? html.length : end + 8);
+};
+
+/* A plan with priorities and a sprint the snapshot indexes, so the section
+   has rows to draw. The shared fixture has neither — deliberately, since 135
+   checks depend on its exact shape — so this one is built beside it. */
+const BC_SPRINT = {
+  ...SPRINT,
+  byTeam: { titan: { jiraId: '900', name: 'Katalon Titan Sprint 40', state: 'active' } },
+};
+/* A FUTURE SPRINT, so "a plan is not progress" is testable at all. Without
+   one, the active-sprint-only rule and the old open-sprint rule agree on
+   every number and the difference between them cannot be seen. */
+const BC_NEXT = {
+  id: 'S41', number: 41, name: 'Sprint 41', start: '2026-10-01', end: '2026-10-14',
+  byTeam: { titan: { jiraId: '901', name: 'Katalon Titan Sprint 41', state: 'future' } },
+};
+const BC_PLAN = {
+  ...PLAN,
+  sprints: [BC_SPRINT, BC_NEXT],
+  teams: [{ ...TEAM, jiraTeams: ['Katalon Auto Titan'] }],
+  componentPriority: { PS_iGO_NLG: 1, KAT_Common: 2, PS_RES_NLG: 3 },
+  /* A note on a BUSY row and a note on a CLEAR one. The clear row folds
+     away by default, so a fixture whose only note sits there makes every
+     check on the note box assert against markup that was never drawn. */
+  componentNote: { PS_iGO_NLG: 'waiting on the migration', PS_RES_NLG: 'parked until Q4' },
+  excludedComponents: [],
+  coverageTeams: ['Katalon Auto Titan'],
+};
+const bcEpic = (key, components, automationStatus) => ({
+  key, issueType: 'Epic', summary: `Epic ${key}`, components,
+  automationStatus, labels: [], team: 'Katalon Auto Titan', status: 'Open',
+});
+const BC_SNAP = {
+  ...SNAP,
+  issues: {
+    ...SNAP.issues,
+    'E-1': bcEpic('E-1', ['PS_iGO_NLG', 'TrueTest'], 'Maintenance'),
+    'E-2': bcEpic('E-2', ['PS_iGO_NLG'], 'Ready for Automation'),
+    'E-3': bcEpic('E-3', ['KAT_Common'], 'Blocked'),
+    /* NO JIRA TEAM — the PS_iGO_Lafayette defect. `coverageTeams` below is
+       given a real allow-list so it actually bites; with an empty one every
+       epic is in scope anyway and this case cannot be reproduced. */
+    'E-6': { ...bcEpic('E-6', ['PS_iGO_NLG'], 'Blocked'), team: '' },
+    'E-4': bcEpic('E-4', ['PS_iGO_NLG'], 'Automated'),
+    // A Story in the sprint building E-4, so the planned half is not empty.
+    'S-1': {
+      key: 'S-1', summary: 'S-1', issueType: 'Story', status: 'In Dev', parentKey: 'E-4',
+      components: [], labels: [], team: 'Katalon Auto Titan', relatesTo: [],
+    },
+    // Queued for the FUTURE sprint against a backlog epic: it must stay in
+    // the backlog AND be reported as earmarked.
+    'E-5': bcEpic('E-5', ['PS_iGO_NLG'], 'Ready for Automation'),
+    'S-2': {
+      key: 'S-2', summary: 'S-2', issueType: 'Story', status: 'To Do', parentKey: 'E-5',
+      components: [], labels: [], team: 'Katalon Auto Titan', relatesTo: [],
+    },
+  },
+  /* The sprint index carries the ORIGINAL items as well as the new Story:
+     `capacityView` takes the fast path through this index, so indexing only
+     S-1 would quietly shrink the item table to one row and take several
+     checks on that table with it. */
+  byTeam: { titan: { sprintIssues: { 900: [...Object.keys(SNAP.issues), 'S-1'], 901: ['S-2'] } } },
+};
+
+const renderByComp = () => renderCapacity(BC_SNAP, BC_PLAN, BC_SPRINT);
+
+check('THE "BY COMPONENT" SHEET IS ON THE PAGE, above the item table', async () => {
+  /* Order matters and is the request: you decide what the sprint should take
+     on from the suites, then look at the tickets. Below the item table it is
+     a footnote. */
+  const { html } = await renderByComp();
+  const sheet = html.indexOf('>By component<');
+  const items = html.indexOf('All sprint items');
+  assert.ok(sheet > 0, 'the section did not render at all');
+  assert.ok(items > 0, 'fixture check: the item table is on the page');
+  assert.ok(sheet < items, 'the sheet rendered below the item table');
+});
+
+check('THE THREE-ROW HEADER ADDS UP — every body row fits it exactly', async () => {
+  /* A colspan that does not match the cells beneath it is the one table bug a
+     screenshot will not show you: the browser silently reflows and the
+     numbers sit under the wrong headings. Counted rather than eyeballed. */
+  const body = byCompSection((await renderByComp()).html);
+  const head = body.slice(body.indexOf('<thead>'), body.indexOf('</thead>'));
+  const rows = head.split('<tr>').slice(1);
+  assert.strictEqual(rows.length, 3, 'the header is not three rows deep');
+
+  // Width of each header row: a cell counts for its colspan, and a rowspan
+  // cell also occupies the rows below it.
+  const widthOf = (tr) => (tr.match(/<th[^>]*>/g) || [])
+    .reduce((n, th) => n + Number((th.match(/colspan="(\d+)"/) || [])[1] || 1), 0);
+  const spans = (tr) => (tr.match(/<th[^>]*>/g) || [])
+    .filter(th => /rowspan="3"/.test(th)).length;
+
+  const top = widthOf(rows[0]);
+  assert.strictEqual(widthOf(rows[1]) + spans(rows[0]), top, 'the second header row does not span the table');
+  assert.strictEqual(widthOf(rows[2]) + spans(rows[0]), top, 'the third header row does not span the table');
+
+  const cellsIn = (tr) => (tr.match(/<td[^>]*>/g) || []).length;
+  const bodyRows = body.slice(body.indexOf('<tbody>')).split('<tr').slice(1);
+  assert.ok(bodyRows.length >= 3, `only ${bodyRows.length} rows rendered — the fixture is not reaching the table`);
+  for (const tr of bodyRows) {
+    assert.strictEqual(cellsIn(tr), top, `a body row has ${cellsIn(tr)} cells under a ${top}-column header`);
+  }
+});
+
+check('THE PLANNED COLUMNS ARE NAMED AFTER THE SPRINT THE NUMBERS CAME FROM', async () => {
+  /* From the payload, not the picker: the two are different facts the moment
+     a request is in flight, and a header naming a sprint the numbers did not
+     come from is worse than no header at all. */
+  const { html, payload } = await renderByComp();
+  const body = byCompSection(html);
+  assert.strictEqual(payload.byComponent.sprint.label, 'Katalon Titan Sprint 40',
+    'fixture check: the team has its own name for this sprint');
+  assert.ok(body.includes('Katalon Titan Sprint 40 Planned'),
+    'the planned group is not named after the selected sprint');
+  assert.ok(/>Backlog <span class="muted">· all teams<\/span></.test(body),
+    'the backlog group does not name its own scope, so it reads as this team\'s');
+  /* THE TOOLTIP STATES THE RULE, and the rule is "no work in an ACTIVE
+     sprint". A heading that still described the old open-sprint cut would
+     explain a number the page no longer produces — the kind of wrong that
+     survives every arithmetic check in this file. */
+  const head = (body.match(/<th[^>]*title="([^"]*)"[^>]*>Backlog /) || [])[1] || '';
+  assert.ok(/ACTIVE sprint/.test(head), `the backlog tooltip describes the wrong rule: ${head}`);
+  assert.ok(!/any open sprint/.test(head), 'the backlog tooltip still says "any open sprint"');
+  assert.ok(/plan, not progress/.test(head), 'it does not say why a future sprint stays in');
+  assert.ok(body.includes('>New build<') && body.includes('>Maintenance<'),
+    'the planned pair lost its column headings');
+});
+
+/* ONE CELL, BY ITS COLUMN CLASS — not the whole section.
+   Both checks below started out searching the section for a key and for a
+   dash, and both passed while the cells were plain text: the row's component
+   NAME links every key it counted (so the key was there), and the Notes
+   column renders a dash of its own (so the dash was there). A check that a
+   cell links has to look at that cell. */
+function bcCell(html, component, cls) {
+  const body = byCompSection(html);
+  const rows = body.slice(body.indexOf('<tbody>')).split('<tr');
+  /* Matched on the bare name, not `>name<`: a row with keys renders the
+     component inside an anchor and one without renders it as loose text on
+     its own line, so the angle brackets are only there half the time — and
+     the half they are missing is the empty row these checks are about. */
+  const tr = rows.find(r => r.includes(component));
+  assert.ok(tr, `no row for ${component}`);
+  const cells = tr.match(/<td[^>]*>[\s\S]*?<\/td>/g) || [];
+  const hit = cells.find(td => cls.every(c => new RegExp(`class="[^"]*\\b${c}\\b`).test(td)));
+  assert.ok(hit, `${component}: no cell matching ${cls.join(' + ')}`);
+  return hit;
+}
+
+check('A NUMBER OPENS A DRAWER, not a Jira tab', async () => {
+  /* You click a 16 to find out WHICH sixteen. An anchor answers that with a
+     tab switch, a Jira page load and a trip back; the drawer answers in
+     place and carries its own "Open in Jira" for when that was the point.
+     Every other number on Coverage and Prioritization already works this
+     way — this table was the odd one out. */
+  const { html } = await renderByComp();
+  const cell = bcCell(html, 'PS_iGO_NLG', ['cov-maintenance', 'band-a']);
+  assert.ok(!/<a\b/.test(cell), `the cell still renders a Jira anchor: ${cell}`);
+  assert.ok(/<button/.test(cell), 'the number is not a real button, so it is not keyboard-reachable');
+  assert.ok(/data-act="bc-epics"/.test(cell), 'the cell opens nothing');
+});
+
+check('AND IT CARRIES WHICH CELL IT IS, so the drawer can list that set', async () => {
+  const { html } = await renderByComp();
+  const backlog = bcCell(html, 'PS_iGO_NLG', ['cov-maintenance', 'band-a']);
+  assert.ok(/data-row="PS_iGO_NLG"/.test(backlog), 'the row is not named');
+  assert.ok(/data-tool="truetest"/.test(backlog), 'the tool is not named');
+  assert.ok(/data-cell="maintenance"/.test(backlog), 'the column is not named');
+
+  // The planned half names its own column, not the backlog's — the two
+  // Maintenance columns in a row are different measurements.
+  const planned = bcCell(html, 'PS_iGO_NLG', ['plan-build', 'band-b']);
+  assert.ok(/data-cell="build"/.test(planned), `the New build cell says the wrong column: ${planned}`);
+  assert.ok(/data-tool="kse"/.test(planned), 'the planned cell says the wrong tool');
+});
+
+check('THE DRAWER LISTS EXACTLY THE SET THE NUMBER COUNTED', async () => {
+  /* The cardinal rule of every drill-in here. The route re-runs the sheet
+     and reads the cell's OWN key list rather than rebuilding the filter from
+     its query string — a second implementation agrees until the day it does
+     not, and then neither side says which one is wrong. */
+  const cell = (tool, c) => prioritization.sprintComponentCell(BC_SNAP, BC_PLAN, {
+    team: BC_PLAN.teams[0], sprint: BC_SPRINT, component: 'PS_iGO_NLG', tool, cell: c,
+  });
+  const { payload } = await renderByComp();
+  const row = payload.byComponent.rows.find(r => r.component === 'PS_iGO_NLG');
+
+  for (const [tool, name] of [['truetest', 'maintenance'], ['kse', 'ready'], ['kse', 'build']]) {
+    const r = cell(tool, name);
+    assert.strictEqual(r.ok, true, `${tool}/${name} was refused`);
+    assert.strictEqual(r.count, row[tool][name],
+      `${tool}/${name}: the cell says ${row[tool][name]} and the drawer would list ${r.count}`);
+    assert.deepStrictEqual(r.epics.map(e => e.key), row[tool].keys[name],
+      `${tool}/${name}: the drawer lists a different set from the one the number counted`);
+    assert.ok(r.epics.every(e => !e.absent), `${tool}/${name}: the drawer could not resolve an epic it listed`);
+  }
+  // The heading names the tool AND the column, both from the model.
+  assert.strictEqual(cell('truetest', 'maintenance').label, 'TrueTest · Maintenance');
+  assert.strictEqual(cell('kse', 'build').label, 'KSE · New build');
+  assert.strictEqual(cell('truetest', 'maintenance').half, 'backlog');
+  assert.strictEqual(cell('kse', 'build').half, 'planned');
+});
+
+check('AN UNKNOWN CELL IS REFUSED, not answered with an empty list', async () => {
+  /* A drawer saying 0 under a number saying 12 is worse than an error: it
+     reads as an answer. */
+  const bad = (o) => prioritization.sprintComponentCell(BC_SNAP, BC_PLAN, {
+    team: BC_PLAN.teams[0], sprint: BC_SPRINT,
+    component: 'PS_iGO_NLG', tool: 'truetest', cell: 'maintenance', ...o,
+  });
+  assert.strictEqual(bad({ cell: 'automated' }).ok, false, 'a column this table does not draw was answered');
+  assert.strictEqual(bad({ cell: 'nonsense' }).ok, false);
+  assert.strictEqual(bad({ tool: 'nonsense' }).ok, false);
+  assert.strictEqual(bad({ component: 'Not A Suite' }).ok, false);
+  assert.strictEqual(bad({}).ok, true, 'fixture check: the good call still works');
+  assert.ok((bad({ cell: 'nonsense' }).known || []).includes('build'), 'the refusal does not say what is valid');
+});
+
+check('A ZERO DOES NOT OPEN — it is an absence, not a question', async () => {
+  const { html } = await renderByComp();
+  // PS_iGO_NLG has TrueTest Maintenance but no TrueTest Ready.
+  const cell = bcCell(html, 'PS_iGO_NLG', ['cov-ready', 'band-a']);
+  assert.ok(!/<button/.test(cell), `a zero cell rendered a control: ${cell}`);
+  assert.ok(cell.includes('—'), `a zero cell is not a dash: ${cell}`);
+  // The same column on the same row on the other side of the table is NOT
+  // zero, so the check above is about the number and not about the column.
+  assert.ok(/<button/.test(bcCell(html, 'PS_iGO_NLG', ['cov-ready', 'band-b'])),
+    'fixture check: PS_iGO_NLG has a KSE Ready epic');
+});
+
+check('THE COMPONENT NAME STILL GOES TO JIRA — it is a search, not a cell', async () => {
+  /* The name is the whole suite across both halves, which is the thing you
+     would actually search for. Only the CELLS became drawers. */
+  const { html } = await renderByComp();
+  const tbody = byCompSection(html);
+  const row = tbody.slice(tbody.indexOf('<tbody>')).split('<tr').find(r => r.includes('PS_iGO_NLG'));
+  const nameCell = (row.match(/<td[^>]*>[\s\S]*?<\/td>/) || [''])[0];
+  assert.ok(/<a\b[^>]*class="comp-link"/.test(nameCell), `the component name stopped linking: ${nameCell}`);
+  assert.ok(/key(%20|\+)in(%20|\+)\(/.test(nameCell), 'the name links by something other than key');
+});
+
+check('A CLEAR RANKED SUITE IS FOLDED AWAY AND COUNTED, not dropped', async () => {
+  /* The ranked list is portfolio-wide and a team touches a slice of it: on
+     his data Ruby's sheet has 129 ranked rows and something in about twenty.
+     Drawing all 129 buries the twenty that need reading under a hundred rows
+     of dashes — so the clear ones fold, and the COUNT is the finding. */
+  const { html, payload } = await renderByComp();
+  const body = byCompSection(html);
+  const bc = payload.byComponent;
+  assert.ok(bc.rows.some(r => r.component === 'PS_RES_NLG' && r.empty),
+    'fixture check: PS_RES_NLG is a ranked component with nothing against it');
+
+  // Bounded at </tbody>: the footer is a <tr> too, and counting it makes the
+  // table look like it drew one more row than it did.
+  const tbody = body.slice(body.indexOf('<tbody>'), body.indexOf('</tbody>'));
+  const drawn = tbody.split('<tr').length - 1;
+  assert.strictEqual(drawn, bc.rows.filter(r => !r.empty).length,
+    'the clear rows were drawn by default');
+  assert.ok(!tbody.includes('PS_RES_NLG'), 'a clear row is in the table body');
+
+  const section = html.slice(html.indexOf('>By component<'));
+  assert.ok(/1 clear suite hidden/.test(section),
+    'the folded rows were dropped in silence instead of counted');
+  assert.ok(/data-act="bc-show-all"/.test(section), 'there is no way to unfold them');
+});
+
+check('THE FOOTER COUNTS THE ROWS ON SCREEN, not the ones in the payload', async () => {
+  /* Every individual figure correct and the one line a reader quotes in a
+     status update wrong — the failure the Prioritization footer already
+     documents, and the fold above is exactly what would cause it here. */
+  const { html, payload } = await renderByComp();
+  const body = byCompSection(html);
+  const foot = body.slice(body.indexOf('<tfoot>'));
+  const shown = payload.byComponent.rows.filter(r => !r.empty).length;
+  assert.ok(foot.includes(`${shown} components`), `the footer does not say "${shown} components"`);
+  assert.notStrictEqual(shown, payload.byComponent.rows.length,
+    'fixture check: the payload has more rows than the table draws, or this proves nothing');
+});
+
+check('EVERY DECLARED FAMILY GETS A CHIP, including the empty ones', async () => {
+  /* PS is client delivery, R&D is product regression, KAT is the shared
+     framework — three different conversations sharing one table. A filter
+     whose buttons appear and disappear as the sprint moves is one you cannot
+     learn, so an empty family is drawn disabled and says zero rather than
+     vanishing: "KAT: none of yours this sprint" is itself the answer. */
+  const { html, payload } = await renderByComp();
+  const section = html.slice(html.indexOf('>By component<'));
+  const bar = section.slice(0, section.indexOf('<table'));
+  const fams = payload.byComponent.families;
+  assert.ok(fams.length >= 4, 'the payload ships no family list for the chips');
+
+  assert.ok(/data-bc-family=""/.test(bar), 'there is no All chip');
+  for (const f of fams) {
+    assert.ok(new RegExp(`data-bc-family="${f.key}"`).test(bar), `no chip for ${f.key}`);
+  }
+  // The fixture has PS rows and no R&D ones, so both states are exercised.
+  assert.ok(fams.find(f => f.key === 'ps').busy > 0, 'fixture check: PS has rows');
+  assert.strictEqual(fams.find(f => f.key === 'rnd').busy, 0, 'fixture check: R&D has none');
+  assert.ok(/data-bc-family="rnd"[^>]*disabled/.test(bar) || /disabled[^>]*data-bc-family="rnd"/.test(bar),
+    'an empty family chip is clickable and would filter the table to nothing');
+});
+
+check('THE CHIP COUNTS WHAT THE TABLE WILL DRAW, not the payload\'s rows', async () => {
+  /* The clear rows fold away by default. A chip reading "PS 41" over a table
+     showing three is the chip counting a different population from the one it
+     filters, and one of the two numbers is a lie. */
+  const { html, payload } = await renderByComp();
+  const section = html.slice(html.indexOf('>By component<'));
+  const bar = section.slice(0, section.indexOf('<table'));
+  const ps = payload.byComponent.families.find(f => f.key === 'ps');
+  assert.notStrictEqual(ps.busy, ps.count,
+    'fixture check: PS has a clear row, or the two counts cannot be told apart');
+  assert.ok(new RegExp(`data-bc-family="ps"[^>]*>[^<]*<strong>${ps.busy}</strong>`).test(bar),
+    `the PS chip does not say ${ps.busy}, the number of rows the folded table draws`);
+});
+
+check('CLICKING A FAMILY CHIP NARROWS THE TABLE TO THAT FAMILY', async () => {
+  /* The check the first pass of this file could not make: with a mount that
+     swallowed its listeners, a mutation deleting the family filter outright
+     passed everything. A lens is only tested by moving it. */
+  const r = await renderByComp();
+  const rows = () => {
+    const b = byCompSection(r.html);
+    return b.slice(b.indexOf('<tbody>'), b.indexOf('</tbody>'));
+  };
+  assert.ok(rows().includes('PS_iGO_NLG') && rows().includes('KAT_Common'),
+    'fixture check: the unfiltered table holds both families');
+
+  await r.mount.click({ bcFamily: 'kat' });
+  assert.ok(rows().includes('KAT_Common'), 'the KAT row went with the filter');
+  assert.ok(!rows().includes('PS_iGO_NLG'), 'the PS rows survived a KAT filter');
+
+  // And the chip that is on says so, so the table is never silently narrowed.
+  const section = r.html.slice(r.html.indexOf('>By component<'));
+  assert.ok(/data-bc-family="kat"[^>]*class="[^"]*active|class="chip active"[^>]*data-bc-family="kat"/.test(section)
+    || /class="chip active" data-bc-family="kat"/.test(section),
+  'the active family is not marked, so the table looks unfiltered');
+});
+
+check('CLICKING THE CHIP YOU ARE ON CLEARS IT', async () => {
+  const r = await renderByComp();
+  const rows = () => {
+    const b = byCompSection(r.html);
+    return b.slice(b.indexOf('<tbody>'), b.indexOf('</tbody>'));
+  };
+  await r.mount.click({ bcFamily: 'kat' });
+  assert.ok(!rows().includes('PS_iGO_NLG'), 'fixture check: the filter applied');
+  await r.mount.click({ bcFamily: 'kat' });
+  assert.ok(rows().includes('PS_iGO_NLG'), 'clicking the active chip did not clear the filter');
+  assert.ok(rows().includes('KAT_Common'));
+});
+
+check('THE FOLD AND THE FAMILY LENS COMPOSE, and the footer follows both', async () => {
+  const r = await renderByComp();
+  const foot = () => {
+    const b = byCompSection(r.html);
+    return b.slice(b.indexOf('<tfoot>'));
+  };
+  const bc = r.payload.byComponent;
+  await r.mount.click({ act: 'bc-show-all' });
+  const shownAll = bc.rows.length;
+  const b = byCompSection(r.html);
+  const body = b.slice(b.indexOf('<tbody>'), b.indexOf('</tbody>'));
+  assert.strictEqual(body.split('<tr').length - 1, shownAll, 'unfolding did not draw every ranked row');
+  assert.ok(body.includes('PS_RES_NLG'), 'the clear row did not come back');
+  assert.ok(foot().includes(`${shownAll} components`), 'the footer did not follow the unfold');
+
+  // Now narrow to PS with the fold still open: the footer counts PS rows.
+  await r.mount.click({ bcFamily: 'ps' });
+  const ps = bc.rows.filter(x => x.familyKey === 'ps').length;
+  assert.ok(foot().includes(`${ps} components`),
+    `the footer says something other than ${ps} after filtering to PS`);
+  assert.notStrictEqual(ps, shownAll, 'fixture check: PS is not the whole table');
+});
+
+check('CLICKING A NUMBER OPENS A DRAWER LISTING THAT CELL', async () => {
+  /* End to end through the real route composition: the view asks, the model
+     re-runs the sheet and reads the cell's own keys, and the drawer lists
+     them. A canned reply here would test the drawer's markup and nothing
+     about whether the number and the list agree. */
+  const r = await renderByComp();
+  const row = r.payload.byComponent.rows.find(x => x.component === 'PS_iGO_NLG');
+  await r.mount.click({ act: 'bc-epics', row: 'PS_iGO_NLG', tool: 'truetest', cell: 'maintenance', __text: '1' });
+  const d = r.mount.drawn;
+  assert.ok(d, 'no drawer opened');
+  assert.ok(d.includes('TrueTest · Maintenance'), `the drawer is not titled for the cell: ${d.slice(0, 200)}`);
+  assert.ok(d.includes('PS_iGO_NLG'), 'the drawer does not name the row');
+  for (const k of row.truetest.keys.maintenance) {
+    assert.ok(d.includes(k), `the drawer does not list ${k}, which the cell counted`);
+  }
+  assert.ok(/Across all teams/.test(d) && /no work in an active sprint/.test(d),
+    `the drawer does not say what population the backlog half is: ${d.slice(0, 300)}`);
+});
+
+check('AND A PLANNED CELL SAYS WHICH SPRINT IT CAME FROM', async () => {
+  const r = await renderByComp();
+  await r.mount.click({ act: 'bc-epics', row: 'PS_iGO_NLG', tool: 'kse', cell: 'build', __text: '1' });
+  const d = r.mount.drawn;
+  assert.ok(d.includes('KSE · New build'), `wrong title: ${d.slice(0, 200)}`);
+  assert.ok(d.includes('Katalon Titan Sprint 40'),
+    'the planned drawer does not name the sprint the work was planned in');
+  assert.ok(d.includes('E-4'), 'the drawer does not list the epic the sprint is building');
+  assert.ok(!/Across all teams/.test(d),
+    'the planned drawer is explained as if it were the portfolio backlog');
+  assert.ok(/Katalon Titan planned/.test(d),
+    'the planned drawer does not say whose work it is listing');
+});
+
+check('A REFUSED CELL SAYS SO RATHER THAN OPENING AN EMPTY DRAWER', async () => {
+  const r = await renderByComp();
+  await r.mount.click({ act: 'bc-epics', row: 'PS_iGO_NLG', tool: 'truetest', cell: 'automated', __text: '3' });
+  const d = r.mount.drawn;
+  assert.ok(/Could not read/.test(d), `a refused cell opened a normal drawer: ${d.slice(0, 200)}`);
+});
+
+check('THE NOTE IS AN EDITABLE BOX, capped by the model that enforces it', async () => {
+  const { html, payload } = await renderByComp();
+  const body = byCompSection(html);
+  assert.ok(/data-bc-note="PS_iGO_NLG"/.test(body), 'the note is not editable');
+  assert.ok(/<textarea class="note"/.test(body), 'the note is not the control the other grid uses');
+  const max = payload.byComponent.noteMax;
+  assert.ok(max > 0, 'the payload does not carry the note cap');
+  assert.ok(new RegExp(`maxlength="${max}"`).test(body),
+    `the box offers a length other than the server's ${max}`);
+  // The existing note is in the box AND in data-was, so a blur with nothing
+  // typed can be told from a real edit.
+  assert.ok(/data-was="waiting on the migration"/.test(body),
+    'the box does not remember what it started as');
+});
+
+check('EDITING IT SAVES TO THE SAME NOTE THE OTHER SCREEN EDITS', async () => {
+  /* One entry per component in the plan, one route. Not a second
+     capacity-only note: "waiting on the migration" is a fact about the suite,
+     not about this sprint, and two boxes holding two versions of it is how
+     the one you are not looking at goes stale. */
+  const r = await renderByComp();
+  await r.mount.fire('focusout',
+    { bcNote: 'PS_iGO_NLG', was: '' },
+    { value: 'chasing the vendor', disabled: false });
+  assert.strictEqual(r.puts.length, 1, 'the edit wrote nothing');
+  assert.strictEqual(r.puts[0].method, 'PUT');
+  assert.ok(r.puts[0].url.includes('/api/component-note'),
+    `the note went somewhere else: ${r.puts[0].url}`);
+  assert.deepStrictEqual(r.puts[0].body, { component: 'PS_iGO_NLG', note: 'chasing the vendor' });
+});
+
+check('A BLUR WITH NOTHING CHANGED IS NOT AN EDIT', async () => {
+  /* Clicking into a box and out again writes an audit entry per glance if
+     this is not checked. Whitespace-only differences do not count either. */
+  const r = await renderByComp();
+  await r.mount.fire('focusout',
+    { bcNote: 'PS_RES_NLG', was: 'waiting on the migration' },
+    { value: '  waiting on the migration  ', disabled: false });
+  assert.strictEqual(r.puts.length, 0, 'an unchanged box still wrote to the server');
+});
+
+check('A REFUSED NOTE PUTS THE OLD TEXT BACK', async () => {
+  /* A box that keeps what you typed after the server refused it reads as
+     saved, and the next reader sees a note nobody stored. */
+  const r = await renderCapacity(BC_SNAP, BC_PLAN, BC_SPRINT, { failSave: true });
+  const box = { value: 'this will be refused', disabled: false };
+  await r.mount.fire('focusout', { bcNote: 'PS_iGO_NLG', was: 'old text' }, box);
+  assert.strictEqual(r.puts.length, 1, 'fixture check: it tried to save');
+  assert.strictEqual(box.value, 'old text', 'the box kept text the server refused');
+});
+
+check('EXPORT CSV CARRIES THE SCOPES AND NOT THE LENSES', async () => {
+  /* Team and sprint decide which epics were counted at all, so both travel.
+     The family chip and the fold only hide rows, so the file carries the
+     whole list and the reader filters in the spreadsheet — a CSV that is
+     silently whichever twenty rows somebody was looking at is the trap every
+     other export here avoids. */
+  const r = await renderByComp();
+  const sec = r.html.slice(r.html.indexOf('>By component<'));
+  const href = (sec.match(/href="([^"]*what=bycomponent[^"]*)"/) || [])[1];
+  assert.ok(href, 'there is no Export CSV link');
+  assert.ok(/team=titan/.test(href), 'the file would not be scoped to this team');
+  assert.ok(/sprint=S40/.test(href), 'the file would not be scoped to this sprint');
+  assert.ok(!/family=/.test(href), 'the family chip leaked into the export');
+
+  // And it stays put when a lens moves — the whole point of the split.
+  await r.mount.click({ bcFamily: 'kat' });
+  const after = r.html.slice(r.html.indexOf('>By component<'));
+  assert.strictEqual((after.match(/href="([^"]*what=bycomponent[^"]*)"/) || [])[1], href,
+    'filtering the table changed what the CSV would contain');
+});
+
+check('EXPORT PDF PRINTS THIS SECTION ALONE, under a name you can file', async () => {
+  /* The Capacity screen is a KPI strip, a day grid, a roster and three
+     tables. "Export PDF" on one of those tables cannot mean "print all of
+     that", so the section is marked and the rest hidden for the duration —
+     and both facts are read AT PRINT TIME, the only moment either matters. */
+  const r = await renderByComp();
+  await r.mount.click({ act: 'bc-export-pdf' });
+  assert.strictEqual(r.printed.length, 1, 'the browser was never asked to print');
+  const at = r.printed[0];
+  assert.ok(at.body.includes('print-only-on'), 'the page was printed whole, not scoped to the section');
+  assert.ok(at.section.includes('print-only'), 'the section was not marked, so it would be hidden too');
+
+  assert.match(at.title, /Katalon Titan/, `the file would not say whose sheet it is: "${at.title}"`);
+  assert.match(at.title, /Katalon Titan Sprint 40/, 'nor which sprint');
+  assert.match(at.title, /by component/i, 'nor which table');
+  assert.ok(!/[\\/:*?"<>|]/.test(at.title), 'a filename cannot carry path characters');
+});
+
+check('AND IT PUTS THE PAGE BACK AFTERWARDS', async () => {
+  /* A failed restore leaves the user staring at a page with most of it
+     missing and no way to guess why — the one failure of printing a single
+     section that is worse than not offering it. */
+  const r = await renderByComp();
+  await r.mount.click({ act: 'bc-export-pdf' });
+  assert.ok(r.mount.bodyClasses.includes('print-only-on') === false
+    || r.printed.length === 1, 'fixture check: it printed');
+  r.mount.afterprint();
+  assert.deepStrictEqual(r.mount.bodyClasses, [], 'the body kept its print class');
+  assert.deepStrictEqual(r.mount.sectionClasses, [], 'the section kept its print class');
+});
+
+check('THE UNTAGGED EPICS ARE COUNTED, AND SAID OUT LOUD', async () => {
+  /* "All teams" has to include the epics nobody assigned a team to, or the
+     queue hides part of itself — it hid 295 across 16 ranked suites, and
+     PS_iGO_Lafayette showed 8 Blocked while carrying 14 Ready. Counted, and
+     reported, because it is also the one number on that line a reader can
+     act on: an untriaged epic is a triage job. */
+  const r = await renderByComp();
+  const bc = r.payload.byComponent;
+  assert.strictEqual(bc.scopes.backlog.noTeam, 1, 'the untagged epic is not counted or not reported');
+  const row = bc.rows.find(x => x.component === 'PS_iGO_NLG');
+  assert.ok(row.kse.keys.blocked.includes('E-6'),
+    'an untagged epic is missing from a backlog headed "all teams"');
+
+  const sec = r.html.slice(r.html.indexOf('>By component<'));
+  const line = sec.slice(0, sec.indexOf('<table')).replace(/\s+/g, ' ');
+  assert.ok(/1 carry no Jira Team/.test(line), `the count is not on the page: ${line.slice(0, 400)}`);
+  // And the hover explains why this screen and Prioritization now differ.
+  assert.ok(/Prioritization/.test(sec.slice(0, sec.indexOf('<table'))),
+    'nothing explains why the two screens disagree');
+});
+
+check('THE SCOPE LINE SAYS ACTIVE SPRINT, not open sprints', async () => {
+  /* The rule narrowed and the wording has to narrow with it, or the line
+     describes a cut the numbers no longer make. */
+  const { html } = await renderByComp();
+  const sec = html.slice(html.indexOf('>By component<'));
+  const line = sec.slice(0, sec.indexOf('<table')).replace(/\s+/g, ' ');
+  assert.ok(/in flight in \d+ active sprint/.test(line),
+    `the line still describes the old rule: ${line.slice(0, 320)}`);
+  assert.ok(!/open sprint/.test(line), 'the line still says "open sprint"');
+});
+
+check('AND THE EARMARKED SUITES ARE REPORTED, not subtracted', async () => {
+  /* An epic queued for a FUTURE sprint stays in the backlog — nobody is
+     working it — and the number says how many of them there are. Subtracting
+     them would make the backlog shrink every time somebody fills in a future
+     sprint, which is the opposite of what filling one in means. */
+  const r = await renderByComp();
+  const q = r.payload.byComponent.queuedAhead;
+  assert.ok(q.epics > 0, 'fixture check: something is queued for a later sprint');
+  const sec = r.html.slice(r.html.indexOf('>By component<'));
+  const line = sec.slice(0, sec.indexOf('<table')).replace(/\s+/g, ' ');
+  assert.ok(new RegExp(`${q.epics} of them already queued for a later sprint`).test(line),
+    `the earmarked count is not on the page: ${line.slice(0, 400)}`);
+  // Still counted above, not netted off.
+  assert.ok(q.epics <= r.payload.byComponent.totals.backlog);
+});
+
+check('EACH FIGURE ON THE SCOPE LINE CARRIES ITS OWN SCOPE', async () => {
+  /* One team name at the front of the line with two numbers after it reads
+     as though both were that team's — and the backlog is the whole
+     portfolio, so a reader would take it for a fifth of what it is. The
+     scope is attached to the number it belongs to, which is the same fix the
+     Prioritization screen made when a team-scoped 9 was read as a portfolio
+     25. */
+  const { html, payload } = await renderByComp();
+  const sec = html.slice(html.indexOf('>By component<'));
+  const line = sec.slice(0, sec.indexOf('<table')).replace(/\s+/g, ' ');
+  const t = payload.byComponent.totals;
+  assert.ok(new RegExp(`${t.backlog} in backlog[^<]*<strong>[^<]*all teams`).test(line),
+    `the backlog figure does not say it is portfolio-wide: ${line.slice(0, 320)}`);
+  assert.ok(new RegExp(`${t.planned} planned by <strong>Katalon Titan</strong>`).test(line),
+    `the planned figure does not say whose it is: ${line.slice(0, 320)}`);
+  assert.ok(/Katalon Titan Sprint 40/.test(line), 'nor which sprint it was planned in');
+  assert.ok(/backlog excludes/.test(line), 'the page does not say what the backlog left out');
+});
+
+check('AN UNMAPPED TEAM STILL GETS THE WHOLE BACKLOG', async () => {
+  /* The sheet used to refuse to draw for a team with no Jira Team values,
+     because every number on it was scoped by them. Nothing is any more: the
+     backlog is portfolio-wide and the planned half is read from the sprint's
+     own issue list, which belongs to one team by construction. So the table
+     draws, the backlog is the real backlog, and only the planned half is
+     empty — which is the true answer rather than a blank page. */
+  const plan = { ...BC_PLAN, teams: [{ ...TEAM, jiraTeams: [] }] };
+  const r = await renderCapacity(BC_SNAP, plan, BC_SPRINT);
+  const from = r.html.indexOf('>By component<');
+  const sec = r.html.slice(from, r.html.indexOf('</section>', from));
+  assert.ok(sec.includes('<table'), 'an unmapped team was shown no grid at all');
+  assert.ok(r.payload.byComponent.totals.backlog > 0,
+    'the backlog went empty for a team that does not scope it');
+  assert.strictEqual(r.payload.byComponent.team.mappedEmpty, true,
+    'the mapping state is no longer reported at all');
+});
+
+check('THE NOTE IS AN EDITABLE BOX, capped by the model that enforces it', async () => {
+  const { html, payload } = await renderByComp();
+  const body = byCompSection(html);
+  assert.ok(/data-bc-note="PS_iGO_NLG"/.test(body), 'the note is not editable');
+  assert.ok(/<textarea class="note"/.test(body), 'the note is not the control the other grid uses');
+  const max = payload.byComponent.noteMax;
+  assert.ok(max > 0, 'the payload does not carry the note cap');
+  assert.ok(new RegExp(`maxlength="${max}"`).test(body),
+    `the box offers a length other than the server's ${max}`);
+  // The existing note is in the box AND in data-was, so a blur with nothing
+  // typed can be told from a real edit.
+  assert.ok(/data-was="waiting on the migration"/.test(body),
+    'the box does not remember what it started as');
+});
+
+check('EDITING IT SAVES TO THE SAME NOTE THE OTHER SCREEN EDITS', async () => {
+  /* One entry per component in the plan, one route. Not a second
+     capacity-only note: "waiting on the migration" is a fact about the suite,
+     not about this sprint, and two boxes holding two versions of it is how
+     the one you are not looking at goes stale. */
+  const r = await renderByComp();
+  await r.mount.fire('focusout',
+    { bcNote: 'PS_iGO_NLG', was: '' },
+    { value: 'chasing the vendor', disabled: false });
+  assert.strictEqual(r.puts.length, 1, 'the edit wrote nothing');
+  assert.strictEqual(r.puts[0].method, 'PUT');
+  assert.ok(r.puts[0].url.includes('/api/component-note'),
+    `the note went somewhere else: ${r.puts[0].url}`);
+  assert.deepStrictEqual(r.puts[0].body, { component: 'PS_iGO_NLG', note: 'chasing the vendor' });
+});
+
+check('A BLUR WITH NOTHING CHANGED IS NOT AN EDIT', async () => {
+  /* Clicking into a box and out again writes an audit entry per glance if
+     this is not checked. Whitespace-only differences do not count either. */
+  const r = await renderByComp();
+  await r.mount.fire('focusout',
+    { bcNote: 'PS_RES_NLG', was: 'waiting on the migration' },
+    { value: '  waiting on the migration  ', disabled: false });
+  assert.strictEqual(r.puts.length, 0, 'an unchanged box still wrote to the server');
+});
+
+check('A REFUSED NOTE PUTS THE OLD TEXT BACK', async () => {
+  /* A box that keeps what you typed after the server refused it reads as
+     saved, and the next reader sees a note nobody stored. */
+  const r = await renderCapacity(BC_SNAP, BC_PLAN, BC_SPRINT, { failSave: true });
+  const box = { value: 'this will be refused', disabled: false };
+  await r.mount.fire('focusout', { bcNote: 'PS_iGO_NLG', was: 'old text' }, box);
+  assert.strictEqual(r.puts.length, 1, 'fixture check: it tried to save');
+  assert.strictEqual(box.value, 'old text', 'the box kept text the server refused');
+});
+
+check('EXPORT CSV CARRIES THE SCOPES AND NOT THE LENSES', async () => {
+  /* Team and sprint decide which epics were counted at all, so both travel.
+     The family chip and the fold only hide rows, so the file carries the
+     whole list and the reader filters in the spreadsheet — a CSV that is
+     silently whichever twenty rows somebody was looking at is the trap every
+     other export here avoids. */
+  const r = await renderByComp();
+  const sec = r.html.slice(r.html.indexOf('>By component<'));
+  const href = (sec.match(/href="([^"]*what=bycomponent[^"]*)"/) || [])[1];
+  assert.ok(href, 'there is no Export CSV link');
+  assert.ok(/team=titan/.test(href), 'the file would not be scoped to this team');
+  assert.ok(/sprint=S40/.test(href), 'the file would not be scoped to this sprint');
+  assert.ok(!/family=/.test(href), 'the family chip leaked into the export');
+
+  // And it stays put when a lens moves — the whole point of the split.
+  await r.mount.click({ bcFamily: 'kat' });
+  const after = r.html.slice(r.html.indexOf('>By component<'));
+  assert.strictEqual((after.match(/href="([^"]*what=bycomponent[^"]*)"/) || [])[1], href,
+    'filtering the table changed what the CSV would contain');
+});
+
+check('EXPORT PDF PRINTS THIS SECTION ALONE, under a name you can file', async () => {
+  /* The Capacity screen is a KPI strip, a day grid, a roster and three
+     tables. "Export PDF" on one of those tables cannot mean "print all of
+     that", so the section is marked and the rest hidden for the duration —
+     and both facts are read AT PRINT TIME, the only moment either matters. */
+  const r = await renderByComp();
+  await r.mount.click({ act: 'bc-export-pdf' });
+  assert.strictEqual(r.printed.length, 1, 'the browser was never asked to print');
+  const at = r.printed[0];
+  assert.ok(at.body.includes('print-only-on'), 'the page was printed whole, not scoped to the section');
+  assert.ok(at.section.includes('print-only'), 'the section was not marked, so it would be hidden too');
+
+  assert.match(at.title, /Katalon Titan/, `the file would not say whose sheet it is: "${at.title}"`);
+  assert.match(at.title, /Katalon Titan Sprint 40/, 'nor which sprint');
+  assert.match(at.title, /by component/i, 'nor which table');
+  assert.ok(!/[\\/:*?"<>|]/.test(at.title), 'a filename cannot carry path characters');
+});
+
+check('AND IT PUTS THE PAGE BACK AFTERWARDS', async () => {
+  /* A failed restore leaves the user staring at a page with most of it
+     missing and no way to guess why — the one failure of printing a single
+     section that is worse than not offering it. */
+  const r = await renderByComp();
+  await r.mount.click({ act: 'bc-export-pdf' });
+  assert.ok(r.mount.bodyClasses.includes('print-only-on') === false
+    || r.printed.length === 1, 'fixture check: it printed');
+  r.mount.afterprint();
+  assert.deepStrictEqual(r.mount.bodyClasses, [], 'the body kept its print class');
+  assert.deepStrictEqual(r.mount.sectionClasses, [], 'the section kept its print class');
 });
 
 /* ── CALC EXEMPT, ON THE CAPACITY GRID ────────────────────────────────

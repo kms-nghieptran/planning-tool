@@ -53,6 +53,15 @@ const BacklogView = (() => {
             ${d.unestimated.count ? `<li class="warn">${d.unestimated.count} items have no estimate — until they do, the runway figure above is only about ${UI.pct(d.estimated.pct)} of the real queue</li>` : '<li class="ok">Everything queued is estimated</li>'}
             ${d.blocked.count ? `<li class="risk">${d.blocked.count} items are blocked by other work</li>` : ''}
             ${d.highPriority.count ? `<li>${d.highPriority.count} High/Highest items (${UI.num(d.highPriority.points)} pts) are waiting</li>` : ''}
+            <!-- WHAT A BACKLOG ITEM IS, said once, where the number is. An
+                 epic is the container work hangs off and is never pulled
+                 into a sprint — counting them made this queue read 1,857
+                 when it held 574, and the runway with it. The line only
+                 appears when there were some, and it names the figure the
+                 page would otherwise be quietly disagreeing with. -->
+            ${d.epicsExcluded ? `<li class="muted">${UI.int(d.epicsExcluded)} epics on this board are not counted — an epic is
+              the container its stories hang off, never a thing you pull into a sprint. The board holds
+              ${UI.int(d.scanned)} records in all.</li>` : ''}
           </ul>
           ${UI.pointsFieldNote(state)}
         </div>

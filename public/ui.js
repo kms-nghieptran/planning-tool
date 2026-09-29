@@ -1664,16 +1664,49 @@ const UI = (() => {
    * hand-rolled copy is how one screen quietly goes back to naming every file
    * after the app.
    */
-  function exportPdf(title) {
+  /* ONE SECTION OF A PAGE, PRINTED ALONE — `opts.only`.
+     The Prioritization screen IS its table, so printing the page prints the
+     report. The Capacity screen is not: it is a KPI strip, a day grid, a
+     roster, a notes box and three tables, and "Export PDF" on one of those
+     tables cannot mean "print all of that". So a caller can name the section
+     it means, and everything else is hidden for the duration of the print.
+
+     A CLASS ON <body>, NOT INLINE STYLES ON EVERY OTHER NODE. The rules live
+     in the print stylesheet where the rest of the print behaviour already is,
+     and putting the class back is one operation that cannot half-fail — which
+     matters, because a failed restore leaves the user staring at a page with
+     most of it missing and no way to guess why.
+
+     Restored through the SAME path as the title, so the two cannot come
+     apart: one `done` flag, one listener, one backstop timeout. */
+  const PRINT_ONLY = 'print-only';
+
+  function exportPdf(title, opts = {}) {
     const was = document.title;
     const slug = (v) => String(v == null ? '' : v).trim().replace(/[\\/:*?"<>|]+/g, '-');
     const name = (Array.isArray(title) ? title : [title]).map(slug).filter(Boolean).join(' — ');
     if (name) document.title = name;
+
+    /* Marked on the node itself as well as on the body, because the rule has
+       to name BOTH ends: hide everything, then show this one back. A selector
+       that matched nothing would print a blank page, so the class only goes on
+       when the node is actually found. */
+    const only = opts.only ? document.querySelector(opts.only) : null;
+    const body = document.body || null;
+    if (only && body) {
+      only.classList.add(PRINT_ONLY);
+      body.classList.add(`${PRINT_ONLY}-on`);
+    }
+
     let done = false;
     const restore = () => {
       if (done) return;
       done = true;
       document.title = was;
+      if (only && body) {
+        only.classList.remove(PRINT_ONLY);
+        body.classList.remove(`${PRINT_ONLY}-on`);
+      }
       window.removeEventListener('afterprint', restore);
     };
     window.addEventListener('afterprint', restore);

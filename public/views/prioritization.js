@@ -460,6 +460,7 @@ const PrioritizationView = (() => {
         <table class="pz" data-nosort>
           <thead>
             <tr>
+              ${canReorder(d) ? '<th rowspan="2" class="rank-col" title="Drag a row, or use the arrows, to order it within its priority">Order</th>' : ''}
               <th rowspan="2">Component</th>
               <th rowspan="2">Priority</th>
               ${tools.map((t, ti) => `<th class="num tool-start tool-head band-${ti % 2 ? 'b' : 'a'}" colspan="${buckets.length}"><i class="pz-chip" style="background:${t.color}"></i>${UI.esc(t.label)}</th>`).join('')}
@@ -470,16 +471,70 @@ const PrioritizationView = (() => {
             </tr>
           </thead>
           <tbody>
-            ${rows.map(r => row(d, r, tools, buckets)).join('')}
+            ${rows.map(r => row(d, r, tools, buckets, posInLevel(d, r), levelSize(d, r))).join('')}
           </tbody>
           ${rows.length > 1 ? foot(d, rows, tools, buckets) : ''}
         </table>
       </div>`;
   }
 
-  function row(d, r, tools, buckets) {
+  /* ── REORDERING WITHIN A LEVEL ────────────────────────────────────────
+     The order of this table is the answer it gives, and four levels is a
+     coarse way to say it: nine P1 components used to sit in alphabetical
+     order, which is not a judgement anybody made. Dragging says which of the
+     nine comes first.
+
+     IT ONLY MOVES ROWS WITHIN A LEVEL. Dragging is not a way to change a
+     priority — the Priority column next door already does that, visibly and
+     in one place. A drop outside the row's own level is refused rather than
+     reinterpreted, because the alternative is a row that reads P3 while
+     sitting among the P1s.
+
+     THE HANDLE IS A REAL BUTTON PAIR, not a drag affordance alone. Every
+     other control on this screen is reachable from the keyboard — the drill
+     numbers, the chips, the priority select — and a drag-only row would be
+     the first that is not. The ↑/↓ buttons do exactly what a drag does and
+     are the primary control as far as the code is concerned; the drag is the
+     shortcut on top. */
+  function rankCell(d, r, pos, size) {
+    if (!canReorder(d)) return '';
+    const label = `${UI.esc(r.component)}, P${r.priority}, position ${pos + 1} of ${size}`;
     return `
-      <tr${r.tracked ? '' : ' class="untracked"'}>
+      <td class="rank-cell">
+        <span class="rank-grip" aria-hidden="true" title="Drag to reorder within P${r.priority}">⠿</span>
+        <span class="rank-pos" aria-hidden="true">${pos + 1}</span>
+        <span class="rank-moves">
+          <button class="btn xs ghost" data-rank-move="up" data-component="${UI.esc(r.component)}"
+            ${pos === 0 ? 'disabled' : ''} aria-label="Move ${label} up">↑</button>
+          <button class="btn xs ghost" data-rank-move="down" data-component="${UI.esc(r.component)}"
+            ${pos === size - 1 ? 'disabled' : ''} aria-label="Move ${label} down">↓</button>
+        </span>
+      </td>`;
+  }
+
+  /* Reordering needs a stable list to reorder: with a level chip on, the rows
+     on screen are one level and dragging means what it says. With the family
+     chip narrowing them, or nothing ranked yet, the positions on screen are
+     still each level's own — `posInLevel` counts within the level, not within
+     the visible rows — so a drag is always "move this to Nth of its level"
+     whatever else is filtered. */
+  const canReorder = (d) => !!(d && d.rows && d.rows.length);
+
+  /* THE LEVEL'S OWN ROWS, in the order the payload sorted them — which is
+     already level → rank → name, so this list IS the order. Taken from
+     `d.rows` and not from the filtered `shown()`, because a position has to
+     mean "Nth of its priority" whatever the family chip is hiding: otherwise
+     dragging with a filter on would renumber a level using three of its nine
+     rows and silently move the other six. */
+  const levelRows = (d, level) => (d.rows || []).filter(r => r.priority === level);
+  const posInLevel = (d, r) => levelRows(d, r.priority).findIndex(x => x.component === r.component);
+  const levelSize = (d, r) => levelRows(d, r.priority).length;
+
+  function row(d, r, tools, buckets, pos, size) {
+    return `
+      <tr${r.tracked ? '' : ' class="untracked"'}
+        ${canReorder(d) ? `draggable="true" data-rank-row="${UI.esc(r.component)}" data-rank-level="${r.priority}"` : ''}>
+        ${rankCell(d, r, pos, size)}
         <td>
           ${componentLink(d, r)}
           ${r.tracked ? '' : ' <span class="tag warn" title="Nothing in the project carries this component">no epics</span>'}
@@ -496,6 +551,10 @@ const PrioritizationView = (() => {
     const t = (tool, bucket) => rows.reduce((n, r) => n + r[tool][bucket], 0);
     return `
       <tfoot><tr>
+        <!-- CLASSED LIKE THE OTHERS, so the print rule that drops this column
+             drops all three of its cells. Without it the footer prints one
+             cell wider than the header and the whole row shifts. -->
+        ${canReorder(d) ? '<td class="rank-cell"></td>' : ''}
         <td><strong>${rows.length} component${rows.length === 1 ? '' : 's'}</strong></td>
         <td class="muted">${level == null ? 'all levels' : UI.esc((d.byLevel.find(l => l.value === level) || {}).label || '')}</td>
         ${tools.map((tool, ti) => buckets.map((b, i) => `
@@ -702,6 +761,122 @@ const PrioritizationView = (() => {
       const note = e.target.closest && e.target.closest('[data-note]');
       if (note) return saveNote(note);
     });
+
+    /* ── THE KEYBOARD PATH, and the one the code treats as primary ──────
+       Both buttons and both drag directions end in `moveTo`, so there is one
+       implementation of "what does moving a row mean" and the drag cannot
+       drift from the arrows. */
+    mount.addEventListener('click', (e) => {
+      const btn = e.target.closest && e.target.closest('[data-rank-move]');
+      if (!btn || btn.disabled) return;
+      e.preventDefault();
+      const name = btn.dataset.component;
+      const r = (data.rows || []).find(x => x.component === name);
+      if (!r) return;
+      const at = posInLevel(data, r);
+      return moveTo(state, mount, r, at + (btn.dataset.rankMove === 'up' ? -1 : 1));
+    });
+
+    /* ── THE DRAG ───────────────────────────────────────────────────────
+       Native HTML5, no library — it is four listeners and the tool has no
+       dependencies. `dragged` is the row key rather than the node, because
+       the table is rebuilt under the pointer on every save and a held node
+       reference would be pointing at markup that is no longer on the page. */
+    let dragged = null;
+    mount.addEventListener('dragstart', (e) => {
+      const tr = e.target.closest && e.target.closest('[data-rank-row]');
+      if (!tr) return;
+      dragged = tr.dataset.rankRow;
+      if (e.dataTransfer) {
+        e.dataTransfer.effectAllowed = 'move';
+        // Some browsers refuse to start a drag with no payload set.
+        try { e.dataTransfer.setData('text/plain', dragged); } catch (_) { /* not fatal */ }
+      }
+      tr.classList.add('rank-dragging');
+    });
+    mount.addEventListener('dragend', (e) => {
+      const tr = e.target.closest && e.target.closest('[data-rank-row]');
+      if (tr) tr.classList.remove('rank-dragging');
+      UI.$$('.rank-over', mount).forEach(n => n.classList.remove('rank-over'));
+      dragged = null;
+    });
+    mount.addEventListener('dragover', (e) => {
+      const tr = e.target.closest && e.target.closest('[data-rank-row]');
+      if (!tr || dragged == null) return;
+      /* ONLY WITHIN THE SAME LEVEL. Refused by not calling preventDefault,
+         which is what tells the browser this is not a drop target — so the
+         cursor says "no" over a P3 while dragging a P1 rather than the drop
+         landing and being silently discarded. */
+      const from = (data.rows || []).find(x => x.component === dragged);
+      if (!from || Number(tr.dataset.rankLevel) !== from.priority) return;
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+      UI.$$('.rank-over', mount).forEach(n => n.classList.remove('rank-over'));
+      if (tr.dataset.rankRow !== dragged) tr.classList.add('rank-over');
+    });
+    mount.addEventListener('drop', (e) => {
+      const tr = e.target.closest && e.target.closest('[data-rank-row]');
+      if (!tr || dragged == null) return;
+      e.preventDefault();
+      const from = (data.rows || []).find(x => x.component === dragged);
+      const onto = (data.rows || []).find(x => x.component === tr.dataset.rankRow);
+      dragged = null;
+      UI.$$('.rank-over', mount).forEach(n => n.classList.remove('rank-over'));
+      if (!from || !onto || from.priority !== onto.priority) return;
+      if (from.component === onto.component) return;
+      return moveTo(state, mount, from, posInLevel(data, onto));
+    });
+  }
+
+  /**
+   * Move one component to position `to` within its own level, and save.
+   *
+   * THE ROW MOVES ON SCREEN FIRST, then the save goes out — reordering is the
+   * one edit here where waiting for a round trip would make the control feel
+   * broken. It is put back if the server refuses, the same rule the priority
+   * select and the note box already follow.
+   *
+   * THE ORDER IS REBUILT FROM THE LEVEL'S FULL LIST, not from the rows on
+   * screen: a family chip can be hiding six of the nine, and sending three
+   * would renumber the level using a third of it.
+   */
+  async function moveTo(state, mount, r, to) {
+    const list = levelRows(data, r.priority).map(x => x.component);
+    const from = list.indexOf(r.component);
+    if (from < 0 || to < 0 || to >= list.length || to === from) return;
+
+    const before = list.slice();
+    list.splice(to, 0, ...list.splice(from, 1));
+
+    // Applied locally so the table redraws in the new order immediately.
+    list.forEach((name, i) => {
+      const row_ = (data.rows || []).find(x => x.component === name);
+      if (row_) row_.rank = i + 1;
+    });
+    data.rows.sort(byLevelThenRank);
+    redraw(state, mount);
+
+    try {
+      await UI.jsonPut('/api/component-rank', { level: r.priority, order: list });
+      UI.toast(`${r.component} — moved to ${to + 1} of ${list.length} in P${r.priority}`);
+    } catch (err) {
+      before.forEach((name, i) => {
+        const row_ = (data.rows || []).find(x => x.component === name);
+        if (row_) row_.rank = i + 1;
+      });
+      data.rows.sort(byLevelThenRank);
+      redraw(state, mount);
+      UI.toast(err.message, true);
+    }
+  }
+
+  /* THE SAME ORDER THE SERVER SORTS BY, because the screen re-sorts locally
+     after a move rather than refetching. A second rule here would show one
+     order until the next reload and a different one after it. */
+  function byLevelThenRank(a, b) {
+    const lv = (x) => (x.priority == null ? Number.MAX_SAFE_INTEGER : x.priority);
+    const rk = (x) => (Number.isInteger(x.rank) ? x.rank : Infinity);
+    return lv(a) - lv(b) || rk(a) - rk(b) || String(a.component).localeCompare(String(b.component));
   }
 
   /**
