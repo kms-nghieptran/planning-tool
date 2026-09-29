@@ -64,7 +64,40 @@ const CoverageReport = (() => {
    */
   const UNSET_SORT = '—';
 
+  /**
+   * THE SELECTION THE PDF WAS ASKED FOR.
+   *
+   * The component picker is module state — this screen is a lens on one
+   * dataset, not somewhere you deep-link to — and that was fine until the
+   * report started being rendered by a headless browser nobody is sitting at.
+   *
+   * THE BUG THIS FIXES was silent and the worst kind. `coverageFigures` on the
+   * server already honoured the selected components, so an email saying
+   * "coverage is now 71%" was about the two components he had picked — while
+   * the PDF attached underneath it was rendered by a fresh browser with no
+   * selection at all, showing the whole portfolio at 63%. Two numbers, both
+   * correct, in one email, and the only person positioned to notice was the
+   * client.
+   *
+   * SEEDED ONLY IN PRINT MODE, and only once. A `?component=` left in the
+   * address bar of the normal app would otherwise fight the picker on every
+   * redraw — the URL would keep re-winning after he changed the selection,
+   * which is the sort of thing that reads as the app being broken.
+   */
+  let seededFromUrl = false;
+  function seedPrintSelection() {
+    if (seededFromUrl) return;
+    seededFromUrl = true;
+    try {
+      const q = new URLSearchParams(location.search || '');
+      if (q.get('print') !== '1') return;
+      const picked = q.getAll('component').map(s => String(s).trim()).filter(Boolean);
+      if (picked.length) selected = picked;
+    } catch { /* the report still renders, just unfiltered */ }
+  }
+
   async function render(state, mount) {
+    seedPrintSelection();
     const qs = selected.length
       ? `?${selected.map(c => `component=${encodeURIComponent(c)}`).join('&')}`
       : '';
@@ -129,6 +162,26 @@ const CoverageReport = (() => {
         e.preventDefault();
         UI.exportPdf(['Overall Coverage', d.selected.length ? d.selected.join(' + ') : 'all components',
           new Date().toISOString().slice(0, 10)]);
+        return;
+      }
+      const mailBtn = e.target.closest('[data-act="email-report"]');
+      if (mailBtn) {
+        e.preventDefault();
+        /* THE SCOPE THIS SCREEN IS SHOWING, handed over whole. The drawer
+           sends it with the preview, the send and the PDF check alike, so
+           the words and the attachment cannot answer different questions —
+           which is exactly what went wrong when the components reached the
+           figures and not the renderer. */
+        await MailDrawer.open({
+          report: 'coverage',
+          title: 'Send Overall Coverage',
+          team: state.teamId,
+          scope: { components: d.selected || [] },
+          scopeNarrow: (d.selected || []).length > 0,
+          scopeLabel: (d.selected || []).length
+            ? `Scoped to ${d.selected.join(' + ')}`
+            : 'All components',
+        });
         return;
       }
 
@@ -521,6 +574,12 @@ const CoverageReport = (() => {
             ${picked.length ? '<button class="btn ghost sm" data-component="">Clear</button>' : ''}
             <button class="btn ghost sm" data-act="export-pdf"
               title="Opens your browser's print dialogue — choose &quot;Save as PDF&quot;">Export PDF</button>
+            ${/* EMAIL, BESIDE EXPORT, because they are the same act with
+                  different endings: one saves the report, the other sends it.
+                  Separated from Export by nothing, so the pair reads as a
+                  choice rather than as two unrelated controls. */''}
+            <button class="btn sm" data-act="email-report"
+              title="Render this report to a PDF and email it with a template you choose">Email the report</button>
           </div>
         </div>
       </section>`;
@@ -1545,5 +1604,10 @@ const CoverageReport = (() => {
       </section>`;
   }
 
+  /* TWO HANDLES FOR THE TEST HARNESS, and no more.
+     This panel has produced two bugs that only exist between the model and
+     the screen, and reaching it otherwise means re-rendering the whole
+     Coverage page in a stub just to click one button. One entry point and
+     one pure helper is the smallest hole that makes it drivable. */
   return { render };
 })();

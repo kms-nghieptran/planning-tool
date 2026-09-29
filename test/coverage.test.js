@@ -107,6 +107,132 @@ check('and the grid still counts a shared epic in BOTH of its rows', () => {
   assert.strictEqual(rows[NLG] + rows[SIG], 15, 'the rows total more than the 14 epics, as they always have');
 });
 
+check('BUT THE GRID SHOWS ONLY THE COMPONENTS HE SELECTED', () => {
+  /* THE BUG THIS EXISTS FOR, in the shape it was found in. Two components
+     picked, THREE rows drawn — the third being a tag that some of the matched
+     epics also carried and he had never chosen.
+     Observed live: 53 epics, rows of 43, 10 and 10, where the third row was
+     the same 10 epics as the second. A component he did not ask about
+     appeared in the table, in the emailed PDF, and in front of a client,
+     reading as work that had appeared from nowhere.
+     Selecting an epic because it carries a chosen component does not make its
+     other tags part of the question. */
+  const THIRD = 'R&D_Evolve_Foundations_Regression';
+  const d = cov.view(snapshot([
+    epic('Automated', [NLG]),
+    epic('Automated', [NLG, THIRD]),      // co-tagged with something unselected
+    epic('Ready for Automation', [SIG, THIRD]),
+    epic('Automated', [THIRD]),           // NOT in the selection at all
+  ]), { components: [NLG, SIG] });
+
+  const names = d.byComponent.map(r => r.component);
+  assert.deepStrictEqual(names.slice().sort(), [NLG, SIG].sort(),
+    `the grid drew rows for ${JSON.stringify(names)} — only ${NLG} and ${SIG} were selected`);
+  assert.ok(!names.includes(THIRD), 'an unselected component leaked into the report');
+
+  /* AND THE EPIC THAT ONLY HAD THE UNSELECTED TAG IS ABSENT ENTIRELY — the
+     filter still filters. Without this the check above would also pass on an
+     implementation that hid the row while still counting its epics. */
+  assert.strictEqual(d.total, 3, `${d.total} epics matched; the fourth is not in either selected component`);
+});
+
+check('AND THE MULTI-TAG RULE SURVIVES INSIDE THE SELECTION', () => {
+  /* The fix must not overshoot. An epic in TWO SELECTED components still
+     counts in both rows — that is the documented rule, and it is the reason
+     the rows may total more than the headline. Suppressing the unselected tag
+     is a different thing from collapsing an epic to one row, and an
+     implementation that did the second would pass the check above. */
+  const d = cov.view(snapshot([
+    epic('Automated', [NLG, SIG]),        // in both selected components
+    epic('Automated', [NLG]),
+  ]), { components: [NLG, SIG] });
+  const rows = Object.fromEntries(d.byComponent.map(r => [r.component, r.total]));
+  assert.strictEqual(rows[NLG], 2, 'the shared epic stopped counting in its first suite');
+  assert.strictEqual(rows[SIG], 1, 'the shared epic stopped counting in its second suite');
+  assert.strictEqual(d.total, 2, 'the headline counted the shared epic twice');
+  assert.strictEqual(rows[NLG] + rows[SIG], 3, 'the rows no longer exceed the headline, as they should');
+});
+
+check('AND THE FAMILY ROLL-UP DOES NOT LEAK ONE EITHER', () => {
+  /* The same leak one level up, and harder to spot: `byFamily` keys off the
+     epic's FIRST component, so an epic whose unselected tag sorts first would
+     be filed under a family nobody picked — and a family name reads as a
+     summary rather than as a claim about scope. */
+  const OTHER_FAMILY = 'PS_Evolve_MM';
+  const d = cov.view(snapshot([
+    epic('Automated', [OTHER_FAMILY, SIG]),
+    epic('Automated', [SIG]),
+  ]), { components: [SIG] });
+  const fams = d.byFamily.map(f => f.family);
+  assert.strictEqual(fams.length, 1, `the roll-up drew ${JSON.stringify(fams)} for a one-component selection`);
+  assert.deepStrictEqual(d.byComponent.map(r => r.component), [SIG]);
+});
+
+check('NO SECTION ANYWHERE NAMES AN UNSELECTED COMPONENT — the sweep', () => {
+  /* THIS IS THE CHECK THAT SHOULD HAVE EXISTED FIRST, and writing it late is
+     the actual lesson of this bug.
+     The leak was reported against "Coverage by component". It was fixed there
+     and in the family roll-up — the two tables that had been pointed at — and
+     reported again the next day from "Automation status by tool", which is a
+     THIRD reader of the same component list doing the same thing. Chasing
+     named sections finds the sections you were told about.
+     So this walks the WHOLE payload instead. Every `component` field, in
+     every section, present and future, has to be one he selected. A fourth
+     table added next year is covered without anybody remembering to come
+     back here. */
+  const THIRD = 'R&D_Evolve_Foundations_Regression';
+  const d = cov.view(snapshot([
+    epic('Automated', [NLG, THIRD]),
+    epic('Ready for Automation', [SIG, THIRD]),
+    epic('Automated', [NLG]),
+  ]), { components: [NLG, SIG] });
+
+  /* THE THREE LISTS THAT ARE *MEANT* TO HOLD EVERY COMPONENT: the picker's
+     source, the echo of what was asked for, and the report of names that did
+     not match anything. Excluding them by name is the point — if a future
+     key needs excluding, that is a decision someone should have to make
+     deliberately rather than a hole this check quietly grew. */
+  /* `tools` IS HERE BECAUSE THE FIELD NAME IS OVERLOADED, and the sweep
+     finding it on the first run is the check doing its job. `TOOLS` is the
+     static list of automation tools, and its `component` is the Jira
+     component that MARKS a tool — `TrueTest`, `Katalon` — not a product area
+     anybody selects. Excluded by name rather than by loosening the rule,
+     because the next overloaded `component` field should also stop here and
+     be thought about. */
+  const WHOLE_CATALOGUE = new Set([
+    'components', 'selected', 'componentRequested', 'componentMissing', 'tools',
+  ]);
+  const allowed = new Set([NLG, SIG]);
+  const leaks = [];
+
+  (function walk(node, path) {
+    if (node == null) return;
+    if (Array.isArray(node)) { node.forEach((v, i) => walk(v, `${path}[${i}]`)); return; }
+    if (typeof node !== 'object') return;
+    for (const [k, v] of Object.entries(node)) {
+      if (WHOLE_CATALOGUE.has(k)) continue;
+      if (k === 'component' && typeof v === 'string' && v && !allowed.has(v)) {
+        leaks.push(`${path}.${k} = ${v}`);
+      }
+      walk(v, `${path}.${k}`);
+    }
+  })(d, 'view');
+
+  assert.deepStrictEqual(leaks, [],
+    `a component he did not select appears in the payload:\n  ${leaks.join('\n  ')}`);
+
+  /* FIXTURE CHECK: the unselected component really is on those epics, so the
+     sweep above had something to find. Without this the check passes just as
+     happily against data where the leak could never occur. */
+  const unfiltered = cov.view(snapshot([
+    epic('Automated', [NLG, THIRD]),
+    epic('Ready for Automation', [SIG, THIRD]),
+    epic('Automated', [NLG]),
+  ]), {});
+  assert.ok(unfiltered.byComponent.some(r => r.component === THIRD),
+    'fixture check: the third component is not in the data at all');
+});
+
 check('ONE SELECTED COMPONENT STILL READS AS `component`, so nothing older breaks', () => {
   // Every screen written before multi-select branches on `d.component`. One
   // selection has to keep meaning what it meant, and several have to read as

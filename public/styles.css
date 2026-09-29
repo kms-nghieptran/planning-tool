@@ -988,6 +988,27 @@ select.sprint-pick:disabled { opacity: .6; }
 .sprint-cell .tag { margin-left: 6px; }
 @media print { select.sprint-pick { border: none; background: none; appearance: none; } }
 
+/* ── PRINT MODE ───────────────────────────────────────────────────────────
+   What headless Chrome renders for the emailed PDF. The same page, with
+   everything a reader cannot use on paper taken out — the nav, the pickers,
+   every button. Applied by a body class rather than by `@media print` alone
+   because Chrome's --print-to-pdf does apply print rules, and this has to
+   hold in the on-screen preview too when he opens the URL to check it. */
+body.print-mode .nav,
+body.print-mode .sidebar,
+body.print-mode .topbar,
+body.print-mode .btn,
+body.print-mode .chip,
+body.print-mode .filters,
+body.print-mode .pager,
+body.print-mode .drawer { display: none !important; }
+body.print-mode .shell,
+body.print-mode .main { display: block !important; margin: 0 !important; padding: 0 !important; max-width: none !important; }
+body.print-mode .section { break-inside: avoid; }
+/* A white page. The dark theme is a screen affordance and prints as a solid
+   block of ink on a document going to a client. */
+body.print-mode { background: #fff !important; }
+
 /* ── THE FACE PILE ────────────────────────────────────────────────────────
    Filter by assignee, as a row of faces with the rest behind a +N. People
    are recognised faster as faces than read as names, and the ones carrying

@@ -16,5 +16,13 @@
     "repos": [],
     "loginMap": {}
   },
+  "mail": {
+    "host": "smtp.gmail.com",
+    "port": 587,
+    "user": "you@kms-technology.com",
+    "pass": "",
+    "from": "you@kms-technology.com",
+    "fromName": "Your Name"
+  },
   "server": { "port": 4322, "readOnly": false }
 }

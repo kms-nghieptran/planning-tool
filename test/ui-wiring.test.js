@@ -88,6 +88,11 @@ function sandbox(calls) {
     content: { firstElementChild: null },
   });
   const ctx = {
+    /* THE BROWSER GLOBALS BOOT ACTUALLY TOUCHES. `URLSearchParams` is one of
+       them now — print mode reads the query string — and a harness missing a
+       global does not fail the check that needed it, it kills the whole
+       suite at boot. */
+    URLSearchParams,
     console, Promise, setTimeout, clearTimeout, encodeURIComponent, CSS: { escape: String },
     prompt: () => 'A plan', confirm: () => true,
     document: { createElement: () => el(), querySelector: () => el(), querySelectorAll: () => [] },

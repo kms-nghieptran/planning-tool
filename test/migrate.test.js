@@ -180,6 +180,17 @@ const PLAN = () => ({
      round-trip is the only thing standing between his typed note and a
      silently shortened list. */
   blockers: [{ id: 'b1', title: 'Staging down', severity: 'high', status: 'Open', items: ['AUTOKAT-1', 'AUTOKAT-2'] }],
+  /* AN EMAIL TEMPLATE, with the recipient list that makes it different from
+     everything else in the plan. These addresses are what a client actually
+     receives on; a round trip that dropped one, or reordered them, would send
+     the next report to the wrong people and nothing here would say so. */
+  mailTemplates: [{
+    id: 'mt1', name: 'Weekly client report',
+    subject: 'Coverage — {{team}} — {{date}}',
+    body: 'Hi,\n\nCoverage is now {{coverage}}.',
+    to: ['client@example.com', 'lead@example.com'], cc: ['pm@example.com'],
+    attachPdf: true, landscape: true,
+  }],
   categoryRules: null,
   mixTargets: { ruby: { new: [45, 100], maintenance: [0, 35] } },
   // His own judgement of which suites matter. Plan data by definition — there

@@ -28,6 +28,57 @@ const SettingsView = (() => {
         </div>
 
         <div class="card">
+          <h3>Email</h3>
+          <div class="sub">Sends the Overall Coverage report to clients, with the PDF attached.</div>
+          ${/* PRESETS, because "smtp.gmail.com port 587" is knowledge nobody
+                should have to have. They fill the two fields he cannot guess
+                and leave the two he knows — his own address — alone. */''}
+          <div class="setting-row"><label>Provider</label>
+            <select id="mPreset">
+              <option value="">Choose to fill in the server…</option>
+              <option value="gmail">Google / Gmail / Workspace</option>
+              <option value="o365">Microsoft 365 / Outlook</option>
+              <option value="other">Something else</option>
+            </select>
+          </div>
+          <div class="setting-row"><label>Mail server</label><input type="text" id="mHost" value="${UI.esc(cfg.mail.host)}" placeholder="smtp.gmail.com"></div>
+          <div class="setting-row"><label>Port</label><input type="text" id="mPort" value="${UI.esc(String(cfg.mail.port || 587))}" placeholder="587"></div>
+          <div class="setting-row"><label>Username</label><input type="text" id="mUser" value="${UI.esc(cfg.mail.user)}" placeholder="you@kms-technology.com"></div>
+          <div class="setting-row"><label>App password</label><input type="password" id="mPass" placeholder="${cfg.mail.hasPass ? '•••••••• saved' : 'abcd efgh ijkl mnop'}"></div>
+          ${/* THE PLACEHOLDER SHOWS IT WITH THE SPACES IN, deliberately.
+                Google displays an app password in four groups of four and
+                selecting it copies the spaces, so the honest question at this
+                field is "do I take them out?" — and the answer being "no"
+                only helps if it is visible here rather than in the paragraph
+                below the buttons. The tool removes them; saying so at the
+                field is cheaper than the round trip through a 535 rejection
+                that reads as a wrong password. */''}
+          <div class="muted" style="font-size:11.5px;margin:-6px 0 12px 0;padding-left:var(--label-w,150px)">
+            Paste it exactly as Google shows it — the spaces are removed for you.
+          </div>
+          <div class="setting-row"><label>From address</label><input type="text" id="mFrom" value="${UI.esc(cfg.mail.from)}" placeholder="you@kms-technology.com"></div>
+          <div class="setting-row"><label>From name</label><input type="text" id="mFromName" value="${UI.esc(cfg.mail.fromName)}" placeholder="Your name, as the client sees it"></div>
+          <div class="btn-row">
+            <button class="btn sm" data-act="save-mail">Save</button>
+            ${/* THE TEST GOES TO HIM AND ONLY HIM — the recipient is not a
+                  field. A test that took an address would be a way to mail a
+                  stranger with no template and no preview. */''}
+            <button class="btn ghost sm" data-act="test-mail"${cfg.mail.host && cfg.mail.from ? '' : ' disabled'}
+              title="${cfg.mail.host && cfg.mail.from ? 'Sends one message to your own From address' : 'Save the settings first'}">Send a test to myself</button>
+            ${cfg.mail.hasPass ? '<button class="btn ghost sm" data-act="clear-mail-pass">Forget the password</button>' : ''}
+          </div>
+          <p class="muted" style="font-size:11.5px;margin:12px 0 0;line-height:1.6">
+            For a Google account this must be an <strong>app password</strong>, not your normal one — Google refuses
+            ordinary passwords over SMTP. Turn on 2-Step Verification, then create one at
+            <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noopener">myaccount.google.com/apppasswords</a>
+            and paste the 16 characters above (spaces do not matter).
+            If that page will not open for your work account, your Workspace admin has App passwords switched off —
+            ask them, or use a personal address here.
+            Stored in <code>config.json</code> (chmod 600, git-ignored) and never sent back to this screen.
+          </p>
+        </div>
+
+        <div class="card">
           <h3>Katalon TestOps</h3>
           <div class="sub">Execution health — turns failing suites into forecast maintenance load.</div>
           <div class="setting-row"><label>Base URL</label><input type="text" id="tBase" value="${UI.esc(cfg.testops.baseUrl)}"></div>
@@ -440,7 +491,23 @@ const SettingsView = (() => {
       <div class="muted" style="font-size:11px;margin-top:4px">${UI.esc(hint)}</div></div>`;
   }
 
+  /* THE PROVIDER PRESETS. Two values he cannot be expected to know, and
+     getting either wrong produces an SMTP error that reads like a network
+     fault. Nothing else is touched — his own address is his to type. */
+  const MAIL_PRESETS = {
+    gmail: { host: 'smtp.gmail.com', port: 587 },
+    o365: { host: 'smtp.office365.com', port: 587 },
+  };
+
   function wire(state, mount, s) {
+    const preset = UI.$('#mPreset', mount);
+    if (preset) preset.addEventListener('change', () => {
+      const p = MAIL_PRESETS[preset.value];
+      if (!p) return;
+      const host = UI.$('#mHost', mount); const port = UI.$('#mPort', mount);
+      if (host) host.value = p.host;
+      if (port) port.value = String(p.port);
+    });
     UI.$('#stTeam', mount).addEventListener('change', (e) => { state.teamId = e.target.value; App.refresh(); });
 
     /* ── the work-categorisation rule editor ─────────────────────────────
@@ -642,6 +709,33 @@ const SettingsView = (() => {
           if (v('jToken')) jira.apiToken = v('jToken');
           await UI.jsonPut('/api/config', { jira });
           UI.toast('Jira settings saved'); App.refresh();
+        } else if (act === 'save-mail') {
+          /* THE PASSWORD IS SENT ONLY WHEN HE TYPED ONE. The field cannot be
+             pre-filled — nothing ever sends it back — so posting an empty
+             string would wipe his app password every time he corrected the
+             port. The server treats blank as "keep what you have". */
+          const mail = {
+            host: v('mHost'), port: Number(v('mPort')) || 587, user: v('mUser'),
+            from: v('mFrom'), fromName: v('mFromName'),
+          };
+          if (v('mPass')) mail.pass = v('mPass');
+          await UI.jsonPut('/api/mail/config', mail);
+          UI.toast('Email settings saved'); App.refresh();
+        } else if (act === 'clear-mail-pass') {
+          if (!confirm('Forget the saved app password? You will have to paste it again to send.')) return;
+          await UI.jsonPut('/api/mail/config', {
+            host: v('mHost'), port: Number(v('mPort')) || 587, user: v('mUser'),
+            from: v('mFrom'), fromName: v('mFromName'), clearPass: true,
+          });
+          UI.toast('Password forgotten'); App.refresh();
+        } else if (act === 'test-mail') {
+          UI.toast('Sending a test to yourself…');
+          const r = await UI.jsonPost('/api/mail/test', {});
+          /* THE SERVER'S OWN WORDS ON FAILURE. "535 Username and Password not
+             accepted" tells him it is the app password; "Test failed" sends
+             him back to this form to change things at random. */
+          if (r.ok) UI.toast(`Sent to ${r.to} — check your inbox`);
+          else UI.toast(r.error, true);
         } else if (act === 'save-testops') {
           const testops = { baseUrl: v('tBase'), projectIds: v('tProjects').split(',').map(x => x.trim()).filter(Boolean) };
           if (v('tKey')) testops.apiKey = v('tKey');

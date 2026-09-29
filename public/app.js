@@ -84,6 +84,33 @@ const App = (() => {
     if (!s.plan.teams.some(t => t.id === state.teamId)) state.teamId = (s.plan.teams[0] || {}).id;
     state.sprintId = localStorage.getItem('pt-sprint') || s.currentSprintId || (s.sprints[s.sprints.length - 1] || {}).id;
     if (!s.sprints.some(x => x.id === state.sprintId)) state.sprintId = s.currentSprintId;
+    /* ── PRINT MODE ───────────────────────────────────────────────────
+       Headless Chrome renders this page to the PDF that gets emailed, and it
+       is the SAME page — same stylesheet, same numbers — asked for with
+       `?print=1`. The body class hides the nav, the team picker and every
+       button; `landscape=1` adds the same `@page` rule the on-screen Export
+       PDF injects.
+
+       READ FROM THE QUERY, NOT THE HASH, because the hash is the route and
+       the two have to be independent — `?print=1#reports/coverage` has to
+       mean "that page, stripped", not a route nothing recognises. */
+    /* WRAPPED, because this runs during boot. Print mode is a nicety; a
+       browser without `URLSearchParams`, or a host that does not expose
+       `location.search`, must still get the tool rather than a blank page
+       and a console error. */
+    const q = (() => {
+      try { return new URLSearchParams((location && location.search) || ''); } catch { return null; }
+    })();
+    if (q && q.get('print') === '1') {
+      document.body.classList.add('print-mode');
+      if (q.get('landscape') === '1') {
+        const st = document.createElement('style');
+        st.textContent = '@page { size: landscape; margin: 10mm; }';
+        document.head.appendChild(st);
+      }
+      if (q.get('team')) { try { localStorage.setItem('pt-team', q.get('team')); } catch { /* fine */ } }
+      if (q.get('sprint')) { try { localStorage.setItem('pt-sprint', q.get('sprint')); } catch { /* fine */ } }
+    }
     state.route = location.hash.slice(1) || 'team';
 
     renderNav(); fillSelects(); updateSyncState(s); wireShell();
@@ -486,6 +513,21 @@ const App = (() => {
 
     const y = window.scrollY;
     const r = routeFor(state.route);
+    /* THE SIGNAL THE PDF RENDERER WAITS FOR.
+     *
+     * Headless Chrome has no way of knowing when a single-page app has
+     * finished: the document is `complete` while the screen is still empty,
+     * and every heuristic for "looks done" is a guess. The previous renderer
+     * guessed with `--virtual-time-budget`, which waits for the network to go
+     * quiet — and hung for sixty seconds when it did not, producing a PDF of
+     * nothing or no PDF at all.
+     *
+     * So the page says so itself, here, at the one place every view in the
+     * tool passes through. Written in `finally` and carrying the OUTCOME, not
+     * just the fact of finishing: a view that threw has still stopped
+     * rendering, and the renderer needs to hear "this failed" rather than
+     * wait out its timeout and report something vaguer. */
+    let outcome = 'ok';
     try {
       await r.view().render(state, mount, r);
       if (hasContent) {
@@ -497,6 +539,7 @@ const App = (() => {
       // the per-render container, so it goes when the render goes.
       UI.sortable(mount);
     } catch (err) {
+      outcome = 'error';
       host.innerHTML = `
         <div class="card">
           <h3>Could not render this view</h3>
@@ -506,6 +549,12 @@ const App = (() => {
       console.error(err);
     } finally {
       if (hasContent) UI.busy(false);
+      /* Wrapped: this is a diagnostic aid, and a host that dislikes `dataset`
+         must not be able to turn a rendered screen into a blank one. */
+      try {
+        document.body.dataset.ptRendered = outcome;
+        document.body.dataset.ptRoute = state.route;
+      } catch { /* the screen is drawn either way */ }
     }
   }
 

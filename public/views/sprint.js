@@ -60,6 +60,12 @@ const SprintView = (() => {
           <div class="spacer"></div>
           <button class="btn ghost sm" data-act="export-pdf"
             title="Opens your browser's print dialogue — choose &quot;Save as PDF&quot;">Export PDF</button>
+          ${/* TWO ENDINGS FOR THE SAME REPORT: one saves it, the other sends
+                it. Sitting beside Export so the pair reads as a choice rather
+                than as two unrelated controls — the same arrangement the
+                Coverage screen uses, because it is the same decision. */''}
+          <button class="btn sm" data-act="email-report"
+            title="Render this sprint report to a PDF and email it with a template you choose">Email the report</button>
         </div>
       </section>
 
@@ -195,6 +201,27 @@ const SprintView = (() => {
 
       const pdf = e.target.closest('[data-act="export-pdf"]');
       if (pdf) { e.preventDefault(); exportPdf(d, state); return; }
+
+      const mailBtn = e.target.closest('[data-act="email-report"]');
+      if (mailBtn) {
+        e.preventDefault();
+        /* THE SPRINT THIS SCREEN IS SHOWING, pinned. `state.sprintId` can be
+           null when the page fell back to the current sprint, so the sprint's
+           own id is taken off the payload — otherwise the emailed PDF would
+           render whatever is active at send time, which is the right default
+           for a weekly schedule and the wrong one for a report he is looking
+           at right now. */
+        const sp = d.sprint || {};
+        MailDrawer.open({
+          report: 'sprint',
+          title: 'Send Active Sprint',
+          team: state.teamId,
+          scope: { sprint: sp.id || state.sprintId || null },
+          scopeNarrow: true,
+          scopeLabel: sp.name || state.sprintId || 'Current sprint',
+        });
+        return;
+      }
 
       /* The blockers on the epic behind a Story in Refinement. The item is
          found in the payload the table was drawn from, so the drawer cannot

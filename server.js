@@ -32,6 +32,11 @@ const componentNote = require('./lib/component-note');
 const componentRank = require('./lib/component-rank');
 const backlogLib = require('./lib/backlog-item');
 const blockersLib = require('./lib/blockers');
+const smtp = require('./lib/smtp');
+const mimeLib = require('./lib/mime');
+const pdfRender = require('./lib/pdf-render');
+const reportMail = require('./lib/report-mail');
+const mailSchedule = require('./lib/mail-schedule');
 const prioritization = require('./lib/prioritization');
 const keywords = require('./lib/keywords');
 const sprintDates = require('./lib/sprint-dates');
@@ -77,6 +82,7 @@ function loadConfig() {
   cfg.github = Object.assign({ baseUrl: 'https://api.github.com', token: '', repos: [], loginMap: {} }, cfg.github);
   cfg.server = Object.assign({ port: 4322, readOnly: false }, cfg.server);
   cfg.metrics = Object.assign({ excludeComponentsFromGrid: ['Katalon', 'TrueTest'], coverageScope: 'Epic' }, cfg.metrics);
+  cfg.mail = Object.assign({ host: '', port: 587, user: '', pass: '', from: '', fromName: '' }, cfg.mail);
   // env wins, so you can run without writing secrets to disk at all
   if (process.env.JIRA_BASE_URL) cfg.jira.baseUrl = process.env.JIRA_BASE_URL;
   if (process.env.JIRA_EMAIL) cfg.jira.email = process.env.JIRA_EMAIL;
@@ -91,7 +97,7 @@ function loadConfig() {
 function saveConfig(patch) {
   let cfg = {};
   try { cfg = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')); } catch (_) { /* new file */ }
-  for (const section of ['jira', 'testops', 'github', 'server', 'metrics']) {
+  for (const section of ['jira', 'testops', 'github', 'server', 'metrics', 'mail']) {
     if (patch[section]) cfg[section] = Object.assign({}, cfg[section], patch[section]);
   }
   fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2), { mode: 0o600 });
@@ -108,6 +114,17 @@ function redact(cfg) {
     github: { repos: cfg.github.repos, loginMap: cfg.github.loginMap, hasToken: Boolean(cfg.github.token) },
     server: cfg.server,
     metrics: cfg.metrics,
+    /* THE APP PASSWORD NEVER COMES BACK, only whether one is saved — the same
+       rule the Jira token beside it follows. This block is on screen whenever
+       he shows somebody the feature and in every screenshot he takes of it. */
+    mail: {
+      host: (cfg.mail || {}).host || '',
+      port: Number((cfg.mail || {}).port || 587),
+      user: (cfg.mail || {}).user || '',
+      from: (cfg.mail || {}).from || '',
+      fromName: (cfg.mail || {}).fromName || '',
+      hasPass: Boolean((cfg.mail || {}).pass),
+    },
   };
 }
 
@@ -267,6 +284,419 @@ function applyScenario(plan, sc) {
   plan.sprintRoster = plan.sprintRoster || {};
   if (data.rosterOverlay) plan.sprintRoster[cKey] = data.rosterOverlay;
   else delete plan.sprintRoster[cKey];
+}
+
+/**
+ * THE FIGURES A TEMPLATE MAY QUOTE, read from the same view the screen draws.
+ *
+ * Not from a second computation. A mail telling a client "coverage is 63.3%"
+ * over an attachment showing 61.8% is the worst failure this feature has,
+ * because both numbers are defensible and nobody here would ever see them
+ * side by side.
+ */
+/* `cfg` IS A PARAMETER, and that is the whole point of this signature.
+ *
+ * `handleApi` builds a fresh config on every request; the module-level `cfg`
+ * near the bottom of this file is read ONCE, at boot. A module-level function
+ * that says `cfg` silently gets the boot-time one — so the Settings screen
+ * saved the mail block, `/api/mail/config` (inside `handleApi`) reported it
+ * correctly, the Test button worked, and Send answered "Mail is not set up",
+ * because it alone was reading a config from before the save.
+ *
+ * Passing it in is not defensive style: it makes the stale-read impossible to
+ * write by accident, which a `loadConfig()` call inside the function would
+ * not — the next function to be added here would go straight back to `cfg`. */
+function coverageFigures(cfg, plan, body = {}) {
+  const snap = store.getSnapshot();
+  const m = (cfg.metrics || {});
+  const view = coverage.view(snap, {
+    components: Array.isArray(body.components) ? body.components.filter(Boolean) : [],
+    scope: m.coverageScope || 'Epic',
+    exclude: plan.excludedComponents || [],
+    teams: plan.coverageTeams || [],
+  });
+  const team = body.team ? (plan.teams || []).find(t => t.id === body.team) : null;
+  return reportMail.figuresFrom(view, {
+    teamName: team ? team.name : '',
+    sprintLabel: body.sprintLabel || '',
+    senderName: (cfg.mail || {}).fromName || '',
+    today: Date.now(),
+  });
+}
+
+/**
+ * The same, for the Active Sprint report.
+ *
+ * `insights.activeSprintView` IS THE SCREEN'S OWN CALL, made here with the
+ * same team and sprint the page resolves — not a second computation over the
+ * same data. The whole point of the placeholders is that a client quoting the
+ * mail is quoting the number he is looking at, and two code paths to one
+ * figure is how that stops being true.
+ */
+function sprintFigures(cfg, plan, body = {}) {
+  const snap = store.getSnapshot();
+  const team = findTeam(plan, body.team || null);
+  const sprint = findSprint(plan, body.sprint || null, team.id);
+  /* SAID OUT LOUD RATHER THAN DEREFERENCED. `findSprint` answers null for a
+     store with no sprints in it, and `activeSprintView` then fails deep
+     inside on a property of undefined — which reaches the screen as a 500 and
+     the mail log as a stack trace. Both are real states: a fresh install, and
+     a team whose sprints have all closed. */
+  if (!sprint) {
+    throw new Error(`there is no active sprint for ${team.name || 'this team'}. `
+      + 'Sync Jira, or pick a sprint on the Active sprint screen first.');
+  }
+  const view = insights.activeSprintView(plan, snap, team, sprint);
+  return reportMail.sprintFiguresFrom(view, {
+    teamName: team ? team.name : '',
+    sprintLabel: (sprint && (sprint.name || sprint.id)) || '',
+    senderName: (cfg.mail || {}).fromName || '',
+    today: Date.now(),
+  });
+}
+
+/**
+ * THE FIGURES FOR WHICHEVER REPORT THIS IS.
+ *
+ * One place that maps a report kind to its numbers, so the preview route, the
+ * send route and the scheduler cannot each decide differently — which they
+ * would, because each of them already had its own call to `coverageFigures`
+ * when there was only one report to get wrong.
+ */
+function figuresFor(kind, cfg, plan, body = {}) {
+  return reportMail.reportOf(kind).key === 'sprint'
+    ? sprintFigures(cfg, plan, body)
+    : coverageFigures(cfg, plan, body);
+}
+
+/**
+ * RENDER, COMPOSE, SEND, RECORD — in that order, and the order is the design.
+ *
+ * The PDF is produced BEFORE the connection is opened, so a Chrome that is
+ * missing or a page that did not load costs nothing but an error message. The
+ * alternative — authenticate, then discover there is nothing to attach — ends
+ * with a half-open SMTP session and a client wondering where the attachment
+ * went.
+ *
+ * EVERY OUTCOME IS LOGGED, success and failure alike. The scheduler sends
+ * unattended; without a record, a send that failed at 8am on Monday is
+ * invisible until the client asks why they got nothing.
+ */
+async function sendReport(cfg, body = {}, { trigger = 'manual' } = {}) {
+  const plan = store.getPlan();
+  const mail = cfg.mail || {};
+  const started = new Date().toISOString();
+
+  const record = (ok, detail, extra = {}) => {
+    try {
+      dbLib.run('INSERT INTO mail_log (at, template, subject, recipients, ok, detail, bytes, trigger) VALUES (?,?,?,?,?,?,?,?)',
+        started, extra.template || null, extra.subject || null,
+        (extra.recipients || []).join(' '), ok ? 1 : 0, String(detail || '').slice(0, 500),
+        extra.bytes || null, trigger);
+    } catch { /* a log that cannot write must not fail a send that worked */ }
+    return { ok, error: ok ? null : String(detail || ''), ...extra, at: started, trigger };
+  };
+
+  /* THE TEMPLATE IS CHECKED FIRST, before the mail setup.
+     Both can be wrong at once, and when they are, the address he mistyped is
+     the one he can fix on this screen — "mail is not set up" sends him to a
+     config file to solve a problem that is not there. Specific before
+     general. */
+  const v = reportMail.validate(body.template || {});
+  if (!v.ok) return record(false, v.errors.join(' '));
+  const tpl = v.template;
+
+  /* THE TEMPLATE'S KIND DECIDES THE REPORT, not the caller's, and this is
+     checked BEFORE the mail setup for the same reason the template is:
+     specific before general. Both can be wrong at once, and when they are,
+     "mail is not set up" sends him to a config file to solve a problem that
+     is not there.
+     The mismatch is not hypothetical — the drawer is the same drawer on both
+     screens and a saved template is one dropdown away from the other page.
+     Sending one there would compose coverage wording over sprint figures:
+     every placeholder unresolved, the attachment a different report, and all
+     of it in front of a client. Refused, and the message names both reports
+     so he does not have to guess which way round it went. */
+  const kind = reportMail.reportOf(tpl.report);
+  const asked = reportMail.reportOf(body.report || tpl.report);
+  if (asked.key !== kind.key) {
+    return record(false,
+      `That template is written for the ${kind.label} report, so it cannot be sent as ${asked.label}.`,
+      { template: tpl.name, recipients: [...tpl.to, ...tpl.cc] });
+  }
+
+  if (!mail.host || !mail.from) {
+    return record(false, 'Mail is not set up — add a mail block to config.json (host, user, pass, from).',
+      { template: tpl.name, recipients: [...tpl.to, ...tpl.cc] });
+  }
+
+  let report;
+  try {
+    report = figuresFor(kind.key, cfg, plan, body);
+  } catch (err) {
+    /* A REPORT WITH NOTHING TO REPORT ON. No sprints in the store, a team
+       with none of its own — real states, and the figures throw rather than
+       inventing zeroes. Caught here so it is a sentence in the log and on
+       screen instead of a stack trace and a 500, which is what he would
+       otherwise get at 8am on a Monday from the scheduler. */
+    return record(false, `The ${kind.label} report could not be built — ${err.message}`,
+      { template: tpl.name, recipients: [...tpl.to, ...tpl.cc] });
+  }
+  const composed = reportMail.compose(tpl, report, { from: mail.from, fromName: mail.fromName });
+
+  let attachment = null;
+  let bytes = 0;
+  if (tpl.attachPdf) {
+    try {
+      /* THE PORT THE SERVER IS ACTUALLY ON, asked of the running server
+         rather than read from config. Under the test harness the config says
+         one thing and `listen(0)` did another, and a render against the
+         configured port would quietly fetch somebody else's page — or
+         nothing. */
+      const port = (server.address() && server.address().port) || cfg.server.port;
+      /* THE SAME SCOPE THE FIGURES WERE COMPUTED FROM, a dozen lines above.
+         One scope read twice, and it must not become two — that is how the
+         words came to describe a subset while the attachment showed
+         everything. The report kind decides WHICH scope: coverage narrows by
+         component, the sprint report by sprint. */
+      const url = pdfRender.reportUrl(`http://127.0.0.1:${port}`, {
+        route: kind.route, team: body.team || null, landscape: tpl.landscape !== false,
+        sprint: kind.scope === 'sprint' ? (body.sprint || null) : null,
+        components: kind.scope === 'components' && Array.isArray(body.components)
+          ? body.components.filter(Boolean) : [],
+      });
+      const out = await pdfRender.render(url, { landscape: tpl.landscape !== false });
+      attachment = {
+        filename: reportMail.pdfName(report, tpl),
+        content: fs.readFileSync(out.file),
+        contentType: 'application/pdf',
+      };
+      bytes = out.bytes;
+      try { fs.rmSync(path.dirname(out.file), { recursive: true, force: true }); } catch { /* temp */ }
+    } catch (err) {
+      /* REFUSED RATHER THAN SENT WITHOUT IT. He asked for a report with the
+         PDF attached; a mail arriving with the words and no document is not a
+         smaller version of that, it is a thing he would have to apologise
+         for. */
+      return record(false, `The PDF could not be rendered, so nothing was sent — ${err.message}`,
+        { template: tpl.name, subject: composed.subject, recipients: [...tpl.to, ...tpl.cc] });
+    }
+  }
+
+  let msg;
+  try {
+    msg = mimeLib.build({
+      from: composed.from, to: composed.to, cc: composed.cc,
+      subject: composed.subject, text: composed.text,
+      attachments: attachment ? [attachment] : [],
+    });
+  } catch (err) {
+    return record(false, err.message, { template: tpl.name, subject: composed.subject });
+  }
+
+  try {
+    const sent = await smtp.send(mail, { ...msg, from: mimeLib.bare(mail.from) });
+    store.audit('mail.sent', { template: tpl.name, to: msg.to.length, trigger });
+    return record(true, sent.response, {
+      template: tpl.name, subject: composed.subject,
+      recipients: [...msg.to, ...msg.cc], bytes,
+    });
+  } catch (err) {
+    return record(false, err.message, {
+      template: tpl.name, subject: composed.subject,
+      recipients: [...msg.to, ...msg.cc], bytes,
+    });
+  }
+}
+
+/* ─────────────────────── THE WEEKLY SEND ────────────────────────────────
+ *
+ * `lib/mail-schedule.js` decides WHETHER a template is due; this decides what
+ * to do about it. The split is not ceremony — the decision is pure arithmetic
+ * over a clock and is worth testing across a year of Mondays in a loop, while
+ * this half writes to a database and opens an SMTP connection and is worth
+ * testing about four times.
+ *
+ * ── WHY THE CLAIM IS WRITTEN FIRST ───────────────────────────────────────
+ *
+ * The order below is claim, then send, then record the outcome. Reversed —
+ * send, then mark it done — a crash or a quit in the seconds between the two
+ * leaves the slot looking unsent, and the next tick, or the next launch,
+ * sends the client a second copy of a report they already have.
+ *
+ * Writing the claim first inverts the failure: a crash in that same window
+ * loses the report instead. He sees no mail, looks at the log, finds the slot
+ * sitting at `sending`, and presses Send. That is a minute of his time. The
+ * other way costs an email to a client explaining why they got two.
+ *
+ * NOTHING RETRIES. Not on failure, not on an ambiguous outcome. If Gmail
+ * refuses the password at 8am the record says so and the schedule waits for
+ * next week — because a retry loop against a send that failed for a reason it
+ * cannot diagnose is how four copies arrive at 8:03.
+ */
+const SCHEDULE_TICK_MS = 60 * 1000;
+/* THE FIRST TICK WAITS. `sendReport` renders the PDF by pointing Chrome at
+   this server's own port, so a schedule that fired during startup would race
+   the thing it needs. Twenty seconds is far longer than boot and far shorter
+   than the grace window, so a slot that is genuinely due is not lost. */
+const SCHEDULE_FIRST_TICK_MS = 20 * 1000;
+
+/* ── TWO GUARDS, AND BOTH ARE LOAD-BEARING ───────────────────────────────
+ *
+ * A duplicate send is stopped twice over: this SELECT, and the INSERT in
+ * `claimSlot` below hitting its primary key. Breaking either one ALONE still
+ * sends exactly once — confirmed by mutating each in turn and watching the
+ * suite stay green, which is the kind of result that usually means dead code.
+ * It is not, and the distinction is worth writing down before somebody
+ * simplifies it away:
+ *
+ *   THE INSERT IS THE LOCK. It is atomic, and it is the only thing that would
+ *   hold if two passes ever overlapped.
+ *
+ *   THE SELECT IS WHAT MAKES THE ANSWER LEGIBLE. Without it every ordinary
+ *   tick — ten thousand a week, all of which should do nothing — reaches
+ *   `decide` as 'due' and is stopped by a caught constraint violation. That
+ *   works, and it means the normal path is an exception, `reason` never says
+ *   'done', and the moment something genuinely breaks there is no way to tell
+ *   a slot that was already sent from one that failed to claim.
+ *
+ * Delete either and the tests still pass. Delete both and they do not — which
+ * is the honest statement of what is being protected here.
+ */
+const claimedSlot = (templateId, key) => {
+  try {
+    return !!dbLib.get('SELECT 1 AS x FROM mail_schedule_run WHERE template = ? AND slot = ?', templateId, key);
+  } catch {
+    /* A CLAIM TABLE THAT CANNOT BE READ MEANS "ALREADY SENT". The only thing
+       this answer is used for is deciding whether to mail a client; if the
+       database is in a state where that question cannot be answered, the safe
+       reply is the one that sends nothing. */
+    return true;
+  }
+};
+
+/**
+ * Take the slot, or report that somebody already has it.
+ *
+ * The INSERT is the lock. `status` starts at `sending` so that a process
+ * killed mid-send leaves a row that says exactly that — distinguishable on
+ * the screen from `sent`, from `failed`, and from a slot nobody ever reached.
+ */
+function claimSlot(templateId, key, status = 'sending') {
+  try {
+    dbLib.run('INSERT INTO mail_schedule_run (template, slot, claimed, status) VALUES (?,?,?,?)',
+      templateId, key, new Date().toISOString(), status);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const settleSlot = (templateId, key, status, detail) => {
+  try {
+    dbLib.run('UPDATE mail_schedule_run SET status = ?, detail = ? WHERE template = ? AND slot = ?',
+      status, String(detail || '').slice(0, 500), templateId, key);
+  } catch { /* the send already happened; a lost status line must not undo it */ }
+};
+
+/**
+ * One pass over every template that has a schedule.
+ *
+ * @param {Date} now      injected so a test can walk a month in milliseconds
+ * @param {object} o      { grace } — injected for the same reason
+ * @returns {Array} what happened, one entry per scheduled template
+ *
+ * `loadConfig()` IS CALLED HERE, ON EVERY TICK, and that is not wasteful
+ * caution. The module-level `cfg` in this file is read once at boot; a
+ * module-level function that closes over it keeps serving a config from
+ * before the Settings screen was last saved. That exact bug shipped in this
+ * file — Send answered "mail is not set up" while the Test button on the same
+ * screen worked — and a scheduler is where it would be least visible, because
+ * the failure arrives at 8am on a Monday with nobody looking.
+ */
+async function runDueSchedules(now = new Date(), o = {}) {
+  const out = [];
+  let plan;
+  try { plan = store.getPlan(); } catch { return out; }
+  const templates = (plan.mailTemplates || []).filter(t => t && t.id && t.schedule && t.schedule.enabled);
+  if (!templates.length) return out;
+
+  const cfg = loadConfig();
+
+  for (const tpl of templates) {
+    const d = mailSchedule.decide(tpl.schedule, now, {
+      grace: o.grace,
+      claimed: (key) => claimedSlot(tpl.id, key),
+    });
+    if (d.reason === 'off' || d.reason === 'done') continue;
+
+    /* A MISSED SLOT IS RECORDED, NOT SKIPPED QUIETLY. Without the row, "there
+       was no report last Monday" and "the report failed last Monday" look
+       identical from the screen — and the first one has a cause he can act on
+       (his laptop was shut) while the second does not. Claiming it also stops
+       this branch re-deciding the same dead slot every minute forever. */
+    if (d.reason === 'missed') {
+      if (claimSlot(tpl.id, d.key, 'missed')) {
+        settleSlot(tpl.id, d.key, 'missed',
+          `Nothing was running at ${d.key}, and by the time it was this was ${mailSchedule.lateness(d.late)} — too stale to send.`);
+        out.push({ template: tpl.id, slot: d.key, status: 'missed' });
+      }
+      continue;
+    }
+
+    /* THE CLAIM IS THE GATE. If the insert loses, another pass has this slot
+       and this one does nothing — no send, no log line, no argument. */
+    if (!claimSlot(tpl.id, d.key, 'sending')) continue;
+
+    let result;
+    try {
+      result = await sendReport(cfg, {
+        template: tpl,
+        report: tpl.report || null,
+        team: (tpl.schedule || {}).team || null,
+        components: (tpl.schedule || {}).components || [],
+        /* NO PINNED SPRINT MEANS "WHICHEVER IS ACTIVE", and for a weekly
+           sprint report that is the right default rather than an oversight:
+           he wants Monday's mail to be about the sprint that is running on
+           Monday, not the one that was running when he armed the schedule.
+           `findSprint` resolves a null to the current sprint for that team,
+           which is exactly the screen's own behaviour. */
+        sprint: (tpl.schedule || {}).sprint || null,
+        sprintLabel: '',
+      }, { trigger: 'schedule' });
+    } catch (err) {
+      /* `sendReport` returns failures rather than throwing, so reaching here
+         means something outside it broke. It still has to settle the row —
+         a slot left at `sending` reads as a crash, and saying "crash" about a
+         handled error would send him looking for the wrong thing. */
+      settleSlot(tpl.id, d.key, 'failed', err.message);
+      out.push({ template: tpl.id, slot: d.key, status: 'failed', error: err.message });
+      continue;
+    }
+
+    const status = result.ok ? 'sent' : 'failed';
+    settleSlot(tpl.id, d.key, status,
+      result.ok ? `${mailSchedule.lateness(d.late)} — ${(result.recipients || []).length} recipients` : result.error);
+    out.push({ template: tpl.id, slot: d.key, status, error: result.error || null });
+  }
+  return out;
+}
+
+/** The timer. Started from `listen`, never at require time — see the tick note. */
+function startScheduler() {
+  let running = false;
+  const tick = async () => {
+    /* ONE PASS AT A TIME. A send takes fifteen seconds for the PDF alone and
+       the tick is sixty; a slow render plus a slow SMTP handshake could
+       overlap two passes, and while the claim would stop a double send, the
+       second pass would spend the time discovering that. */
+    if (running) return;
+    running = true;
+    try { await runDueSchedules(new Date()); }
+    catch (err) { try { store.audit('mail.schedule.error', { error: String(err.message).slice(0, 200) }); } catch { /* best effort */ } }
+    finally { running = false; }
+  };
+  setTimeout(() => { tick(); setInterval(tick, SCHEDULE_TICK_MS).unref(); }, SCHEDULE_FIRST_TICK_MS).unref();
 }
 
 function findTeam(plan, id) {
@@ -1387,6 +1817,281 @@ async function handleApi(req, res, url) {
      blocker outlives the sprint it was noticed in, and 496 of his 543 blocked
      items are nowhere near one. Passing no `sprint` is therefore the normal
      case rather than the degenerate one. */
+  /* ────────────────────── EMAILING THE COVERAGE REPORT ──────────────────
+   *
+   * The only thing this tool does that leaves the building. Everything here
+   * is arranged so that the mail he approves and the mail that goes out are
+   * the same mail, and so that a send nobody watched leaves a record.
+   *
+   * THE PASSWORD NEVER COMES BACK OUT. `/api/mail/config` says whether mail
+   * is set up and which address it would send from, and nothing else — a
+   * screen that displayed the app password would put it in every screenshot
+   * he ever takes of this page.
+   */
+  if (p === '/api/mail/config' && req.method === 'GET') {
+    const m = cfg.mail || {};
+    return json(res, 200, {
+      configured: !!(m.host && m.from),
+      host: m.host || null,
+      port: Number(m.port || 587),
+      from: m.from || null,
+      fromName: m.fromName || null,
+      authenticated: !!m.user,
+      hasPass: !!m.pass,
+      chrome: !!pdfRender.findChrome(),
+      /* THE FIELDS FOR THE REPORT BEING ASKED ABOUT. The drawer is shared
+         between screens, so it says which one it is on; an editor listing
+         `{{committed}}` beside a coverage template would be offering a
+         placeholder that can only ever come out as an em-dash. */
+      report: reportMail.reportOf(q.get('report')).key,
+      fields: reportMail.fieldsFor(q.get('report')).map(f => ({ key: f.key, label: f.label })),
+      /* Every report, so the drawer can name the one it is on and the
+         Settings screen could list them without a second route. */
+      reports: Object.values(reportMail.REPORTS)
+        .map(r => ({ key: r.key, label: r.label, defaultFilename: r.defaultFilename })),
+    });
+  }
+
+  /**
+   * SAVE THE MAIL SETTINGS from the screen.
+   *
+   * A BLANK PASSWORD MEANS "KEEP THE ONE YOU HAVE", and that is not a
+   * convenience — the field cannot be pre-filled (nothing ever sends the
+   * password back), so treating blank as "clear it" would wipe his app
+   * password every time he corrected a typo in the port. Clearing is its own
+   * explicit act.
+   */
+  if (p === '/api/mail/config' && req.method === 'PUT') {
+    const body = await readJsonBody(req);
+    const current = cfg.mail || {};
+    /* AN ABSENT PORT DEFAULTS; A NONSENSE ONE IS AN ERROR. `Number(x) || 587`
+       collapses the two, so a typed 0 — or "eighty" — silently became 587 and
+       the only sign was a connection to a port he did not choose. Blank means
+       "use the usual"; anything else has to be a port. */
+    const givenPort = body.port === '' || body.port == null;
+    const patch = {
+      host: String(body.host || '').trim(),
+      port: givenPort ? 587 : Number(body.port),
+      user: String(body.user || '').trim(),
+      from: String(body.from || '').trim(),
+      fromName: String(body.fromName || '').trim(),
+    };
+    /* `smtp.appPassword` RATHER THAN `.trim()`. A Google app password is
+       copied off the page with the spaces that display it in fours, and stored
+       that way it fails authentication with a message about the password being
+       wrong. Cleaned on the way in so the file holds what actually works; the
+       same call sits in front of AUTH, which is what repairs a config that was
+       already saved with the spaces in it. */
+    if (body.clearPass) patch.pass = '';
+    else if (String(body.pass || '').trim()) patch.pass = smtp.appPassword(body.pass);
+    else patch.pass = current.pass || '';
+
+    /* CHECKED HERE, not only in the browser. A port of 0 or a From that is not
+       an address fails at send time with an SMTP error nobody can read; caught
+       on save it is one sentence beside the field. */
+    const errors = [];
+    if (!patch.host) errors.push('A mail server is needed — smtp.gmail.com for a Google account.');
+    if (!(patch.port > 0 && patch.port < 65536)) errors.push('The port must be a number between 1 and 65535.');
+    if (!patch.from) errors.push('A From address is needed — the mail has to come from somewhere.');
+    else if (!mimeLib.isEmail(patch.from)) errors.push(`"${patch.from}" does not look like an email address.`);
+    if (patch.user && !mimeLib.isEmail(patch.user)) errors.push(`"${patch.user}" does not look like an email address.`);
+    if (errors.length) return json(res, 400, { error: errors.join(' '), errors });
+
+    const saved = saveConfig({ mail: patch });
+    store.audit('mail.config.save', { host: patch.host, hasPass: !!patch.pass });
+    return json(res, 200, { ok: true, mail: redact(saved).mail });
+  }
+
+  /**
+   * SEND ONE TEST MESSAGE — to himself, and only to himself.
+   *
+   * THE RECIPIENT IS NOT A PARAMETER. It is always the configured From
+   * address, so this button cannot be pointed at anybody else: a "test" that
+   * took a recipient is a way to mail a stranger from his account with no
+   * template, no preview and no record that reads like a real send.
+   *
+   * It carries no PDF. What is being tested is the password and the route out
+   * — Chrome is a separate question, answered on the setup panel by whether
+   * it was found at all.
+   */
+  if (p === '/api/mail/test' && req.method === 'POST') {
+    const mail = cfg.mail || {};
+    if (!mail.host || !mail.from) return json(res, 400, { error: 'Fill in the mail settings and save them first.' });
+    const to = mimeLib.bare(mail.from);
+    try {
+      const msg = mimeLib.build({
+        from: mail.fromName ? `${mail.fromName} <${to}>` : to,
+        to: [to],
+        subject: 'Planning Tool — test message',
+        text: 'This is a test from the Planning Tool.\n\n'
+          + 'If you are reading it, the mail settings work and "Email the report" can send.\n\n'
+          + `Server: ${mail.host}:${mail.port || 587}\nSent: ${new Date().toISOString()}`,
+      });
+      const sent = await smtp.send(mail, { ...msg, from: to });
+      dbLib.run('INSERT INTO mail_log (at, template, subject, recipients, ok, detail, bytes, trigger) VALUES (?,?,?,?,?,?,?,?)',
+        new Date().toISOString(), null, 'Planning Tool — test message', to, 1, sent.response, null, 'test');
+      return json(res, 200, { ok: true, to, response: sent.response });
+    } catch (err) {
+      dbLib.run('INSERT INTO mail_log (at, template, subject, recipients, ok, detail, bytes, trigger) VALUES (?,?,?,?,?,?,?,?)',
+        new Date().toISOString(), null, 'Planning Tool — test message', to, 0, String(err.message).slice(0, 500), null, 'test');
+      return json(res, 200, { ok: false, to, error: err.message });
+    }
+  }
+
+  if (p === '/api/mail/templates' && req.method === 'GET') {
+    const plan = store.getPlan();
+    return json(res, 200, { templates: plan.mailTemplates || [] });
+  }
+
+  if (p === '/api/mail/template' && (req.method === 'PUT' || req.method === 'POST' || req.method === 'DELETE')) {
+    const body = await readJsonBody(req);
+    const plan = store.getPlan();
+    plan.mailTemplates = plan.mailTemplates || [];
+    if (req.method === 'DELETE') {
+      if (!plan.mailTemplates.some(t => t.id === body.id)) return json(res, 404, { error: 'No such template.' });
+      plan.mailTemplates = plan.mailTemplates.filter(t => t.id !== body.id);
+    } else {
+      const v = reportMail.validate(body);
+      if (!v.ok) return json(res, 400, { error: v.errors.join(' '), errors: v.errors });
+      const existing = body.id ? plan.mailTemplates.find(t => t.id === body.id) : null;
+      if (body.id && !existing) return json(res, 404, { error: 'No such template.' });
+      const row = {
+        ...v.template,
+        id: existing ? existing.id : reportMail.newId(),
+        createdAt: existing ? existing.createdAt : new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      plan.mailTemplates = existing
+        ? plan.mailTemplates.map(t => (t.id === row.id ? row : t))
+        : [...plan.mailTemplates, row];
+    }
+    store.savePlan(plan);
+    store.audit(`mail.template.${req.method.toLowerCase()}`, { id: body.id || body.name });
+    return json(res, 200, { ok: true, templates: plan.mailTemplates });
+  }
+
+  /* THE PREVIEW RENDERS NOTHING AND SENDS NOTHING. It answers one question —
+     what would the client read — and it goes through `reportMail.compose`,
+     the same function the send uses, so the two cannot drift. Chrome is not
+     started: a preview that took fifteen seconds is a preview nobody waits
+     for, and it is the WORDS that need checking before they leave. */
+  if (p === '/api/mail/preview' && req.method === 'POST') {
+    const body = await readJsonBody(req);
+    const plan = store.getPlan();
+    const v = reportMail.validate(body.template || {});
+    if (!v.ok) return json(res, 400, { error: v.errors.join(' '), errors: v.errors });
+    /* THE TEMPLATE'S OWN KIND, exactly as the send resolves it — the preview
+       is only worth anything if it is the same composition. */
+    let report;
+    try {
+      report = figuresFor(v.template.report, cfg, plan, body);
+    } catch (err) {
+      /* 400 AND A SENTENCE, not a 500 and a stack trace. "There is no active
+         sprint" is something he can act on; "Cannot read properties of
+         undefined" is something he has to come and ask about. */
+      return json(res, 400, { error: `This report could not be built — ${err.message}` });
+    }
+    const m = reportMail.compose(v.template, report, {
+      from: (cfg.mail || {}).from || '', fromName: (cfg.mail || {}).fromName || '',
+    });
+    return json(res, 200, {
+      ...m,
+      warnings: v.warnings,
+      attachmentName: reportMail.pdfName(report, v.template),
+      figures: report,
+    });
+  }
+
+  /**
+   * WHAT THE SCHEDULE HAS ACTUALLY BEEN DOING.
+   *
+   * An unattended feature needs a screen, or it is a rumour. This is that
+   * screen's data: for each armed template, when it next goes out and what
+   * happened the last few times it did — including the slots that were
+   * `missed` because the machine was asleep, which are the ones he would
+   * otherwise mistake for the tool being broken.
+   */
+  if (p === '/api/mail/schedule' && req.method === 'GET') {
+    const plan = store.getPlan();
+    const now = new Date();
+    const rows = (plan.mailTemplates || []).filter(t => t && t.schedule && t.schedule.enabled);
+    return json(res, 200, {
+      now: now.toISOString(),
+      grace: mailSchedule.GRACE_MS,
+      scheduled: rows.map(t => ({
+        id: t.id,
+        name: t.name,
+        schedule: t.schedule,
+        describes: mailSchedule.describe(t.schedule),
+        nextRun: mailSchedule.nextSlotAfter(t.schedule, now).toISOString(),
+        recipients: [...(t.to || []), ...(t.cc || [])].length,
+        runs: dbLib.all('SELECT slot, claimed, status, detail FROM mail_schedule_run WHERE template = ? ORDER BY slot DESC LIMIT 8', t.id),
+      })),
+    });
+  }
+
+  /**
+   * RENDER THE ATTACHMENT AND HAND IT STRAIGHT BACK — no mail, no recipients.
+   *
+   * The PDF is the half of this feature he cannot check. The preview shows
+   * the words; the document is produced by a headless browser he never sees,
+   * and the first version of that renderer hung for sixty seconds and told
+   * him nothing useful. Until now the only way to find out whether it worked
+   * was to send something to a client.
+   *
+   * GET RATHER THAN POST, deliberately: it means the button is a link, the
+   * PDF opens in a tab, and he is looking at the actual bytes that would have
+   * been attached rather than a reassuring green tick. A render failure comes
+   * back as text he can read instead of a broken download.
+   */
+  if (p === '/api/mail/preview-pdf' && req.method === 'GET') {
+    const landscape = q.get('landscape') !== '0';
+    const port = (server.address() && server.address().port) || cfg.server.port;
+    /* THE REPORT DECIDES THE PAGE AND THE SCOPE, the same way the send does.
+       A `route` can still be passed for anything that needs one directly, but
+       the drawer names the report and lets this resolve it — one mapping, not
+       one here and another in the browser. */
+    const kind = reportMail.reportOf(q.get('report'));
+    const url = pdfRender.reportUrl(`http://127.0.0.1:${port}`, {
+      route: q.get('route') || kind.route,
+      team: q.get('team') || null,
+      landscape,
+      sprint: kind.scope === 'sprint' ? (q.get('sprint') || null) : null,
+      /* CARRIED THROUGH, or this button would check a different document from
+         the one a send produces — which is worse than not having the button,
+         because it would report the wrong thing confidently. */
+      components: kind.scope === 'components' ? q.getAll('component').filter(Boolean) : [],
+    });
+    try {
+      const outFile = await pdfRender.render(url, { landscape });
+      const body = fs.readFileSync(outFile.file);
+      try { fs.rmSync(path.dirname(outFile.file), { recursive: true, force: true }); } catch { /* temp */ }
+      res.writeHead(200, {
+        'Content-Type': 'application/pdf',
+        'Content-Length': body.length,
+        /* `inline` so it opens rather than lands in Downloads — this is a
+           thing to look at, not a file to keep. */
+        'Content-Disposition': 'inline; filename="coverage-test.pdf"',
+        'Cache-Control': 'no-store',
+        'X-Render-Ms': String(outFile.ms || 0),
+      });
+      return res.end(body);
+    } catch (err) {
+      res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
+      return res.end(`The PDF could not be rendered.\n\n${err.message}\n`);
+    }
+  }
+
+  if (p === '/api/mail/log' && req.method === 'GET') {
+    const rows = dbLib.all('SELECT * FROM mail_log ORDER BY at DESC, id DESC LIMIT 100');
+    return json(res, 200, { sends: rows.map(r => ({ ...r, ok: !!r.ok, recipients: String(r.recipients || '').split(' ').filter(Boolean) })) });
+  }
+
+  if (p === '/api/mail/send' && req.method === 'POST') {
+    const body = await readJsonBody(req);
+    return json(res, 200, await sendReport(cfg, body, { trigger: 'manual' }));
+  }
+
   if (p === '/api/blockers' && req.method === 'GET') {
     const plan = store.getPlan(), snap = store.getSnapshot();
     return json(res, 200, blockersLib.blockerView(plan, snap, {
@@ -2704,7 +3409,7 @@ store.ensureDirs();
  * `PORT=0` means "I am the test harness": the module exports the server and
  * lets the caller listen. Anything else behaves exactly as before.
  */
-module.exports = { server, handleApi, captureScenario, applyScenario };
+module.exports = { server, handleApi, captureScenario, applyScenario, runDueSchedules };
 
 if (process.env.PORT !== '0') {
   server.listen(cfg.server.port, '127.0.0.1', () => {
@@ -2712,6 +3417,28 @@ if (process.env.PORT !== '0') {
     console.log(`\n  Automation Planning Tool  →  ${url}`);
     console.log(`  Data: ${store.STORE_DIR}`);
     console.log(cfg.jira.apiToken ? `  Jira: ${cfg.jira.baseUrl} (${cfg.jira.projectKey})` : '  Jira: not configured yet — open Settings in the app.');
+
+    /* THE SCHEDULER STARTS HERE, INSIDE `listen`, AND NOWHERE ELSE.
+       A scheduled send renders its PDF by pointing Chrome at this server's own
+       address, so it cannot usefully exist before the socket does. Starting it
+       at require time would also run it under every test that imports this
+       file, and a suite that quietly opens SMTP connections is a bad
+       afternoon. `PORT=0` is how the tests get in, and they never take this
+       branch.
+
+       WHAT IS SCHEDULED IS PRINTED AT STARTUP, because an unattended feature
+       that leaves no trace until it fires is one he has to take on faith. One
+       line at boot is where he finds out that the schedule he set last month
+       is still armed — or that it quietly is not. */
+    try {
+      const armed = (store.getPlan().mailTemplates || []).filter(t => t && t.schedule && t.schedule.enabled);
+      if (armed.length) {
+        console.log(`  Mail: ${armed.length} scheduled report${armed.length > 1 ? 's' : ''} — `
+          + armed.map(t => `${t.name}, ${mailSchedule.describe(t.schedule)}`).join('; '));
+      }
+    } catch { /* a plan that will not load is the app's problem, not this line's */ }
+
+    startScheduler();
     console.log('  Ctrl-C to stop.\n');
   });
 }
