@@ -179,14 +179,17 @@ async function renderHtml(snap = SNAP, plan = PLAN, opts = {}) {
      view is no longer what the page receives, and a harness that renders a
      payload the server never sends is checking a screen nobody sees. That the
      ROUTE really sends this is checked over HTTP, in sprint-api.test.js. */
-  const payload = {
+  const built = {
     ...view,
     risks: {
       signals: insights.signalsFor(TEAM, SPRINT, view, snap),
       manual: (plan.risks || []).filter(r => String(r.status || '').toLowerCase() !== 'closed'),
     },
     testCases: view.testCases
-      ? { ...view.testCases, rows: priority.decorate(view.testCases.rows, plan) }
+      /* DECORATED AND ORDERED AS THE ROUTE DOES IT — the page sorts these rows
+         by his priority, and a harness that skipped the sort would render an
+         order nobody sees. */
+      ? { ...view.testCases, rows: priority.byPriority(priority.decorate(view.testCases.rows, plan)) }
       : view.testCases,
     priorityLevels: priority.LEVELS,
     /* The lock the route now sends. The Points cells on this screen edit real
@@ -194,6 +197,13 @@ async function renderHtml(snap = SNAP, plan = PLAN, opts = {}) {
        sprint still accepts writes. */
     lock: opts.lock || { readOnly: false },
   };
+  /* A HOOK FOR RENDERING AGAINST A PAYLOAD THIS MODEL WOULD NOT PRODUCE —
+     specifically an OLDER one. Fields get added to the payload and the browser
+     keeps the previous page until it is reloaded, so "what does this screen do
+     when a field it now relies on is missing" is a real state and not a
+     hypothetical. Built from the real payload and then cut down, so it stays
+     in step with the model instead of being a hand-written fake. */
+  const payload = opts.payload ? opts.payload(built) : built;
   let html = '';
   const puts = [];
   const el = () => ({
@@ -244,6 +254,12 @@ async function renderHtml(snap = SNAP, plan = PLAN, opts = {}) {
   vm.runInContext(`${fs.readFileSync(path.join(__dirname, '..', 'public', 'ui.js'), 'utf8')}\n;globalThis.UI = UI;`, ctx);
   ctx.UI.setJiraBase('https://ipipelinejira.atlassian.net');
   ctx.UI.api = async () => payload;
+  /* WHAT THE DRAWER WAS HANDED. The real `UI.drawer` writes into a document
+     this harness only stubs, so a drill-in click did its whole job and left
+     nothing to assert against — a check on it would have passed no matter
+     which keys it listed, or whether it opened at all. */
+  let drawn = null;
+  ctx.UI.drawer = (h) => { drawn = h; };
 
   vm.runInContext(`${VIEW}\n;globalThis.__v = SprintView;`, ctx);
   const clicks = [];
@@ -275,7 +291,7 @@ async function renderHtml(snap = SNAP, plan = PLAN, opts = {}) {
     teams: [{ id: 'titan', name: 'Katalon Titan', jiraName: 'Katalon Auto Titan' }],
     syncedAt: '2026-09-24T09:00:00.000Z',
   }, mount);
-  return { html, payload, mount, ctx, printed, puts };
+  return { html, payload, mount, ctx, printed, puts, get drawn() { return drawn; } };
 }
 
 const CAPACITY_VIEW = fs.readFileSync(path.join(__dirname, '..', 'public', 'views', 'capacity.js'), 'utf8');
@@ -1930,9 +1946,161 @@ check('the numbers on the page are the numbers from the model', async () => {
   const body = componentSection(html);
   const nlg = payload.byComponent.rows.find(r => r.component === 'PS_iGO_NLG');
   const row = body.slice(body.indexOf('PS_iGO_NLG'));
-  const cells = [...row.matchAll(/<td class="num">([\d.]+)<\/td>/g)].map(m => Number(m[1]));
+  /* READ THROUGH WHATEVER THE CELL HOLDS. These three are drill-in buttons now,
+     and a pattern that insisted on a bare number would fail for the one reason
+     that is not a defect — while still passing if a button ever rendered the
+     WRONG number, which is the thing this check is actually for. */
+  const cells = [...row.matchAll(/<td class="num">(.*?)<\/td>/g)]
+    .map(m => Number(m[1].replace(/<[^>]*>/g, '').trim()));
   assert.deepStrictEqual(cells.slice(0, 3), [nlg.count, nlg.points, nlg.done],
     'items, committed and done, in that order');
+});
+
+check('AND EACH OF THEM OPENS THE SET BEHIND IT', async () => {
+  /* Every other number on this screen opens what it counted; these three sat
+     as dead text in the middle of a table where the component name beside them
+     was already a link out to Jira.
+
+     `src` IS THE PART THAT MATTERS. Two tables on this screen are keyed by
+     component name — this one and Test cases by component — so without it the
+     handler would resolve a component's Items against the OTHER table's key
+     lists: a real list of the wrong population, under the right heading. */
+  const { html, payload } = await renderHtml();
+  const body = componentSection(html);
+  const row = body.slice(body.indexOf('PS_iGO_NLG'), body.indexOf('</tr>', body.indexOf('PS_iGO_NLG')));
+  const nlg = payload.byComponent.rows.find(r => r.component === 'PS_iGO_NLG');
+
+  for (const col of ['items', 'committed', 'done']) {
+    const btn = row.match(new RegExp(`<button[^>]*data-col="${col}"[^>]*>`));
+    assert.ok(btn, `the ${col} number is not clickable`);
+    assert.match(btn[0], /data-act="drill"/, `${col} is a button that opens nothing`);
+    assert.match(btn[0], /data-src="progress"/,
+      `${col} does not say which table it came from, so it would open the Test cases keys`);
+    assert.ok(btn[0].includes(`data-scope="PS_iGO_NLG"`), `${col} opens a different component`);
+  }
+
+  /* AND POINTS STAY POINTS. `drillNumber` printed whole numbers until now, so
+     a half-point column would have changed value on becoming clickable — 12.5
+     rendering as 13 in a table that says 12.5 on the row below. Compared as
+     numbers against the model, which catches the rounding whatever the
+     separator formatting does. */
+  const shown = (col) => {
+    const m = row.match(new RegExp(`<button[^>]*data-col="${col}"[^>]*>([^<]*)</button>`));
+    return m ? Number(m[1].replace(/[^\d.-]/g, '')) : null;
+  };
+  assert.strictEqual(shown('items'), nlg.count, 'the items button shows a different number from the model');
+  assert.strictEqual(shown('committed'), nlg.points, 'committed was rounded on becoming clickable');
+  assert.strictEqual(shown('done'), nlg.done, 'done was rounded on becoming clickable');
+});
+
+check('AND THE DRAWER LISTS WHAT THAT NUMBER COUNTED', async () => {
+  /* The whole point of a drill-in: the list has to be the number's own set,
+     not a second count that can disagree with it. Driven through the real
+     click handler and the real model payload. */
+  const r = await renderHtml();
+  const nlg = r.payload.byComponent.rows.find(x => x.component === 'PS_iGO_NLG');
+
+  r.mount.click('drill', { src: 'progress', scope: 'PS_iGO_NLG', col: 'items' });
+  let d = r.drawn;
+  assert.ok(d, 'clicking Items opened no drawer');
+  assert.ok(d.includes('PS_iGO_NLG'), 'the drawer does not name the component');
+  for (const k of nlg.keys) assert.ok(d.includes(k), `Items does not list ${k}, which the row counted`);
+
+  /* COMMITTED IS POINTS AND ITS SET IS THE ITEMS — the same rule the sprint
+     KPI already follows, so the drawer adds the points up again from the same
+     list rather than being told a total. */
+  r.mount.click('drill', { src: 'progress', scope: 'PS_iGO_NLG', col: 'committed' });
+  d = r.drawn;
+  for (const k of nlg.keys) assert.ok(d.includes(k), `Committed does not list ${k}`);
+  assert.match(d, /not their count/, 'the drawer does not explain that the row showed points');
+
+  /* DONE IS THE FINISHED SUBSET, from the model's own `doneKeys`. */
+  r.mount.click('drill', { src: 'progress', scope: 'PS_iGO_NLG', col: 'done' });
+  d = r.drawn;
+  assert.ok(Array.isArray(nlg.doneKeys), 'the model sends no doneKeys, so Done cannot list anything');
+  assert.ok(nlg.doneKeys.length, 'fixture check: PS_iGO_NLG has finished work');
+  assert.ok(nlg.doneKeys.length < nlg.keys.length,
+    'fixture check: not everything is done, or this check cannot tell the two lists apart');
+  for (const k of nlg.doneKeys) assert.ok(d.includes(k), `Done does not list ${k}`);
+  for (const k of nlg.keys.filter(x => !nlg.doneKeys.includes(x))) {
+    assert.ok(!d.includes(k), `Done lists ${k}, which is not finished`);
+  }
+});
+
+check('AND IT DOES NOT OPEN THE OTHER TABLE\'S KEYS BY MISTAKE', async () => {
+  /* The failure `src` exists to prevent, made concrete. Both tables key their
+     numbers by component name, so a click that did not say which table it came
+     from would resolve against Test cases by component — producing a real
+     list, under the right heading, of a different population. Nothing on
+     screen would look wrong. */
+  const r = await renderHtml();
+  const nlg = r.payload.byComponent.rows.find(x => x.component === 'PS_iGO_NLG');
+  const tc = ((r.payload.testCases || {}).rows || []).find(x => x.component === 'PS_iGO_NLG');
+  assert.ok(tc && tc.keys, 'fixture check: the Test cases table also has a PS_iGO_NLG row');
+
+  r.mount.click('drill', { src: 'progress', scope: 'PS_iGO_NLG', col: 'items' });
+  const progress = r.drawn;
+  r.mount.click('drill', { scope: 'PS_iGO_NLG', col: 'automated' });
+  const testCases = r.drawn;
+  assert.notStrictEqual(progress, testCases,
+    'the two tables opened the same drawer, so the component name alone decided the set');
+  for (const k of nlg.keys) assert.ok(progress.includes(k), `the progress drawer lost ${k}`);
+});
+
+check('AND A HALF POINT IS STILL A HALF POINT ONCE IT IS CLICKABLE', async () => {
+  /* `drillNumber` printed whole numbers for every caller before this one,
+     because every caller opened a COUNT. Committed and Done are points, and a
+     cell that reads 12.5 in one column and 13 in the next — for the same work,
+     because one became a button — is a table nobody should trust.
+
+     ITS OWN FIXTURE, because the shared one estimates in whole points: a
+     rounding check over whole numbers passes against the rounding. */
+  const half = {
+    ...SNAP,
+    issues: Object.fromEntries(Object.entries(SNAP.issues).map(([k, v]) => [
+      k, k === 'A-2' ? { ...v, points: 2.5 } : v,
+    ])),
+  };
+  const r = await renderHtml(half);
+  const nlg = r.payload.byComponent.rows.find(x => x.component === 'PS_iGO_NLG');
+  assert.ok(String(nlg.points).includes('.'),
+    `fixture check: PS_iGO_NLG totals ${nlg.points} — a whole number cannot show rounding`);
+
+  const body = componentSection(r.html);
+  const row = body.slice(body.indexOf('PS_iGO_NLG'), body.indexOf('</tr>', body.indexOf('PS_iGO_NLG')));
+  const shown = row.match(/<button[^>]*data-col="committed"[^>]*>([^<]*)<\/button>/);
+  assert.ok(shown, 'the committed number is not clickable');
+  assert.strictEqual(Number(shown[1].replace(/[^\d.-]/g, '')), nlg.points,
+    `the button shows ${shown[1].trim()} where the model says ${nlg.points}`);
+});
+
+check('AND A NUMBER ONLY OFFERS TO OPEN WHAT IT CAN', async () => {
+  /* `doneKeys` is new in the model, so a browser holding this page against a
+     server that has not restarted yet gets a Done column with no set behind
+     it. A button there would open an empty drawer under a number saying 24 —
+     which reads as "nothing finished", not as "this server is behind". It
+     stays plain text until the keys are there.
+
+     Items and Committed both ride `keys`, which every version of the payload
+     sends, so they keep working across the gap. */
+  const r = await renderHtml(SNAP, PLAN, {
+    payload: (p) => ({
+      ...p,
+      byComponent: {
+        ...p.byComponent,
+        rows: p.byComponent.rows.map(({ doneKeys, ...rest }) => rest),
+      },
+    }),
+  });
+  const body = componentSection(r.html);
+  const row = body.slice(body.indexOf('PS_iGO_NLG'), body.indexOf('</tr>', body.indexOf('PS_iGO_NLG')));
+  assert.ok(!/data-col="done"/.test(row),
+    'Done is clickable against a payload that carries no keys for it, so it opens an empty drawer');
+  assert.match(row, /data-col="items"/, 'Items stopped opening, and it did not need doneKeys');
+  assert.match(row, /data-col="committed"/, 'Committed stopped opening, and it did not need doneKeys');
+  /* AND THE NUMBER IS STILL THERE. Degrading must not blank the cell. */
+  const nlg = r.payload.byComponent.rows.find(x => x.component === 'PS_iGO_NLG');
+  assert.ok(row.includes(String(nlg.done)), `the done figure vanished with its button: ${row}`);
 });
 
 check('a component behind the sprint is marked', async () => {
@@ -2309,6 +2477,58 @@ const testCaseSection = (html) => {
 
 /** A plan where two of the fixture's components carry a priority and one does not. */
 const PRIORITISED = { ...PLAN, componentPriority: { PS_iGO_NLG: 1, KAT_Common: 4 } };
+
+check('PER-COMPONENT PROGRESS IS ORDERED P1 → P4, then the unjudged', async () => {
+  /* The third table on this page to rank this way, and the reason all three
+     take it from one helper: he reads the screen top-down by his own priority,
+     and a page where one table disagrees is a page he has to re-find his place
+     in twice. */
+  const { html, payload } = await renderHtml(SNAP, PRIORITISED);
+  const body = componentSection(html);
+  const order = payload.byComponent.rows.map(r => r.component);
+  const seen = order.filter(c => body.includes(c));
+  assert.ok(seen.length >= 3, `only ${seen.length} components on the table — this proves little`);
+
+  const key = payload.byComponent.rows.map(r => priority.sortKey(r.priority));
+  assert.deepStrictEqual(key, key.slice().sort((a, b) => a - b),
+    `the rows are not in priority order: ${payload.byComponent.rows.map(r => `${r.priorityLabel || '—'} ${r.component}`).join(' → ')}`);
+
+  /* AND THE PAGE FOLLOWS THE PAYLOAD, rather than re-sorting on its own. */
+  const positions = seen.map(c => body.indexOf(c));
+  assert.deepStrictEqual(positions, positions.slice().sort((a, b) => a - b),
+    'the table drew the rows in a different order from the payload');
+});
+
+check('AND THE UNJUDGED GO LAST even when they carry the most points', async () => {
+  /* The old order was biggest-commitment-first. If the new sort were dropped,
+     the heaviest component would lead — and in this fixture that is one nobody
+     has prioritised, which is exactly the row he wants at the bottom. */
+  /* ITS OWN PLAN: the shared one prioritises the heaviest component, so the
+     old order and the new one would agree and this would prove nothing.
+     Here only the LIGHT component is judged, which puts the two orders in
+     direct conflict. */
+  const plan = { ...PLAN, componentPriority: { KAT_Common: 2 } };
+  const { payload } = await renderHtml(SNAP, plan);
+  const rows = payload.byComponent.rows;
+  const heaviest = rows.slice().sort((a, b) => b.points - a.points)[0];
+  assert.strictEqual(heaviest.priority, null,
+    `fixture check: the heaviest component (${heaviest.component}) must be unjudged or this proves nothing`);
+  assert.strictEqual(rows[rows.length - 1].priority, null,
+    `an unjudged component is not last: ${rows.map(r => r.priorityLabel || '—').join(' ')}`);
+  assert.notStrictEqual(rows[0].component, heaviest.component,
+    'the heaviest component still leads, so the priority sort is not being applied');
+});
+
+check('AND BIGGEST-COMMITMENT-FIRST SURVIVES INSIDE ONE PRIORITY', async () => {
+  /* The sort is on the level alone and is stable, so the model's own order is
+     the tie-break. Both components here are P1 and the heavier one must lead. */
+  const plan = { ...PLAN, componentPriority: { PS_iGO_NLG: 1, KAT_Common: 1 } };
+  const { payload } = await renderHtml(SNAP, plan);
+  const p1 = payload.byComponent.rows.filter(r => r.priority === 1);
+  assert.ok(p1.length >= 2, `only ${p1.length} P1 rows — no tie to break`);
+  assert.ok(p1[0].points >= p1[1].points,
+    `two P1 components lost the biggest-first tie-break: ${p1.map(r => `${r.component} ${r.points}`).join(', ')}`);
+});
 
 check('THE TEST-CASE TABLE SHOWS EACH COMPONENT\'S PRIORITY', async () => {
   const { html, payload } = await renderHtml(SNAP, PRIORITISED);

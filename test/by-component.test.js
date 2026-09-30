@@ -1056,6 +1056,46 @@ check('THE KEYS TRAVEL WITH THE MARKER — the count IS the list', () => {
   }
 });
 
+check('THE DRAWER CARRIES WHY EACH ONE IS BLOCKED', () => {
+  /* The Blocked column opens a panel, and "which ones" is only half of what
+     the reader came for — the other half is what to go and chase. The panel
+     can only show a reason the route hands it, so the guarantee lives in two
+     files: this one pins the payload, links.test.js pins that the panel draws
+     it.
+
+     TWO FACTS, DELIBERATELY BOTH. The column comes from the Automation Status
+     FIELD; `blockedBy` is Jira's own link, which somebody had to record. An
+     epic with the field and no link is blocked with nothing to chase — a
+     different and useful answer rather than a missing one. */
+  const snap = withSprints({}), plan = PLAN();
+  /* REPLACED, NOT MUTATED. `withSprints` maps the shared BASE objects in by
+     reference, so setting a field on one would follow every other check in
+     this file home. */
+  snap.issues['A-4'] = {
+    ...snap.issues['A-4'],
+    blockedBy: [{ key: 'CLICMNTIGO-11567', summary: 'UWRE Bootstrap passes BirthState as an abbreviation' }],
+  };
+
+  const d = pz.sprintComponentCell(snap, plan, {
+    team: RUBY, sprint: sprintOf(plan, 's40'),
+    component: 'PS_iGO_NLG', tool: 'kse', cell: 'blocked',
+  });
+  assert.ok(d.ok, 'the blocked cell would not open');
+  const linked = d.epics.find(e => e.key === 'A-4');
+  assert.ok(linked, `fixture check: A-4 is in the blocked bucket — got ${d.epics.map(e => e.key).join(', ')}`);
+  assert.deepStrictEqual(linked.blockedBy.map(b => b.key), ['CLICMNTIGO-11567'],
+    'the drawer is not told what is blocking it, so it cannot say');
+  assert.match(linked.blockedBy[0].summary, /UWRE Bootstrap/,
+    'the blocker arrives as a bare key — the summary is what says whether to chase it');
+
+  /* AND THE FIELD, for the ones with no link at all. Without it the panel
+     cannot tell "blocked, nothing recorded" from "not blocked". */
+  for (const e of d.epics) {
+    assert.match(String(e.automationStatus), /blocked/i,
+      `${e.key} sits in the Blocked bucket with automationStatus ${JSON.stringify(e.automationStatus)}`);
+  }
+});
+
 check('THE DRAWER LISTS ITEMS, NOT THE EPICS THE COLUMN COUNTS', () => {
   /* The column counts suites; the marker counts the sprint's own Stories. A
      drawer that listed the epics would be answering a question nobody asked,

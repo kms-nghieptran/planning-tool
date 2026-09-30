@@ -170,6 +170,8 @@ const SprintView = (() => {
 
       ${testCaseSection(d, state)}
 
+      ${testCaseByToolSection(d)}
+
       ${/* POINTS ARE EDITABLE HERE TOO, and an edit goes to real Jira. This
            is where you sit during standup with the estimates in front of you,
            which is exactly when a wrong one gets spotted — the same argument
@@ -252,7 +254,7 @@ const SprintView = (() => {
       }
 
       const n = e.target.closest('[data-act="drill"]');
-      if (n) { e.preventDefault(); openDrill(d, state, n.dataset.scope, n.dataset.col); }
+      if (n) { e.preventDefault(); openDrill(d, state, n.dataset.scope, n.dataset.col, n.dataset.src, n.dataset.tool); }
     });
   }
 
@@ -268,19 +270,51 @@ const SprintView = (() => {
    * sprint's items, so its set is the item list, and the drawer adds the points
    * up again from the same items. One source, two readings of it.
    */
-  function openDrill(d, state, scope, col) {
+  /* `src` NAMES THE TABLE, and it has to: two tables here are keyed by
+     component name, so the name alone stopped being enough the moment the
+     second one had drillable numbers. Without it a component's "Items" would
+     resolve against the Test cases table's key lists — a real list, under the
+     right heading, of the wrong population. */
+  function openDrill(d, state, scope, col, src, tool) {
     const t = d.testCases || {};
-    const source = scope === '__sprint'
-      ? { items: (d.items || []).map(i => i.key) }
-      : scope === '__total'
-        ? ((t.totals || {}).keys || {})
-        : (((t.rows || []).find(r => r.component === scope) || {}).keys || {});
+    const progressRow = () => ((d.byComponent || {}).rows || []).find(r => r.component === scope) || {};
+    /* THE BY-TOOL GRID'S OWN KEY LISTS. Same rows, same columns, one tool's
+       share of each — read off the payload rather than filtered here, so the
+       number in the cell and the list it opens come from one place. */
+    const toolKeys = () => {
+      const r = scope === '__total'
+        ? (t.totals || {})
+        : ((t.rows || []).find(x => x.component === scope) || {});
+      return (((r.byTool || {})[tool] || {}).keys) || {};
+    };
+    const source = src === 'bytool'
+      ? toolKeys()
+      : src === 'progress'
+      /* STRAIGHT OFF THE ROW THE NUMBER WAS RENDERED FROM. `done` is a points
+         figure and its set is the finished subset, which the model sends as
+         `doneKeys` rather than leaving this to filter `keys` and become a
+         second count. */
+      ? { items: progressRow().keys || [], done: progressRow().doneKeys || [] }
+      : scope === '__sprint'
+        ? { items: (d.items || []).map(i => i.key) }
+        : scope === '__total'
+          ? ((t.totals || {}).keys || {})
+          : (((t.rows || []).find(r => r.component === scope) || {}).keys || {});
     const keys = col === 'committed' ? (source.items || []) : (source[col] || []);
     const where = scope === '__sprint' || scope === '__total' ? 'this sprint' : scope;
+    /* THE TOOL IS IN THE HEADING, or two drawers opened from one row carry the
+       same title over different lists. */
+    const label = TOOL_LABEL[tool] || tool;
+    const heading = src === 'bytool' ? `${label} · ${TITLE[col] || col} — ${where}` : `${TITLE[col] || col} — ${where}`;
 
     UI.drawer(UI.drillDrawer({
-      title: `${TITLE[col] || col} — ${where}`,
-      meaning: MEANING[col] || '',
+      title: heading,
+      /* The same three column names mean something narrower on the progress
+         table than on the sprint KPI strip, and a drawer that explained a
+         component's committed points as the whole sprint's would be wrong in
+         the one place somebody opens to check. */
+      meaning: ((src === 'progress' ? PROGRESS_MEANING[col] : MEANING[col]) || MEANING[col] || '')
+        + (src === 'bytool' ? ` Only the suites that run on ${label}.` : ''),
       keys,
       items: d.items || [],
       catalogue: t.catalogue || {},
@@ -637,6 +671,37 @@ const SprintView = (() => {
     return `<span class="tag prio-tag prio-${UI.esc(l.key || `p${r.priority}`)}" title="${UI.esc(l.name)}">${UI.esc(l.label)}</span>`;
   }
 
+  /**
+   * ONE NUMBER ON THE PROGRESS TABLE, OPENED.
+   *
+   * `src: 'progress'` is not decoration. TWO tables on this screen are keyed
+   * by component name — this one and Test cases by component — so the name
+   * alone no longer says which set to open, and without it "Items" on a
+   * component would quietly resolve against the other table's key lists and
+   * list a different population under the same heading. The attribute names
+   * the table.
+   *
+   * ITEMS IS A COUNT; COMMITTED AND DONE ARE POINTS. They read through `UI.num`
+   * so becoming clickable does not round 12.5 to 13 in a column that says 12.5
+   * on the row beneath.
+   */
+  function progressDrill(r, col) {
+    const value = col === 'items' ? r.count : col === 'committed' ? r.points : r.done;
+    /* A NUMBER ONLY OFFERS TO OPEN WHAT IT CAN. `done` needs the model's
+       `doneKeys`, which an older server does not send — and a button that
+       opens an empty drawer under a number saying 24 is worse than plain
+       text, because it reads as "nothing here" rather than "this server is
+       behind". Items and Committed both ride `keys`, which every version
+       sends. */
+    const openable = col !== 'done' || Array.isArray(r.doneKeys);
+    if (!openable) return col === 'items' ? String(value) : UI.num(value);
+    return UI.drillNumber(
+      value,
+      { act: 'drill', src: 'progress', scope: r.component, col },
+      col === 'items' ? { zero: '0' } : { zero: '0', fmt: UI.num },
+    );
+  }
+
   function componentProgress(d, w) {
     const c = d.byComponent || { rows: [], shared: 0 };
     if (!c.rows.length) return '';
@@ -663,9 +728,9 @@ const SprintView = (() => {
               <tr>
                 <td>${UI.componentLink(r.component, r.keys, { what: 'sprint items' })}</td>
                 <td data-sort-value="${r.priority == null ? UNSET_SORT : r.priority}">${prio(d, r)}</td>
-                <td class="num">${r.count}</td>
-                <td class="num">${UI.num(r.points)}</td>
-                <td class="num">${UI.num(r.done)}</td>
+                <td class="num">${progressDrill(r, 'items')}</td>
+                <td class="num">${progressDrill(r, 'committed')}</td>
+                <td class="num">${progressDrill(r, 'done')}</td>
                 <td>${UI.bar(r.done, r.points || 1, behind(r) ? 'under' : '')}</td>
                 <td class="num">${UI.num(r.remaining)}</td>
                 <td>
@@ -705,11 +770,46 @@ const SprintView = (() => {
     return UI.drillNumber(r[col], { act: 'drill', scope: r.component == null ? '__total' : r.component, col });
   }
 
+  /**
+   * IN FLIGHT, BUT NOT GOING ANYWHERE.
+   *
+   * "In flight" only means "not Automated yet", which puts three different
+   * situations in one number: work genuinely in progress, work whose Automation
+   * Status reads Blocked, and suites somebody retired with an `obsolete` label.
+   * The last two are not in flight in any useful sense, and reading the column
+   * as progress overstates what the sprint is moving — on his board four of
+   * one component's in-flight epics include two that are both Blocked AND
+   * obsolete.
+   *
+   * A MARKER, NOT A COLUMN. It qualifies the number beside it — "4 in flight,
+   * 2 of them going nowhere" — and an eighth column would read as more work
+   * rather than less. Same shape as the Capacity sheet's stuck marker, down to
+   * the class, so the two screens do not invent separate vocabularies for
+   * "this number needs a second look".
+   *
+   * NOTHING FLAGGED, NOTHING DRAWN. A marker that is always there is one
+   * nobody reads.
+   */
+  /* `extra` carries whatever tells the handler WHICH set to open — the by-tool
+     grid passes its source and tool. One marker, two tables: a second copy of
+     this would be a second tooltip to keep in step with the rule. */
+  function attentionMark(r, extra = {}) {
+    const n = r.attention || 0;
+    if (!n) return '';
+    const scope = r.component == null ? '__total' : r.component;
+    const where = r.component == null ? 'this sprint' : r.component;
+    const attrs = Object.entries(extra).map(([k, v]) => ` data-${k}="${UI.esc(v)}"`).join('');
+    return ` <button type="button" class="stuck-mark" data-act="drill" data-col="attention" data-scope="${UI.esc(scope)}"${attrs}
+      title="${UI.esc(`${n} of the in-flight ${n === 1 ? 'suite is' : 'suites are'} Blocked for automation or labelled obsolete — not work in progress`)}"
+      aria-label="${UI.esc(`Show the ${n} in-flight ${n === 1 ? 'suite' : 'suites'} needing attention in ${where}`)}">!</button>`;
+  }
+
   /* What each column counts, in one place — the drawer repeats the sentence it
      was opened by, because a list of eleven epic keys means nothing without it. */
   const MEANING = {
     automated: 'Distinct parent epics of this component’s Stories whose Automation Status reads Automated.',
     inFlight: 'Parent epics of this component’s Stories that are not Automated yet.',
+    attention: 'In-flight suites that are not actually moving: the epic’s Automation Status reads Blocked, or it carries an obsolete label, or both. They are counted in the In flight number beside this marker.',
     maintained: 'Test cases linked from this component’s Bucket Stories whose own Automation Status reads Automated — the suite is working again.',
     maintaining: 'Test cases linked from this component’s Bucket Stories whose own Automation Status reads Maintenance — still being fixed.',
     unclassified: 'Test cases linked from this component’s Bucket Stories whose Automation Status is neither Automated nor Maintenance — Ready for Automation, Blocked, N/A, or not set at all.',
@@ -720,10 +820,20 @@ const SprintView = (() => {
     done: 'Sprint items here that are finished.',
     committed: 'Every item committed to this sprint. The number above is their points.',
   };
+  /* THE SAME THREE WORDS, SCOPED TO ONE COMPONENT. Committed and Done are
+     POINTS on that table and the drawer lists ITEMS, so each says so — a
+     column reading 12.5 over a drawer headed "4 items" looks wrong until the
+     sentence explains that the four items carry 12.5 points between them. */
+  const PROGRESS_MEANING = {
+    items: 'Every sprint item carrying this component. An item in two components is counted in both rows.',
+    committed: 'The items this component committed to the sprint. The number on the row is their points, not their count.',
+    done: 'The items here that are finished. The number on the row is their points, not their count.',
+  };
   const TITLE = {
     automated: 'Automated', inFlight: 'In flight',
     maintained: 'Maintained', maintaining: 'Maintaining', unclassified: 'No automation status',
     blocked: 'Blocked — waiting on Refinement',
+    attention: 'In flight — needs attention',
     stories: 'Stories', buckets: 'Bucket stories', items: 'Items', done: 'Done',
     committed: 'Committed',
   };
@@ -782,7 +892,7 @@ const SprintView = (() => {
                 <td>${UI.componentLink(r.component, (r.keys || {}).items, { what: 'sprint items' })}</td>
                 <td data-sort-value="${UI.prioritySort(r.priority)}">${UI.priorityTag(r.priority, d.priorityLevels)}</td>
                 <td class="num ${r.automated ? 'pct good' : ''}">${drill(r, 'automated')}</td>
-                <td class="num">${drill(r, 'inFlight')}</td>
+                <td class="num">${drill(r, 'inFlight')}${attentionMark(r)}</td>
                 <td class="num ${r.maintained ? 'pct good' : ''}">${drill(r, 'maintained')}</td>
                 <td class="num">${drill(r, 'maintaining')}</td>
                 <td class="num ${r.blocked ? 'pct over' : ''}">${drill(r, 'blocked')}</td>
@@ -792,7 +902,7 @@ const SprintView = (() => {
               <td><strong>Sprint total</strong> <span class="muted" style="font-weight:400">distinct</span></td>
               <td></td>
               <td class="num"><strong>${drill(T, 'automated')}</strong></td>
-              <td class="num"><strong>${drill(T, 'inFlight')}</strong></td>
+              <td class="num"><strong>${drill(T, 'inFlight')}</strong>${attentionMark(T)}</td>
               <td class="num"><strong>${drill(T, 'maintained')}</strong></td>
               <td class="num"><strong>${drill(T, 'maintaining')}</strong></td>
               <td class="num"><strong>${drill(T, 'blocked')}</strong></td>
@@ -828,6 +938,142 @@ const SprintView = (() => {
             <strong>full sync</strong> — an incremental one does not backfill them.</li>` : ''}
         </ul>
       </section>`;
+  }
+
+  /* ── TEST CASES BY COMPONENT — BY TOOL ────────────────────────────────
+     THE SAME FIVE MEASURES AS THE TABLE ABOVE, split into the tool each suite
+     runs on. It answers a question the combined table cannot: "we automated 95
+     suites" is one fact, and "all 95 were TrueTest and KSE did nothing this
+     fortnight" is a different one.
+
+     THE COUNTS ARE THE SAME COUNTS. The model derives each tool's set from the
+     very set the combined column counted, so the two tables cannot disagree —
+     which matters more here than usual, because a reader who spots a mismatch
+     between two tables on one screen stops trusting both.
+
+     BOTH TOOLS ARE ALWAYS DRAWN, even when one is empty end to end. On his
+     board today every sprint is one-sided — Titan is 143 TrueTest and no KSE,
+     Ruby the reverse — and a group that vanished when it hit zero would make
+     "KSE did nothing this sprint" look like a missing column rather than the
+     finding it is. It also keeps two sprints comparable side by side.
+
+     THE HEADER BANDS AND CHIPS ARE THE CAPACITY SHEET'S, class for class. Two
+     screens showing tool-split columns should not invent two visual languages
+     for it. */
+  const TOOL_COLS = [
+    { key: 'automated', label: 'Automated', good: true },
+    { key: 'inFlight', label: 'In Flight' },
+    { key: 'maintained', label: 'Maintained', good: true },
+    { key: 'maintaining', label: 'Maintaining' },
+    { key: 'blocked', label: 'Blocked', bad: true },
+  ];
+
+  /** One number in the by-tool grid, opening its own set. */
+  function toolDrill(r, tool, col) {
+    const cell = (r.byTool || {})[tool] || {};
+    return UI.drillNumber(cell[col], {
+      act: 'drill', src: 'bytool', tool, col,
+      scope: r.component == null ? '__total' : r.component,
+    });
+  }
+
+  function testCaseByToolSection(d) {
+    const t = d.testCases;
+    if (!t || !t.rows || !t.rows.length) return '';
+    /* THE SPLIT IS NEW IN THE MODEL, and a browser holding this page against a
+       server that has not restarted yet gets none of it. Rendering anyway
+       would put a ten-column grid of dashes under the real table and read as
+       "no test cases run on either tool" — which is a statement, and a false
+       one. The section simply is not there until the payload can back it. */
+    if (!(t.totals || {}).byTool) return '';
+    const tools = (d.tools && d.tools.length ? d.tools : TOOLS_FALLBACK);
+    const T = { ...t.totals, component: null };
+    const untagged = ((t.totals || {}).byTool || {}).untagged || 0;
+
+    const row = (r, strong) => `
+      <tr>
+        <td>${strong
+    ? '<strong>Sprint total</strong> <span class="muted" style="font-weight:400">distinct</span>'
+    : UI.componentLink(r.component, (r.keys || {}).items, { what: 'sprint items' })}</td>
+        <td${strong ? '' : ` data-sort-value="${UI.prioritySort(r.priority)}"`}>${strong ? '' : UI.priorityTag(r.priority, d.priorityLevels)}</td>
+        ${tools.map((tool, ti) => TOOL_COLS.map((c, i) => `
+          <td class="num${i === 0 ? ' tool-start' : ''}${cellTone(r, tool.key, c)}">${strong
+    ? `<strong>${toolDrill(r, tool.key, c.key)}</strong>`
+    : toolDrill(r, tool.key, c.key)}${c.key === 'inFlight' ? toolAttentionMark(r, tool.key) : ''}</td>`).join('')).join('')}
+      </tr>`;
+
+    return `
+      <section class="section">
+        <div class="section-head">
+          <h2>Test cases by component — by tool</h2>
+          <span class="muted">
+            The same counts as the table above, split by the tool each suite runs on
+            ${untagged ? ` · <span class="warn">${UI.int(untagged)} carry no tool component and are counted under ${UI.esc(tools[tools.length - 1].label)}</span>` : ''}
+          </span>
+        </div>
+        <div class="table-wrap">
+          ${/* SORTABLE BY COMPONENT AND PRIORITY, and by nothing else — which is
+                why the opt-out moved from the table to the two band headings
+                rather than being deleted.
+
+                `UI.sortable` maps a heading to a body column BY INDEX, reading
+                the first header row only. Component and Priority are cells 0
+                and 1 in that row and cells 0 and 1 in every body row, so they
+                line up exactly. The TrueTest and KSE bands are cells 2 and 3
+                of the header and would sort by body cells 2 and 3 — TrueTest's
+                Automated and In Flight — a heading that silently orders the
+                table by a column it does not name. They opt out.
+
+                The five columns under each band are in the SECOND header row,
+                which `sortable` never wires and `sortTable` never puts an
+                arrow on, so they stay unsorted rather than becoming controls
+                that give no sign of what they did. */''}
+          <table class="pz">
+            <thead>
+              <tr>
+                <th rowspan="2">Component</th>
+                <th rowspan="2" title="Set on the Coverage screen's component grid — this column shows it, it does not own it">Priority</th>
+                ${tools.map((tool, ti) => `
+                  <th class="num tool-start tool-head band-${ti % 2 ? 'b' : 'a'}" colspan="${TOOL_COLS.length}" data-nosort
+                    ><i class="pz-chip" style="background:${tool.color}"></i>${UI.esc(tool.label)}</th>`).join('')}
+              </tr>
+              <tr>
+                ${tools.map((tool, ti) => TOOL_COLS.map((c, i) => `
+                  <th class="num sub${i === 0 ? ' tool-start' : ''} band-${ti % 2 ? 'b' : 'a'}"
+                    title="${UI.esc(`${c.label} — ${tool.label}`)}">${UI.esc(c.label)}</th>`).join('')).join('')}
+              </tr>
+            </thead>
+            <tbody>${t.rows.map(r => row(r, false)).join('')}</tbody>
+            <tfoot>${row(T, true)}</tfoot>
+          </table>
+        </div>
+      </section>`;
+  }
+
+  /* The tools the payload names, or the two this tool has always had. The
+     server sends `tools` on the capacity payload but not on this one, and a
+     hardcoded pair here would silently ignore a third tool the day one is
+     added — so it prefers the payload and says what it fell back to. */
+  const TOOL_LABEL = { truetest: 'TrueTest', kse: 'KSE' };
+  const TOOLS_FALLBACK = [
+    { key: 'truetest', label: 'TrueTest', color: 'var(--tool-truetest)' },
+    { key: 'kse', label: 'KSE', color: 'var(--tool-kse)' },
+  ];
+
+  /* The same greens and reds the combined table uses, so a column does not
+     change meaning when it moves. */
+  const cellTone = (r, tool, c) => {
+    const n = (((r.byTool || {})[tool]) || {})[c.key];
+    if (!n) return '';
+    if (c.good) return ' pct good';
+    if (c.bad) return ' pct over';
+    return '';
+  };
+
+  /** The in-flight attention marker, per tool. */
+  function toolAttentionMark(r, tool) {
+    const cell = (r.byTool || {})[tool] || {};
+    return attentionMark({ component: r.component, attention: cell.attention }, { src: 'bytool', tool });
   }
 
   function groupBy(items, fn) {

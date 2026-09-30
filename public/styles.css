@@ -502,6 +502,44 @@ tr.exempt .name-cell { font-style: italic; }
   background: var(--app-subtle); border-left: 3px solid var(--risk);
   font-size: 13px; line-height: 1.5;
 }
+/* WHY A ROW IN A DRILL PANEL IS HELD UP.
+   The same shape as the banner above — tinted block, risk bar down the left —
+   because it is the same kind of statement: the one line on the row that
+   changes what you do next. It began as plain grey text under the component
+   list and disappeared into the metadata on a panel opened to read exactly
+   this. Tinted with `color-mix` against the theme's own tokens so it reads in
+   both light and dark rather than being a pale pink that vanishes on one. */
+.drill-blocked {
+  margin-top: 6px; padding: 6px 9px; border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--risk) 5%, var(--app-subtle));
+  border-left: 3px solid var(--risk);
+  font-size: 11.5px; line-height: 1.5;
+  /* TEXT ON THE TINT, NOT ON THE CARD — measured, not guessed. This app's
+     muted grey falls to 2.1:1 against the tint in light mode, so marking the
+     line made the words IN it harder to read than the plain grey it replaced,
+     which is the opposite of the point. */
+  color: var(--app-fg-2);
+}
+/* Anything muted inside the mark takes the block's colour instead: `.muted`
+   is right everywhere else in this app and wrong on this ground. */
+.drill-blocked .muted { color: inherit; }
+.drill-blocked .lbl {
+  /* The risk hue pulled toward the foreground. Raw `--risk` measures 3.1:1
+     here in light mode, and this is 11.5px bold — not large text, so it owes
+     the full 4.5:1. The mix keeps the colour and clears the bar in both
+     themes; the 3px rule beside it stays full `--risk`, where 3:1 is the bar
+     a graphical element has to clear and it does. */
+  color: color-mix(in srgb, var(--risk) 72%, var(--app-fg));
+  font-weight: var(--font-weight-semibold, 600); margin-right: 2px;
+}
+/* The blocker's key stays a key — the tinted ground must not swallow the one
+   thing on this line you are meant to click. `a.issue-key` inherits its colour
+   by design across this app, which inside the mark would leave the actionable
+   key the same weight as the muted summary beside it; the full foreground puts
+   it back on top. Lower specificity than `a.issue-key:hover`, so the hover and
+   focus colours still win. */
+.drill-blocked .issue-key { color: var(--app-fg); font-weight: var(--font-weight-medium, 500); }
+
 .stale-banner code {
   background: var(--app-surface); padding: 1px 6px; border-radius: 4px;
   font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px;

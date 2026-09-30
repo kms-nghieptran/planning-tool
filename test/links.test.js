@@ -814,6 +814,234 @@ check('and a key with no local copy is still in the link — it is the one worth
   assert.deepStrictEqual(keysOf(href).sort(), ['AUTOKAT-1', 'GHOST-1']);
 });
 
+check('A BLOCKED ROW SAYS WHAT IS BLOCKING IT, and the blocker is a link', () => {
+  /* WHAT HE REPORTED: the Blocked column on the Capacity sheet opened a panel
+     listing twenty epics with nothing anywhere saying why any of them was
+     blocked — the only question that panel is opened to answer.
+
+     THE ANSWER WAS ALREADY IN THE PAYLOAD. `sprintComponentCell` sends Jira's
+     own "is blocked by" links and the Automation Status for every row, and
+     the drawer drew a key, a status and a summary and dropped the rest. On
+     his board eighteen of those twenty name the same defect — one ticket
+     worth chasing, invisible.
+
+     AND IT HAS TO BE A LINK, which is this file's whole subject: a blocker
+     you retype into Jira's search box is barely better than an unnamed one. */
+  const UI = loadUI();
+  UI.setJiraBase(BASE);
+  const html = UI.drillDrawer({
+    title: 'TrueTest · Blocked',
+    keys: ['AUTOKAT-9742'],
+    items: [{
+      key: 'AUTOKAT-9742', summary: '[TRUETEST] - CLICMNTIGO-11398', status: 'Refinement',
+      automationStatus: 'Blocked',
+      blockedBy: [{ key: 'CLICMNTIGO-11567', summary: 'UWRE Bootstrap passes BirthState as an abbreviation' }],
+    }],
+  });
+  assert.match(html, /Blocked by/, 'the row does not say it is blocked by anything');
+  assert.match(html, /CLICMNTIGO-11567/, 'the blocker is not named');
+  assert.match(html, /UWRE Bootstrap passes BirthState/,
+    'the blocker is a bare key — the summary is what tells him whether to chase it');
+
+  /* THE BLOCKER'S KEY GOES TO JIRA. Read off the anchor that surrounds it
+     rather than by asserting a URL shape, so this passes for the same reason
+     a reader clicking it succeeds. */
+  const anchors = [...html.matchAll(/<a[^>]*href="([^"]+)"[^>]*>([^<]*)<\/a>/g)]
+    .map(m => ({ href: m[1], text: m[2] }));
+  const blocker = anchors.find(a => a.text.includes('CLICMNTIGO-11567'));
+  assert.ok(blocker, 'the blocker is printed as dead text rather than a link');
+  assert.ok(blocker.href.includes('CLICMNTIGO-11567'), `the blocker links to ${blocker.href}`);
+
+  /* AND IT IS MARKED. As plain grey text it sat under the component list and
+     read as one more piece of metadata, on a panel opened to read exactly
+     this. The class is what carries the accent, so a note that lost it would
+     still say the right words and still be missed. */
+  assert.match(html, /class="drill-blocked"/,
+    'the blocked line is unmarked — it reads as metadata on twenty near-identical rows');
+  assert.match(html, /class="lbl">Blocked by</,
+    'the label is not marked, so nothing catches the eye while scanning');
+});
+
+check('and one blocked with NOTHING linked says so, rather than nothing', () => {
+  /* The gap between the two facts is the useful part. The column comes from
+     the Automation Status FIELD; the link is somebody recording what it is
+     waiting on. Two of his twenty have the field and no link — blocked with
+     no ticket to chase. A row rendering nothing for those reads exactly like
+     a row that is not blocked at all, on a panel titled Blocked. */
+  const UI = loadUI();
+  UI.setJiraBase(BASE);
+  const html = UI.drillDrawer({
+    title: 'TrueTest · Blocked',
+    keys: ['AUTOKAT-1'],
+    items: [{ key: 'AUTOKAT-1', summary: 'no link', status: 'Refinement', automationStatus: 'Blocked', blockedBy: [] }],
+  });
+  assert.match(html, /nothing is linked in Jira/i,
+    'a blocked row with no blocker explains itself no differently from an unblocked one');
+  assert.ok(!/Blocked by/.test(html), 'it claims a blocker it does not have');
+  /* THE SAME MARK. Scanning a panel for the accent, an unmarked row reads as
+     "not blocked" — which is the opposite of what this one is. */
+  assert.match(html, /class="drill-blocked"/,
+    'blocked-with-nothing-recorded is drawn unmarked, so it reads as not blocked');
+});
+
+check('and an ordinary row gains no blocked line at all', () => {
+  /* This renders on every drawer in the tool, so it has to be silent wherever
+     the fact is absent — a "not blocked" note on each of 400 automated epics
+     is how a panel becomes unreadable. */
+  const UI = loadUI();
+  UI.setJiraBase(BASE);
+  const html = UI.drillDrawer({
+    title: 'Automated',
+    keys: ['AUTOKAT-2'],
+    items: [{ key: 'AUTOKAT-2', summary: 'fine', status: 'Done', automationStatus: 'Automated', blockedBy: [] }],
+  });
+  assert.ok(!/Blocked by/.test(html), 'an automated epic was described as blocked by something');
+  assert.ok(!/nothing is linked/i.test(html), 'an unblocked row carries a blocked note');
+});
+
+check('and the mark is a real accent in both themes', () => {
+  /* A class nothing styles is a class. Checked in the stylesheet because that
+     is the only place this fact exists, and pinned as `color-mix` against the
+     theme's own tokens — a fixed pink is how a mark ends up invisible on one
+     of the two themes. */
+  const css = read(PUBLIC, 'styles.css');
+  const block = css.slice(css.indexOf('.drill-blocked {'), css.indexOf('.stale-banner code'));
+  assert.ok(block.includes('.drill-blocked {'), 'the blocked mark has no styling at all');
+  assert.match(block, /border-left:\s*3px solid var\(--risk\)/,
+    'the blocked line has no risk accent, so it does not stand out');
+  assert.match(block, /background:\s*color-mix\([^;]*var\(--risk\)[^;]*var\(--app-/,
+    'the mark is untinted, or tinted with a fixed colour that will not follow the theme');
+  assert.match(block, /\.drill-blocked \.lbl \{[^}]*var\(--risk\)/,
+    'the label does not carry the risk colour');
+});
+
+check('AND MARKING IT DID NOT MAKE IT HARDER TO READ', () => {
+  /* THE REGRESSION THIS CAUGHT, in the first cut of the highlight. Tinting
+     the block moved every word in it onto a new background, and this app's
+     muted grey measures 2.1:1 there in light mode — so the line that was
+     marked to be noticed became the least readable thing on the row. A
+     highlight that costs legibility is a net loss.
+
+     MEASURED, NOT EYEBALLED: the ratios are computed here from the same
+     tokens the stylesheet resolves, in both themes, because "looks fine to
+     me" is exactly the judgement that shipped the 2.1. */
+  const css = read(PUBLIC, 'styles.css');
+
+  /* THE TOKENS, READ FROM THE TWO THEME BLOCKS THEMSELVES — so this follows a
+     change of palette rather than pinning today's hexes. Taken by matching
+     braces from each selector, not by slicing around a landmark declaration:
+     the first cut of this check sliced, picked up the light foreground while
+     claiming to measure dark, and reported 1.65:1 for a label the browser
+     measures at 6.05. A check that mis-measures is worse than no check.
+     Dark declares only what it overrides, so it is light merged with those. */
+  const blockAt = (sel, from = css) => {
+    const at = from.indexOf(sel);
+    assert.ok(at >= 0, `${sel} is not in the stylesheet — this check has gone stale`);
+    const open = from.indexOf('{', at);
+    let depth = 0;
+    for (let i = open; i < from.length; i++) {
+      if (from[i] === '{') depth++;
+      else if (from[i] === '}' && --depth === 0) return from.slice(open + 1, i);
+    }
+    throw new Error(`${sel} is never closed`);
+  };
+  const tokens = (from) => {
+    const out = {};
+    for (const m of from.matchAll(/(--[a-z0-9-]+):\s*([^;]+);/g)) out[m[1]] = m[2].trim();
+    return out;
+  };
+  /* THE BRAND SHEET COUNTS, AND IT LOADS FIRST. `index.html` pulls
+     `kms/tokens.css` before `styles.css`, and styles.css's own values are
+     written as `var(--color-fg-secondary, #4B5565)` — a FALLBACK that the
+     brand sheet overrides in the browser. Resolving only styles.css measured
+     the fallback and reported 6.52:1 for a summary the browser puts at
+     4.85:1: comfortably passing a check on colours nobody ever sees. */
+  const brand = read(path.join(PUBLIC, 'kms'), 'tokens.css');
+  const brandTokens = tokens(blockAt(':root {', brand));
+  /* AND IT HAS TO HAVE BEEN READ. Without this, a brand sheet that moved or
+     was renamed leaves the check quietly measuring styles.css's fallbacks
+     again — passing, on colours nobody sees. That is the failure this whole
+     check exists to avoid, one level up. */
+  assert.ok(brandTokens['--color-fg-secondary'],
+    'the brand tokens were not read, so these ratios are the fallbacks rather than what ships');
+  const LIGHT = { ...brandTokens, ...tokens(blockAt(':root {')) };
+  const DARK = { ...LIGHT, ...tokens(blockAt('[data-theme="dark"] {')) };
+
+  /* NO SILENT FALLBACK. Returning black for a token it could not resolve is
+     how the broken first cut produced a plausible wrong number instead of an
+     error — so an unresolvable token fails here, loudly. */
+  const hex = (v, all, seen = 0) => {
+    const raw = String(v).trim();
+    if (/^#[0-9a-f]{3,8}$/i.test(raw)) return raw;
+    const m = raw.match(/var\((--[a-z0-9-]+)(?:,\s*([^)]+))?\)/);
+    assert.ok(m && seen < 8, `cannot resolve ${v} to a colour — this check would be measuring nothing`);
+    return hex(all[m[1]] !== undefined ? all[m[1]] : m[2], all, seen + 1);
+  };
+  const rgb = (h) => {
+    let t = h.replace('#', '');
+    if (t.length === 3) t = t.split('').map(c => c + c).join('');
+    return [0, 2, 4].map(i => parseInt(t.slice(i, i + 2), 16));
+  };
+  // `color-mix(in srgb, A p%, B)` — sRGB, which is what the stylesheet asks for.
+  const mix = (a, b, pct) => rgb(a).map((v, i) => (v * pct + rgb(b)[i] * (100 - pct)) / 100);
+  const lum = (c) => {
+    const a = c.map((v) => { const x = v / 255; return x <= 0.03928 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4; });
+    return 0.2126 * a[0] + 0.7152 * a[1] + 0.0722 * a[2];
+  };
+  const ratio = (f, b) => {
+    const [hi, lo] = lum(f) > lum(b) ? [lum(f), lum(b)] : [lum(b), lum(f)];
+    return (hi + 0.05) / (lo + 0.05);
+  };
+
+  for (const [name, T] of [['light', LIGHT], ['dark', DARK]]) {
+    const risk = hex('var(--risk)', T);
+    const subtle = hex('var(--app-subtle)', T);
+    const fg = hex('var(--app-fg)', T);
+    const fg2 = hex('var(--app-fg-2)', T);
+    const tint = mix(risk, subtle, 5);          // the mark's background
+    const label = mix(risk, fg, 72);            // the "Blocked by" label
+
+    assert.ok(ratio(rgb(fg2), tint) >= 4.5,
+      `${name}: the summary on the mark reads ${ratio(rgb(fg2), tint).toFixed(2)}:1 — below 4.5`);
+    assert.ok(ratio(label, tint) >= 4.5,
+      `${name}: the "Blocked by" label reads ${ratio(label, tint).toFixed(2)}:1 — below 4.5`);
+    /* The 3px rule is a graphical element, so 3:1 is its bar. */
+    assert.ok(ratio(rgb(risk), tint) >= 3,
+      `${name}: the accent bar reads ${ratio(rgb(risk), tint).toFixed(2)}:1 against its own tint`);
+    /* AND THE KEY IS THE STRONGEST THING ON THE LINE. It is the one part you
+       click, and `a.issue-key` inherits its colour across this app — so
+       inside the mark it would otherwise sit at exactly the weight of the
+       muted summary next to it. */
+    assert.ok(ratio(rgb(fg), tint) > ratio(rgb(fg2), tint),
+      `${name}: the blocker key is no more prominent than the muted text beside it`);
+  }
+
+  /* AND THE STYLESHEET USES THOSE VALUES. The arithmetic above proves the
+     numbers work; these pin that the file actually asks for them. */
+  const block = css.slice(css.indexOf('.drill-blocked {'), css.indexOf('.stale-banner code'));
+  assert.match(block, /var\(--risk\) 5%, var\(--app-subtle\)/, 'the tint is not the measured one');
+  assert.match(block, /color:\s*var\(--app-fg-2\)/, 'the mark does not set its own text colour');
+  assert.match(block, /\.drill-blocked \.muted \{\s*color:\s*inherit/,
+    'muted text inside the mark keeps the app grey, which is 2.1:1 on this ground');
+  assert.match(block, /var\(--risk\) 72%, var\(--app-fg\)/, 'the label is not the measured mix');
+  assert.match(block, /\.drill-blocked \.issue-key \{[^}]*color:\s*var\(--app-fg\)/,
+    'the blocker key inherits the muted colour, so the clickable part is the faintest thing on the line');
+});
+
+check('and the blocked line escapes what Jira sent', () => {
+  /* Summaries and field values are free text from Jira and land in markup
+     here, beside a key this file exists to make clickable. */
+  const UI = loadUI();
+  UI.setJiraBase(BASE);
+  const html = UI.drillDrawer({
+    title: 'x',
+    keys: ['A-1'],
+    items: [{ key: 'A-1', automationStatus: '<b>Blocked</b>', blockedBy: [{ key: 'B-1', summary: '<img src=x onerror=1>' }] }],
+  });
+  assert.ok(!/<img src=x/.test(html), 'a blocker summary was written into the panel as markup');
+  assert.ok(!/<b>Blocked<\/b>/.test(html), 'an automation status was written into the panel as markup');
+});
+
 check('EVERY DRAWER THAT LISTS ISSUES OFFERS THE BUTTON', () => {
   /* The sweep, in the spirit of this file: the next drawer someone adds will
      copy the one above it, and the failure is silent — a panel that simply has

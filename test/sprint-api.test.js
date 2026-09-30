@@ -311,6 +311,40 @@ check('AND THE NUMBERS ARE THE SCREEN\'S NUMBERS, not a second count', async () 
   }
 });
 
+check('THE FILE IS IN THE PAGE\'S ORDER, priority first', async () => {
+  /* This export exists so the file and the screen cannot disagree about a
+     number — and the order they are read in is part of that. A spreadsheet
+     whose rows are shuffled against the table it came from is one nobody can
+     check line by line.
+
+     PRIORITIES ARE SET HERE rather than baked into the shared fixture: every
+     component in it is unjudged, so both lists would be in the model's own
+     order and the check would pass whether or not either was sorted. */
+  const before = await call('GET', '/api/sprint?team=titan&sprint=S38');
+  const comps = before.body.testCases.rows.map(r => r.component);
+  assert.ok(comps.length >= 3, `fixture check: ${comps.length} components cannot show an order`);
+
+  /* The LAST component in the model's order gets the TOP priority, so a
+     missing sort leaves it at the bottom and this fails loudly. */
+  await call('PUT', '/api/component-priority', { component: comps[comps.length - 1], level: 1 });
+  await call('PUT', '/api/component-priority', { component: comps[0], level: 4 });
+
+  const page = await call('GET', '/api/sprint?team=titan&sprint=S38');
+  const pageOrder = page.body.testCases.rows.map(r => r.component);
+  assert.strictEqual(pageOrder[0], comps[comps.length - 1],
+    `the page did not reorder: ${pageOrder.join(' → ')}`);
+
+  const { lines } = csvRows((await call('GET', '/api/export?what=testcases&team=titan&sprint=S38')).body);
+  const fileOrder = lines.map(l => l.split(',')[0]).filter(c => comps.includes(c));
+  assert.deepStrictEqual(fileOrder, pageOrder,
+    'the export lists the components in a different order from the page');
+
+  // Put the fixture back, so the checks after this one see what they expect.
+  for (const c of [comps[0], comps[comps.length - 1]]) {
+    await call('PUT', '/api/component-priority', { component: c, level: null });
+  }
+});
+
 check('THE KEYS TRAVEL WITH THE COUNTS, so the file can be audited', async () => {
   // On screen every number opens a drawer listing what it counted. A CSV of
   // the numbers alone is the one copy of this table nobody can check.

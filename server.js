@@ -1208,7 +1208,11 @@ async function handleApi(req, res, url) {
          places for it to drift. */
       testCases: view.testCases ? {
         ...view.testCases,
-        rows: priority.decorate(view.testCases.rows, plan),
+        /* ORDERED AS HE READS THE SHEET: P1 first, the unprioritised last.
+           Sorted HERE, not in either table, because two tables on that page
+           render these rows and they have to list them identically — a reader
+           compares a component between the two by looking straight down. */
+        rows: priority.byPriority(priority.decorate(view.testCases.rows, plan)),
       } : view.testCases,
       priorityLevels: priority.LEVELS,
       /* WHETHER THIS SPRINT CAN STILL BE WRITTEN TO. The Points cells on this
@@ -2861,7 +2865,11 @@ async function handleApi(req, res, url) {
          has to be a number in a column or the totals look wrong. */
       const v = insights.activeSprintView(plan, snap, team, sprint);
       const t = v.testCases || { rows: [], totals: {} };
-      const rows_ = priority.decorate(t.rows || [], plan);
+      /* THE SAME ORDER AS THE PAGE. This export exists so the file and the
+         screen cannot disagree about a number, and the order they are read in
+         is part of that — a spreadsheet whose rows are shuffled against the
+         table it was exported from is one nobody can check line by line. */
+      const rows_ = priority.byPriority(priority.decorate(t.rows || [], plan));
       name = `test-cases-${team.id}-${sprint.id}`;
       const line = (label, r) => ({
         Component: label,

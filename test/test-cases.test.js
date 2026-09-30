@@ -30,6 +30,7 @@ const vm = require('node:vm');
 
 const insights = require('../lib/insights');
 const cov = require('../lib/coverage');
+const priority = require('../lib/priority');
 
 let passed = 0, failed = 0;
 const checks = [];
@@ -52,8 +53,11 @@ const bucket = (key, components, relates, o = {}) => ({
   parentKey: 'E-BUCKET',
   relatesTo: relates.map(k => ({ key: k, type: 'Epic' })), ...o,
 });
-const epic = (key, automationStatus, components = []) => ({
-  key, summary: key, issueType: 'Epic', automationStatus, components, labels: [],
+/* `o` carries the fields only a few checks need — labels, above all. Spread
+   last so a check can override anything, and defaulted so the call sites that
+   predate it read exactly as they did. */
+const epic = (key, automationStatus, components = [], o = {}) => ({
+  key, summary: key, issueType: 'Epic', automationStatus, components, labels: [], ...o,
 });
 
 /** key -> stored issue, the lookup activeSprintView hands the summary. */
@@ -379,7 +383,7 @@ async function renderSprintClickable(payload) {
 }
 
 /** The real payload, built the way the route builds it. */
-function payloadFor(items, epics = EPICS) {
+function payloadFor(items, epics = EPICS, extra = {}) {
   const all = [...items, ...epics];
   const snap = {
     source: 'jira', syncedAt: '2026-09-24T00:00:00.000Z',
@@ -400,8 +404,25 @@ function payloadFor(items, epics = EPICS) {
     version: 1, teams: [TEAM], sprints: [SPRINT], holidays: [], availability: {},
     support: {}, ceremony: {}, overrides: {}, risks: [], notes: {}, excluded: {},
     categoryRules: null, mixTargets: null, sprintRoster: {},
+    /* HIS PRIORITIES, so the harness can see the order the page is sorted in.
+       `componentPriority` is where `priority.of` reads them from. */
+    componentPriority: { ...(extra.componentPriority || {}) },
   };
-  return insights.activeSprintView(PLAN, snap, TEAM, SPRINT, { today: '2026-09-24' });
+  const view = insights.activeSprintView(PLAN, snap, TEAM, SPRINT, { today: '2026-09-24' });
+  /* DECORATED AND ORDERED EXACTLY AS `/api/sprint` DOES IT. This returned the
+     bare view for a long time, which was fine while nothing on the page
+     depended on priority — and silently wrong the moment two tables started
+     being SORTED by it: the harness would have rendered rows in the model's
+     order and every check on the new order would have passed against a page
+     nobody sees. */
+  return view.testCases ? {
+    ...view,
+    testCases: {
+      ...view.testCases,
+      rows: priority.byPriority(priority.decorate(view.testCases.rows, PLAN)),
+    },
+    priorityLevels: priority.LEVELS,
+  } : view;
 }
 
 check('THE SECTION IS ON THE ACTIVE SPRINT, between the component table and the items', async () => {
@@ -942,7 +963,775 @@ check('NO OTHER COLUMN GROWS A REASON, however blocked the sprint is', async () 
   assert.ok(!/Held by/.test(inFlight), 'the reason leaked into a column that did not ask for it');
 });
 
+check('THE MARKER APPEARS BESIDE IN FLIGHT, and only when it means something', async () => {
+  /* HIS REQUEST. The indicator qualifies the number next to it rather than
+     adding a column: "5 in flight, 4 of them going nowhere". */
+  const r = await renderSprintClickable(payloadFor(FLAG_ITEMS, FLAG_EPICS));
+  const body = r.html.slice(r.html.indexOf('Test cases by component'));
+  const row = body.slice(body.indexOf('PS_F'), body.indexOf('</tr>', body.indexOf('PS_F')));
+  const mark = row.match(/<button[^>]*data-col="attention"[^>]*>/);
+  assert.ok(mark, `no marker beside In flight: ${row}`);
+  assert.match(mark[0], /class="stuck-mark"/,
+    'the marker does not use the same shape as the Capacity sheet\'s');
+  assert.match(mark[0], /data-act="drill"/, 'the marker opens nothing');
+  assert.ok(mark[0].includes('data-scope="PS_F"'), 'the marker opens a different component');
+  /* ANNOUNCED, not a bare glyph — it is a real control and the only thing on
+     the row saying the number is not what it looks like. */
+  assert.match(mark[0], /aria-label="[^"]+"/, 'the marker says nothing to a screen reader');
+  assert.match(mark[0], /title="[^"]*obsolete[^"]*"/i, 'the tooltip does not say what it means');
+});
+
+check('AND NOTHING IS DRAWN WHEN NOTHING IS FLAGGED', async () => {
+  /* A marker that is always there is one nobody reads; its whole value is
+     being unusual. */
+  const items = [story('A-1', 'E-3', ['PS_A'])];
+  const r = await renderSprintClickable(payloadFor(items));
+  const body = r.html.slice(r.html.indexOf('Test cases by component'));
+  const row = body.slice(body.indexOf('PS_A'), body.indexOf('</tr>', body.indexOf('PS_A')));
+  assert.match(row, /data-col="inFlight"/, 'precondition: this row has in-flight work');
+  assert.ok(!/data-col="attention"/.test(row), 'an unflagged row grew a marker');
+});
+
+check('CLICKING IT OPENS THE FLAGGED SUITES, WITH THE REASON ON EACH', async () => {
+  const r = await renderSprintClickable(payloadFor(FLAG_ITEMS, FLAG_EPICS));
+  const d = r.click({ act: 'drill', scope: 'PS_F', col: 'attention' });
+  assert.ok(d, 'the marker opened no drawer');
+  for (const k of ['E-BLOCKED', 'E-OBS', 'E-BOTH', 'E-OBS-WITH-STATUS']) {
+    assert.ok(d.includes(k), `the drawer does not list ${k}`);
+  }
+  assert.ok(!d.includes('E-MOVING'), 'the drawer lists a suite that is genuinely in progress');
+
+  /* THE REASON IS MARKED, not buried in the metadata — the same accent the
+     Blocked drawer uses, because it is the same kind of statement. */
+  assert.match(d, /class="drill-blocked"/, 'the reasons are drawn as plain text');
+  assert.match(d, /Automation Status is Blocked/, 'the drawer does not say what blocked means');
+  assert.match(d, /labelled obsolete/i, 'the drawer does not say a suite was retired');
+  assert.match(d, /not work in progress/i, 'the retired note does not say what it implies');
+});
+
+check('AND A SUITE THAT IS BOTH SAYS BOTH', async () => {
+  /* Blocked means chase it; obsolete means it should not be in flight at all.
+     Showing only the first sends somebody to unblock a retired suite. */
+  const r = await renderSprintClickable(payloadFor([story('F-3', 'E-BOTH', ['PS_F'])], FLAG_EPICS));
+  const d = r.click({ act: 'drill', scope: 'PS_F', col: 'attention' });
+  const marks = (d.match(/class="drill-blocked"/g) || []).length;
+  assert.strictEqual(marks, 2, `an epic that is blocked AND retired showed ${marks} reason(s)`);
+  assert.match(d, /Blocked/, 'the blocked reason is missing');
+  assert.match(d, /Retired/, 'the retired reason is missing');
+});
+
+check('AND THE FOOTER MARKER OPENS THE SPRINT-WIDE SET', async () => {
+  const r = await renderSprintClickable(payloadFor(FLAG_ITEMS, FLAG_EPICS));
+  const foot = r.html.slice(r.html.indexOf('<tfoot'));
+  assert.match(foot, /data-col="attention"[^>]*data-scope="__total"|data-scope="__total"[^>]*data-col="attention"/,
+    'the sprint total has no marker');
+  const d = r.click({ act: 'drill', scope: '__total', col: 'attention' });
+  assert.ok(d, 'the total marker opened no drawer');
+  for (const k of ['E-BLOCKED', 'E-OBS', 'E-BOTH']) assert.ok(d.includes(k), `the total drawer lost ${k}`);
+});
+
+check('AND A RETIRED NOTE DOES NOT LEAK ONTO EVERY OTHER DRAWER', async () => {
+  /* The note renders from the row's own labels, so it must be silent wherever
+     the fact is absent — a label line on each of forty automated epics is how
+     a panel becomes unreadable. */
+  const r = await renderSprintClickable(payloadFor(FLAG_ITEMS, FLAG_EPICS));
+  const automated = r.click({ act: 'drill', scope: 'PS_F', col: 'automated' });
+  assert.ok(automated.includes('E-DONE-OBS'), 'precondition: the automated column has the retired one');
+  assert.match(automated, /Retired/,
+    'a suite that IS labelled obsolete lost its note in another drawer');
+  const moving = r.click({ act: 'drill', scope: 'PS_F', col: 'inFlight' });
+  assert.ok(moving.includes('E-MOVING'), 'precondition: the in-flight column has the moving one');
+});
+
+/* ── THE SAME COUNTS, SPLIT BY TOOL ────────────────────────────────────
+   His requirement, stated first because it is the one that matters: the split
+   table must agree with the combined one. Two tables on one screen showing the
+   same measures is only useful while they agree; the moment they do not, a
+   reader stops believing either. */
+
+const TOOL_EPICS = [
+  epic('TT-A', 'Automated', ['PS_T', 'TrueTest']),
+  epic('TT-B', 'Ready for Automation', ['PS_T', 'TrueTest']),
+  epic('KS-A', 'Automated', ['PS_T', 'Katalon']),
+  epic('KS-B', 'Ready for Automation', ['PS_T', 'Katalon']),
+  epic('KS-C', 'Blocked', ['PS_T', 'Katalon']),
+  // A suite carrying neither tool component — `toolOf` calls it KSE.
+  epic('NO-TOOL', 'Automated', ['PS_T']),
+  // Maintained / maintaining targets, one per tool.
+  epic('TT-M', 'Automated', ['PS_T', 'TrueTest']),
+  epic('KS-M', 'Maintenance', ['PS_T', 'Katalon']),
+  epic('E-BUCKET2', null, ['PS_T']),
+];
+const TOOL_ITEMS = [
+  story('T-1', 'TT-A', ['PS_T']),
+  story('T-2', 'TT-B', ['PS_T']),
+  story('T-3', 'KS-A', ['PS_T']),
+  story('T-4', 'KS-B', ['PS_T']),
+  story('T-5', 'KS-C', ['PS_T'], { status: 'Refinement' }),
+  story('T-6', 'NO-TOOL', ['PS_T']),
+  bucket('T-7', ['PS_T'], ['TT-M', 'KS-M']),
+];
+const split = () => insights.testCaseSummary(TOOL_ITEMS, store(TOOL_EPICS));
+
+check('EVERY COLUMN SPLITS, AND THE TWO TOOLS ADD BACK UP', () => {
+  const t = split();
+  const row = t.rows.find(r => r.component === 'PS_T');
+  for (const col of ['automated', 'inFlight', 'maintained', 'maintaining', 'blocked']) {
+    const sum = row.byTool.truetest[col] + row.byTool.kse[col];
+    assert.strictEqual(sum, row[col],
+      `${col}: the tools add to ${sum} and the combined table says ${row[col]}`);
+  }
+});
+
+check('AND SO DO THE SPRINT TOTALS', () => {
+  const t = split();
+  for (const col of ['automated', 'inFlight', 'maintained', 'maintaining', 'blocked']) {
+    const sum = t.totals.byTool.truetest[col] + t.totals.byTool.kse[col];
+    assert.strictEqual(sum, t.totals[col], `${col}: the split total disagrees with the combined one`);
+  }
+});
+
+check('EACH SUITE LANDS UNDER THE TOOL ITS COMPONENTS NAME', () => {
+  const t = split();
+  const row = t.rows.find(r => r.component === 'PS_T');
+  assert.deepStrictEqual(row.byTool.truetest.keys.automated, ['TT-A']);
+  assert.deepStrictEqual(row.byTool.truetest.keys.inFlight, ['TT-B']);
+  assert.deepStrictEqual(row.byTool.kse.keys.inFlight.slice().sort(), ['KS-B', 'KS-C']);
+  assert.deepStrictEqual(row.byTool.truetest.keys.maintained, ['TT-M']);
+  assert.deepStrictEqual(row.byTool.kse.keys.maintaining, ['KS-M']);
+  assert.deepStrictEqual(row.byTool.kse.keys.blocked, ['KS-C'],
+    'the blocked suite is not under its own tool');
+});
+
+check('AN UNTAGGED SUITE FOLLOWS toolOf, AND IS COUNTED AND SAID', () => {
+  /* `toolOf` calls anything without the TrueTest component KSE, and the
+     Coverage screen has split that way for as long as it has existed. A second
+     rule here would put one epic under different tools on two screens. But a
+     silent default is worth stating, so the count travels beside the split —
+     exactly as Coverage's own `untagged` does. */
+  const t = split();
+  const row = t.rows.find(r => r.component === 'PS_T');
+  assert.strictEqual(cov.hasTool({ components: ['PS_T'] }), false, 'precondition: it carries no tool component');
+  assert.strictEqual(cov.toolOf({ components: ['PS_T'] }), 'kse', 'precondition: toolOf defaults to KSE');
+  assert.ok(row.byTool.kse.keys.automated.includes('NO-TOOL'),
+    'the untagged suite vanished instead of following toolOf');
+  assert.strictEqual(row.byTool.untagged, 1, 'the silent default is not counted');
+  assert.strictEqual(t.totals.byTool.untagged, 1, 'nor reported for the sprint');
+});
+
+check('AND AN UNTAGGED SUITE IS COUNTED ONCE, not once per column', () => {
+  /* A suite can sit in two columns at once — blocked and in flight, say — and
+     adding the per-column untagged counts would report it twice, over a table
+     whose whole promise is that its numbers agree with the one above it. */
+  const items = [...TOOL_ITEMS, story('T-8', 'NO-TOOL-2', ['PS_T'], { status: 'Refinement' })];
+  const epics = [...TOOL_EPICS, epic('NO-TOOL-2', 'Ready for Automation', ['PS_T'])];
+  const t = insights.testCaseSummary(items, store(epics));
+  const row = t.rows.find(r => r.component === 'PS_T');
+  assert.ok(row.byTool.kse.keys.blocked.includes('NO-TOOL-2'), 'precondition: it is blocked too');
+  assert.ok(row.byTool.kse.keys.inFlight.includes('NO-TOOL-2'), 'precondition: and in flight');
+  assert.strictEqual(row.byTool.untagged, 2, 'an untagged suite in two columns was counted twice');
+});
+
+check('THE ATTENTION MARKER SPLITS TOO', () => {
+  /* The In flight marker sits in both tables, so the per-tool number has to be
+     that tool's share rather than the row's whole count. */
+  const epics = [...TOOL_EPICS, epic('TT-OBS', null, ['PS_T', 'TrueTest'], { labels: ['obsolete'] })];
+  const items = [...TOOL_ITEMS, story('T-9', 'TT-OBS', ['PS_T'])];
+  const t = insights.testCaseSummary(items, store(epics));
+  const row = t.rows.find(r => r.component === 'PS_T');
+  assert.deepStrictEqual(row.byTool.truetest.keys.attention, ['TT-OBS']);
+  assert.ok(row.byTool.kse.keys.attention.includes('KS-C'), 'the blocked KSE suite is not flagged under KSE');
+  assert.strictEqual(row.byTool.truetest.attention + row.byTool.kse.attention, row.attention,
+    'the flagged counts do not add back up');
+});
+
+check('THE SPLIT TOTAL COUNTS A SHARED SUITE ONCE', () => {
+  /* Built from the sprint-wide sets, not by adding the rows: an epic in two
+     components is in two rows. */
+  const items = [...TOOL_ITEMS, story('T-10', 'TT-A', ['PS_U'])];
+  const t = insights.testCaseSummary(items, store(TOOL_EPICS));
+  const rows = t.rows.filter(r => r.component === 'PS_T' || r.component === 'PS_U');
+  assert.strictEqual(rows.reduce((n, r) => n + r.byTool.truetest.automated, 0), 2,
+    'fixture check: the rows double-count it');
+  assert.strictEqual(t.totals.byTool.truetest.automated, 1, 'the split total counted one suite twice');
+});
+
+check('THE BY-TOOL SECTION IS ON THE PAGE, below the combined one', async () => {
+  const r = await renderSprintClickable(payloadFor(TOOL_ITEMS, TOOL_EPICS));
+  const combined = r.html.indexOf('>Test cases by component<');
+  const byTool = r.html.indexOf('Test cases by component — by tool');
+  assert.ok(combined > 0, 'the combined section is gone');
+  assert.ok(byTool > 0, 'the by-tool section did not render');
+  assert.ok(byTool > combined, 'the by-tool table rendered above the one it is read against');
+});
+
+check('AND ITS HEADER IS TWO ROWS: a tool band over five columns each', async () => {
+  const r = await renderSprintClickable(payloadFor(TOOL_ITEMS, TOOL_EPICS));
+  const sec = r.html.slice(r.html.indexOf('Test cases by component — by tool'));
+  const head = sec.slice(sec.indexOf('<thead>'), sec.indexOf('</thead>'));
+
+  for (const tool of ['TrueTest', 'KSE']) {
+    assert.ok(head.includes(`>${tool}</th>`), `no ${tool} band in the header`);
+  }
+  assert.match(head, /colspan="5"/, 'the tool band does not span its five columns');
+  /* THE COLUMNS, TWICE — once per tool, in the order of the mock-up. */
+  const subs = [...head.matchAll(/<th class="num sub[^>]*>([^<]+)<\/th>/g)].map(m => m[1]);
+  assert.deepStrictEqual(subs,
+    ['Automated', 'In Flight', 'Maintained', 'Maintaining', 'Blocked',
+      'Automated', 'In Flight', 'Maintained', 'Maintaining', 'Blocked'],
+    `the column set is not five per tool: ${subs.join(', ')}`);
+  /* The banded classes are the Capacity sheet's, so the two grids read alike. */
+  assert.match(head, /class="num tool-start tool-head band-a"/, 'the first tool band is unstyled');
+  assert.match(head, /class="num tool-start tool-head band-b"/, 'the second tool band is unstyled');
+});
+
+check('BOTH TOOLS ARE DRAWN EVEN WHEN ONE IS EMPTY END TO END', async () => {
+  /* On his board every sprint is currently one-sided — Titan is all TrueTest,
+     Ruby all KSE. A group that vanished at zero would make "KSE did nothing
+     this sprint" look like a missing column rather than the finding it is, and
+     would change the table's shape between sprints. */
+  const ttOnly = [
+    epic('X-1', 'Automated', ['PS_X', 'TrueTest']),
+    epic('X-2', 'Ready for Automation', ['PS_X', 'TrueTest']),
+  ];
+  const items = [story('X-a', 'X-1', ['PS_X']), story('X-b', 'X-2', ['PS_X'])];
+  const r = await renderSprintClickable(payloadFor(items, ttOnly));
+  const sec = r.html.slice(r.html.indexOf('Test cases by component — by tool'));
+  assert.ok(sec.includes('>TrueTest</th>'), 'the populated tool is missing');
+  assert.ok(sec.includes('>KSE</th>'), 'the empty tool group was dropped, so the table changes shape by sprint');
+  const row = sec.slice(sec.indexOf('PS_X'), sec.indexOf('</tr>', sec.indexOf('PS_X')));
+  const cells = [...row.matchAll(/<td class="num[^"]*">(.*?)<\/td>/g)].map(m => m[1].replace(/<[^>]*>/g, '').trim());
+  assert.strictEqual(cells.length, 10, `expected ten numeric cells, got ${cells.length}`);
+  assert.deepStrictEqual(cells.slice(5), ['—', '—', '—', '—', '—'],
+    'the empty tool half is not drawn as dashes');
+});
+
+check('THE ROW ORDER MATCHES THE COMBINED TABLE', async () => {
+  /* Read across, not hunted for: the two tables list the same components in
+     the same order so a row can be compared between them at a glance. */
+  const items = [
+    story('R-1', 'TT-A', ['PS_BUSY']), story('R-2', 'TT-M', ['PS_BUSY']), story('R-3', 'KS-A', ['PS_BUSY']),
+    story('R-4', 'KS-B', ['PS_QUIET']),
+  ];
+  const r = await renderSprintClickable(payloadFor(items, TOOL_EPICS));
+  const order = (section) => [...section.matchAll(/>(PS_BUSY|PS_QUIET)</g)].map(m => m[1]);
+  const all = r.html;
+  const combined = all.slice(all.indexOf('>Test cases by component<'), all.indexOf('Test cases by component — by tool'));
+  const byTool = all.slice(all.indexOf('Test cases by component — by tool'));
+  assert.deepStrictEqual(order(byTool).slice(0, 2), order(combined).slice(0, 2),
+    'the two tables list the components in different orders');
+});
+
+check('EVERY NUMBER OPENS THAT TOOL\'S OWN SET', async () => {
+  /* Driven through the RENDERED buttons: what this really asks is whether the
+     markup carries enough to tell the handler which set to open, and a
+     hand-written dataset answers a different question. */
+  const r = await renderSprintClickable(payloadFor(TOOL_ITEMS, TOOL_EPICS));
+  const SEC = 'Test cases by component — by tool';
+
+  const tt = clickRendered(r, SEC, { col: 'automated', tool: 'truetest', scope: 'PS_T' });
+  assert.strictEqual(tt.dataset.src, 'bytool',
+    'the by-tool number does not say which table it came from, so it opens the combined set');
+  assert.ok(tt.drawn.includes('TT-A'), 'the TrueTest drawer does not list its own suite');
+  assert.ok(!tt.drawn.includes('KS-A'), 'the TrueTest drawer lists a KSE suite');
+  /* THE HEADING ITSELF, not just the word somewhere in the panel — the
+     tool-slice sentence below also says "TrueTest", so a loose match passed
+     against a drawer whose title had lost the tool entirely. */
+  const titleOf = (h) => (h.match(/<div class="eyebrow"><i><\/i>([^<]*)<\/div>/) || [])[1] || '';
+  assert.match(titleOf(tt.drawn), /TrueTest/,
+    `the heading does not name the tool, so two drawers share one title: "${titleOf(tt.drawn)}"`);
+  assert.match(tt.drawn, /Only the suites that run on TrueTest/, 'the drawer does not say it is a tool slice');
+
+  const ks = clickRendered(r, SEC, { col: 'automated', tool: 'kse', scope: 'PS_T' });
+  assert.ok(ks.drawn.includes('KS-A'), 'the KSE drawer does not list its own suite');
+  assert.ok(!ks.drawn.includes('TT-A'), 'the KSE drawer lists a TrueTest suite');
+  assert.match(titleOf(ks.drawn), /KSE/,
+    `the KSE heading does not name its tool: "${titleOf(ks.drawn)}"`);
+});
+
+check('AND THE TOTAL ROW OPENS THE SPRINT-WIDE TOOL SET', async () => {
+  const r = await renderSprintClickable(payloadFor(TOOL_ITEMS, TOOL_EPICS));
+  const d = clickRendered(r, 'Test cases by component — by tool',
+    { col: 'automated', tool: 'truetest', scope: '__total' });
+  assert.strictEqual(d.dataset.src, 'bytool', 'the total number lost its source');
+  assert.ok(d.drawn.includes('TT-A'), 'the sprint-wide TrueTest set is missing its suite');
+  assert.ok(!d.drawn.includes('KS-A'), 'the sprint-wide TrueTest set leaked a KSE suite');
+});
+
+check('AND THE COMBINED TABLE STILL OPENS THE COMBINED SET', async () => {
+  /* Adding a source must not change what the table above opens. */
+  const r = await renderSprintClickable(payloadFor(TOOL_ITEMS, TOOL_EPICS));
+  const d = r.click({ act: 'drill', scope: 'PS_T', col: 'automated' });
+  assert.ok(d.includes('TT-A') && d.includes('KS-A'),
+    'the combined drawer no longer lists both tools');
+  assert.ok(!/Only the suites that run on/.test(d), 'the combined drawer claims to be a tool slice');
+});
+
+check('AND THE UNTAGGED CAVEAT IS ON SCREEN, not just in the payload', async () => {
+  const r = await renderSprintClickable(payloadFor(TOOL_ITEMS, TOOL_EPICS));
+  const sec = r.html.slice(r.html.indexOf('Test cases by component — by tool'));
+  const head = sec.slice(0, sec.indexOf('<table'));
+  assert.match(head, /no tool component/i,
+    'a suite is silently counted under KSE and the caption does not say so');
+  assert.match(head, /KSE/, 'the caption does not say which tool it fell into');
+});
+
+/**
+ * CLICK THE BUTTON THE PAGE ACTUALLY RENDERED, with the dataset it carries.
+ *
+ * `r.click({...})` takes a dataset written out by hand. That is the right
+ * question for "what does the handler do with this input" and the WRONG one
+ * for "does the markup carry what the handler needs" — and the difference is
+ * not academic: removing `src` from the by-tool numbers left every
+ * hand-written click green, because the checks were feeding in the very
+ * attribute the page had just stopped emitting.
+ *
+ * This finds the rendered control by the attributes a reader would aim at, and
+ * hands the handler exactly what that button holds.
+ */
+const dsOf = (tag) => Object.fromEntries([...tag.matchAll(/data-([a-z-]+)="([^"]*)"/g)]
+  .map(([, k, v]) => [k.replace(/-(\w)/g, (_, c) => c.toUpperCase()),
+    v.replace(/&quot;/g, '"').replace(/&amp;/g, '&')]));
+
+const clickRendered = (r, after, match) => {
+  const at = r.html.indexOf(after);
+  assert.ok(at >= 0, `the section "${after}" is not on the page`);
+  const sec = r.html.slice(at);
+  const hit = [...sec.matchAll(/<button[^>]*>/g)].map(m => dsOf(m[0]))
+    .find(dd => Object.entries(match).every(([k, v]) => dd[k] === v));
+  assert.ok(hit, `no rendered button matching ${JSON.stringify(match)}`);
+  assert.strictEqual(hit.act, 'drill', `that control is a ${hit.act}, not a drill-in`);
+  return { drawn: r.click(hit), dataset: hit };
+};
+
+check('AND THE SECTION IS ABSENT UNTIL THE PAYLOAD CAN BACK IT', async () => {
+  /* `byTool` is new in the model, so a page held against a server that has not
+     restarted gets none of it. A ten-column grid of dashes under the real
+     table would read as "no test cases run on either tool" — a statement, and
+     a false one. */
+  const base = payloadFor(TOOL_ITEMS, TOOL_EPICS);
+  const stripped = {
+    ...base,
+    testCases: {
+      ...base.testCases,
+      totals: { ...base.testCases.totals, byTool: undefined },
+      rows: base.testCases.rows.map(({ byTool, ...rest }) => rest),
+    },
+  };
+  const r = await renderSprintClickable(stripped);
+  assert.ok(!r.html.includes('Test cases by component — by tool'),
+    'the by-tool table rendered as dashes against a payload that carries no split');
+  assert.ok(r.html.includes('>Test cases by component<'),
+    'the combined table went too — it does not depend on the split');
+});
+
+/* ── ORDERED THE WAY HE READS THE SHEET ────────────────────────────────
+   P1 → P2 → P3 → P4, then the components he has not prioritised. Both tables
+   on this page, and the CSV, take the same order from one place. */
+
+const PRIO_EPICS = [
+  epic('P-1', 'Automated', ['C_P1', 'TrueTest']),
+  epic('P-2', 'Automated', ['C_P2', 'TrueTest']),
+  epic('P-3', 'Automated', ['C_P3', 'Katalon']),
+  epic('P-4', 'Automated', ['C_P4', 'Katalon']),
+  epic('P-N', 'Automated', ['C_NONE', 'Katalon']),
+  /* THE BUSIEST COMPONENT IS THE LEAST PRIORITISED, deliberately: under the
+     old busiest-first sort it led the table, so if the new order is not
+     applied this fixture puts it first and the check fails loudly rather than
+     passing on a coincidence. */
+  epic('P-N2', 'Automated', ['C_NONE', 'Katalon']),
+  epic('P-N3', 'Ready for Automation', ['C_NONE', 'Katalon']),
+];
+const PRIO_ITEMS = [
+  story('p-a', 'P-1', ['C_P1']),
+  story('p-b', 'P-2', ['C_P2']),
+  story('p-c', 'P-3', ['C_P3']),
+  story('p-d', 'P-4', ['C_P4']),
+  story('p-e', 'P-N', ['C_NONE']),
+  story('p-f', 'P-N2', ['C_NONE']),
+  story('p-g', 'P-N3', ['C_NONE']),
+];
+const PRIO_PLAN = {
+  componentPriority: { C_P1: 1, C_P2: 2, C_P3: 3, C_P4: 4 },
+};
+const prioPayload = () => payloadFor(PRIO_ITEMS, PRIO_EPICS, PRIO_PLAN);
+
+const rowOrder = (html, from) => {
+  const sec = html.slice(html.indexOf(from));
+  const body = sec.slice(sec.indexOf('<tbody>'), sec.indexOf('</tbody>'));
+  return [...body.matchAll(/>(C_P\d|C_NONE)</g)].map(m => m[1])
+    .filter((v, i, a) => a.indexOf(v) === i);
+};
+
+check('THE COMBINED TABLE IS ORDERED P1 → P4, then the unprioritised', async () => {
+  const r = await renderSprintClickable(prioPayload());
+  assert.deepStrictEqual(rowOrder(r.html, '>Test cases by component<'),
+    ['C_P1', 'C_P2', 'C_P3', 'C_P4', 'C_NONE'],
+    'the combined table is not in priority order');
+});
+
+check('AND SO IS THE BY-TOOL TABLE', async () => {
+  const r = await renderSprintClickable(prioPayload());
+  assert.deepStrictEqual(rowOrder(r.html, 'Test cases by component — by tool'),
+    ['C_P1', 'C_P2', 'C_P3', 'C_P4', 'C_NONE'],
+    'the by-tool table is not in priority order');
+});
+
+check('AND THE TWO STILL LIST THEM IDENTICALLY', async () => {
+  /* The point of ordering once rather than in each table: a reader compares a
+     component between the two by looking straight down. */
+  const r = await renderSprintClickable(prioPayload());
+  assert.deepStrictEqual(
+    rowOrder(r.html, 'Test cases by component — by tool'),
+    rowOrder(r.html, '>Test cases by component<'),
+    'the two tables drifted into different orders');
+});
+
+check('THE UNPRIORITISED GO LAST even when they are the busiest', async () => {
+  /* The old order was busiest-first, and C_NONE is the busiest component in
+     this fixture. If the sort were dropped it would lead both tables — which
+     is exactly the row he wants at the bottom. */
+  const r = await renderSprintClickable(prioPayload());
+  const rows = (r.html.match(/>C_NONE</g) || []).length;
+  assert.ok(rows > 0, 'fixture check: the unprioritised component is on the page');
+  const order = rowOrder(r.html, '>Test cases by component<');
+  assert.strictEqual(order[order.length - 1], 'C_NONE',
+    `the unprioritised component is not last: ${order.join(' → ')}`);
+  /* And it really is the busiest, so this is not passing by luck. */
+  const payload = prioPayload();
+  const none = payload.testCases.rows.find(x => x.component === 'C_NONE');
+  const p1 = payload.testCases.rows.find(x => x.component === 'C_P1');
+  assert.ok(none.items > p1.items,
+    `fixture check: C_NONE (${none.items} items) must outweigh C_P1 (${p1.items}) or this check proves nothing`);
+});
+
+check('AND BUSIEST-FIRST SURVIVES INSIDE ONE PRIORITY', async () => {
+  /* The sort is on the level alone and JavaScript's sort is stable, so the
+     model's own order is the tie-break — two P1 components still read busiest
+     first rather than in whatever order the map happened to yield. */
+  /* NAMED AGAINST THE ALPHABET: the busiest is Z_ and the quiet one A_, so a
+     comparator that quietly added a name tie-break rearranges them and fails
+     rather than agreeing with the expected order by coincidence. */
+  const epics = [
+    epic('B-1', 'Automated', ['Z_BUSY', 'TrueTest']),
+    epic('B-2', 'Automated', ['Z_BUSY', 'TrueTest']),
+    epic('B-3', 'Automated', ['A_QUIET', 'TrueTest']),
+  ];
+  const items = [
+    story('b-a', 'B-1', ['Z_BUSY']), story('b-b', 'B-2', ['Z_BUSY']),
+    story('b-c', 'B-3', ['A_QUIET']),
+  ];
+  const r = await renderSprintClickable(
+    payloadFor(items, epics, { componentPriority: { Z_BUSY: 1, A_QUIET: 1 } }));
+  const sec = r.html.slice(r.html.indexOf('>Test cases by component<'));
+  const body = sec.slice(sec.indexOf('<tbody>'), sec.indexOf('</tbody>'));
+  const order = [...body.matchAll(/>(Z_BUSY|A_QUIET)</g)].map(m => m[1])
+    .filter((v, i, a) => a.indexOf(v) === i);
+  assert.deepStrictEqual(order, ['Z_BUSY', 'A_QUIET'],
+    'two components at the same priority lost the busiest-first tie-break');
+});
+
+check('PER-COMPONENT PROGRESS KEEPS BIGGEST-FIRST INSIDE ONE PRIORITY', () => {
+  /* ITS OWN ITEM ORDER, against the grain. The shared sprint fixture happens
+     to list its heaviest component first, so a check over it passes whether or
+     not the biggest-first sort is still there — dropping that sort entirely
+     killed nothing. Here the LIGHT component's story comes first, so insertion
+     order and points order disagree and only the real sort satisfies this. */
+  const epics = [
+    epic('W-LIGHT', 'Automated', ['C_LIGHT']),
+    epic('W-HEAVY', 'Automated', ['C_HEAVY']),
+  ];
+  const items = [
+    { ...story('w-1', 'W-LIGHT', ['C_LIGHT']), points: 1 },
+    { ...story('w-2', 'W-HEAVY', ['C_HEAVY']), points: 13 },
+  ];
+  const payload = payloadFor(items, epics, { componentPriority: { C_LIGHT: 1, C_HEAVY: 1 } });
+  const rows = payload.byComponent.rows.filter(r => r.component.startsWith('C_'));
+  assert.strictEqual(rows.length, 2, `expected both components, got ${rows.map(r => r.component).join(', ')}`);
+  assert.strictEqual(rows[0].component, 'C_HEAVY',
+    `the heavier component does not lead its priority level: ${rows.map(r => `${r.component} ${r.points}`).join(', ')}`);
+  assert.ok(rows[0].points > rows[1].points, 'fixture check: the two must differ in points');
+});
+
+check('AND THE PROGRESS TABLE PUTS THE UNJUDGED LAST', () => {
+  /* The heaviest is deliberately the unjudged one, so the old
+     biggest-commitment-first order and the new one are in direct conflict. */
+  const epics = [
+    epic('W-A', 'Automated', ['C_JUDGED']),
+    epic('W-B', 'Automated', ['C_UNJUDGED']),
+  ];
+  const items = [
+    { ...story('w-3', 'W-A', ['C_JUDGED']), points: 1 },
+    { ...story('w-4', 'W-B', ['C_UNJUDGED']), points: 21 },
+  ];
+  const payload = payloadFor(items, epics, { componentPriority: { C_JUDGED: 3 } });
+  const rows = payload.byComponent.rows.filter(r => r.component.startsWith('C_'));
+  assert.strictEqual(rows[rows.length - 1].component, 'C_UNJUDGED',
+    `the unjudged component is not last: ${rows.map(r => `${r.priorityLabel || '—'} ${r.component}`).join(' → ')}`);
+  const heaviest = rows.slice().sort((a, b) => b.points - a.points)[0];
+  assert.strictEqual(heaviest.component, 'C_UNJUDGED',
+    'fixture check: the unjudged one must be heaviest or the two orders do not conflict');
+});
+
+check('THE BY-TOOL TABLE SORTS BY PRIORITY, like the table above it', async () => {
+  /* His request. The combined table has always been sortable; this one opted
+     out wholesale because its banded header cannot map every column. The
+     opt-out now sits on the two BAND headings instead, which is the smallest
+     thing that makes Priority work and keeps the bands from ordering the table
+     by a column they do not name. */
+  const r = await renderSprintClickable(prioPayload());
+  const sec = r.html.slice(r.html.indexOf('Test cases by component — by tool'));
+  const table = sec.slice(sec.indexOf('<table'), sec.indexOf('</table>'));
+
+  assert.ok(!/<table[^>]*\sdata-nosort/.test(table),
+    'the table still opts out of sorting entirely, so Priority cannot be clicked');
+  const head = table.slice(table.indexOf('<thead>'), table.indexOf('</thead>'));
+  const firstRow = head.slice(head.indexOf('<tr>'), head.indexOf('</tr>'));
+  for (const band of ['TrueTest', 'KSE']) {
+    const th = firstRow.match(new RegExp(`<th[^>]*>(?:(?!</th>).)*${band}</th>`, 's'));
+    assert.ok(th, `no ${band} band heading`);
+    assert.match(th[0], /data-nosort/,
+      `the ${band} band is a sort control — it would order the table by ${band}'s Automated column`);
+  }
+});
+
+check('AND ITS PRIORITY COLUMN LINES UP WITH THE HEADING, by index', async () => {
+  /* THE FAILURE THE OPT-OUT EXISTS FOR, stated as the thing that would break
+     it: sorting maps a heading to a body column by POSITION. Insert one column
+     before Priority in the header or in the body and the heading silently
+     orders the table by its neighbour — no error, no sign on screen. */
+  const r = await renderSprintClickable(prioPayload());
+  const sec = r.html.slice(r.html.indexOf('Test cases by component — by tool'));
+  const head = sec.slice(sec.indexOf('<thead>'), sec.indexOf('</thead>'));
+  const firstRow = head.slice(head.indexOf('<tr>'), head.indexOf('</tr>'));
+  const headings = [...firstRow.matchAll(/<th[^>]*>((?:(?!<\/th>).)*)<\/th>/gs)]
+    .map(m => m[1].replace(/<[^>]*>/g, '').trim());
+  assert.strictEqual(headings[0], 'Component', `header cell 0 is "${headings[0]}"`);
+  assert.strictEqual(headings[1], 'Priority', `header cell 1 is "${headings[1]}"`);
+
+  const body = sec.slice(sec.indexOf('<tbody>'), sec.indexOf('</tbody>'));
+  const firstBody = body.slice(body.indexOf('<tr>'), body.indexOf('</tr>'));
+  const cells = [...firstBody.matchAll(/<td[^>]*>((?:(?!<\/td>).)*)<\/td>/gs)];
+  assert.ok(cells.length >= 2, 'the body row has fewer cells than the header');
+  assert.match(cells[1][0], /data-sort-value=/,
+    'the priority cell carries no sort value, so the column sorts by its rendered label');
+  /* AND THE VALUE IS THE ONE THAT SORTS UNJUDGED LAST — the same rule the
+     combined table uses, so the two behave alike under the same click. */
+  const v = cells[1][0].match(/data-sort-value="([^"]*)"/)[1];
+  assert.ok(/^[1-4]$|^—$/.test(v), `the priority sort value is "${v}"`);
+});
+
+check('AND BOTH TABLES SORT PRIORITY THE SAME WAY', async () => {
+  /* "The same as the table above" is the request, so the two have to agree on
+     what a priority cell sorts by — not merely both be clickable. */
+  const r = await renderSprintClickable(prioPayload());
+  const valuesIn = (from) => {
+    const sec = r.html.slice(r.html.indexOf(from));
+    const body = sec.slice(sec.indexOf('<tbody>'), sec.indexOf('</tbody>'));
+    return [...body.matchAll(/data-sort-value="([^"]*)"/g)].map(m => m[1]);
+  };
+  const combined = valuesIn('>Test cases by component<');
+  const byTool = valuesIn('Test cases by component — by tool');
+  assert.ok(combined.length, 'the combined table carries no priority sort values');
+  assert.deepStrictEqual(byTool, combined,
+    'the two tables sort priority by different values, so one click orders them differently');
+});
+
+/* ── THE DRAWER MUST NOT CLAIM AN ABSENCE IT WAS NEVER TOLD ABOUT ──────
+   He opened the In flight marker on PS_iGO_Columbus and read "Automation
+   Status is Blocked — nothing is linked in Jira, so there is no ticket to
+   chase" under AUTOKAT-10663, which is blocked by CLICMNTIGO-11567 in Jira.
+
+   The note renders from the ROW's own `blockedBy`, and the catalogue was never
+   given the field — so a row that had never been told about its blockers
+   looked exactly like a row that has none, and the panel stated the second.
+   That is worse than saying nothing: it sends somebody away from a defect
+   there was every reason to chase. */
+
+const LINK_EPICS = [
+  ...EPICS,
+  epic('E-LINKED', 'Blocked', ['PS_L', 'TrueTest'], {
+    blockedBy: [{ key: 'CLICMNTIGO-11567', summary: 'UWRE Bootstrap passes BirthState as an abbreviation', type: 'Defect' }],
+  }),
+  epic('E-BARE', 'Blocked', ['PS_L', 'TrueTest']),
+];
+const LINK_ITEMS = [
+  story('l-1', 'E-LINKED', ['PS_L']),
+  story('l-2', 'E-BARE', ['PS_L']),
+];
+
+check('THE CATALOGUE CARRIES THE BLOCKERS, not just the status', () => {
+  const t = insights.testCaseSummary(LINK_ITEMS, store(LINK_EPICS));
+  const e = t.catalogue['E-LINKED'];
+  assert.ok(e, 'the epic is not in the catalogue at all');
+  assert.deepStrictEqual((e.blockedBy || []).map(b => b.key), ['CLICMNTIGO-11567'],
+    'the drawer is never told what blocks it, so it reports that nothing does');
+  assert.strictEqual(e.blockedBy[0].summary, 'UWRE Bootstrap passes BirthState as an abbreviation',
+    'the blocker arrives as a bare key — the summary is what says whether to chase it');
+
+  /* AND THE FIELD EXISTS EVEN WHEN EMPTY, so "no blockers" is a value the
+     drawer was given rather than a field nobody set. */
+  assert.deepStrictEqual(t.catalogue['E-BARE'].blockedBy, [],
+    'an epic with no blockers carries no blockedBy field at all');
+});
+
+check('AND THE DRAWER NAMES THE BLOCKER instead of denying there is one', async () => {
+  const r = await renderSprintClickable(payloadFor(LINK_ITEMS, LINK_EPICS));
+  const d = r.click({ act: 'drill', scope: 'PS_L', col: 'attention' });
+  assert.ok(d.includes('E-LINKED'), 'precondition: the flagged epic is in the drawer');
+  assert.match(d, /CLICMNTIGO-11567/, 'the blocker is not named');
+  assert.match(d, /Blocked by/, 'the row does not say it is blocked by anything');
+  assert.match(d, /UWRE Bootstrap/, 'the blocker has no summary to judge it by');
+});
+
+check('AND IT STILL SAYS SO when there genuinely is nothing linked', async () => {
+  /* The other half. "Blocked with nothing recorded" is a real and useful
+     state — the fix must not silence it, only stop it being claimed about
+     rows that were never asked. */
+  const r = await renderSprintClickable(payloadFor([story('l-2', 'E-BARE', ['PS_L'])], LINK_EPICS));
+  const d = r.click({ act: 'drill', scope: 'PS_L', col: 'attention' });
+  assert.ok(d.includes('E-BARE'), 'precondition: the bare epic is in the drawer');
+  assert.match(d, /nothing is linked in Jira/i,
+    'a genuinely unlinked blocked epic no longer explains itself');
+});
+
+check('AND NO FLAGGED EPIC IS DESCRIBED AS UNLINKED WHILE CARRYING LINKS', async () => {
+  /* The sweep, because this failed silently once: every row the panel marks
+     Blocked is checked against what the model knows about it, rather than
+     trusting one example. */
+  const r = await renderSprintClickable(payloadFor(LINK_ITEMS, LINK_EPICS));
+  const payload = payloadFor(LINK_ITEMS, LINK_EPICS);
+  const d = r.click({ act: 'drill', scope: 'PS_L', col: 'attention' });
+  const rows = d.split('<div style="padding:11px 0');
+  for (const key of (payload.testCases.rows.find(x => x.component === 'PS_L') || {}).keys.attention || []) {
+    const block = rows.find(b => b.includes(key));
+    assert.ok(block, `${key} is counted but not drawn`);
+    const known = (payload.testCases.catalogue[key] || {}).blockedBy || [];
+    if (known.length) {
+      assert.ok(!/nothing is linked in Jira/i.test(block),
+        `${key} is blocked by ${known.map(b => b.key).join(', ')} and the drawer says nothing is linked`);
+    }
+  }
+});
+
 /* ── run ───────────────────────────────────────────────────────────── */
+
+/* ── IN FLIGHT, BUT NOT GOING ANYWHERE ──────────────────────────────────
+   "In flight" means only "not Automated yet", which puts three different
+   situations in one number: work genuinely in progress, work whose Automation
+   Status reads Blocked, and suites somebody retired with an `obsolete` label.
+   Read as progress, the column overstates what the sprint is moving.
+
+   THE FIXTURE MIRRORS HIS BOARD, where all four cases are live: one epic
+   Blocked with no label, one labelled obsolete with no status at all, and two
+   that are BOTH Blocked and obsolete. */
+const FLAG_EPICS = [
+  ...EPICS,
+  epic('E-BLOCKED', 'Blocked', ['PS_F']),
+  epic('E-OBS', null, ['PS_F'], { labels: ['obsolete'] }),
+  epic('E-BOTH', 'Blocked', ['PS_F'], { labels: ['NLG-iGO_Life', 'obsolete'] }),
+  epic('E-OBS-WITH-STATUS', 'Ready for Automation', ['PS_F'], { labels: ['obsoleted'] }),
+  epic('E-MOVING', 'Ready for Automation', ['PS_F']),
+  epic('E-DONE-OBS', 'Automated', ['PS_F'], { labels: ['obsolete'] }),
+];
+const FLAG_ITEMS = [
+  story('F-1', 'E-BLOCKED', ['PS_F']),
+  story('F-2', 'E-OBS', ['PS_F']),
+  story('F-3', 'E-BOTH', ['PS_F']),
+  story('F-4', 'E-OBS-WITH-STATUS', ['PS_F']),
+  story('F-5', 'E-MOVING', ['PS_F']),
+  story('F-6', 'E-DONE-OBS', ['PS_F']),
+];
+const flagged = () => insights.testCaseSummary(FLAG_ITEMS, store(FLAG_EPICS));
+
+check('AN IN-FLIGHT SUITE THAT IS BLOCKED OR RETIRED IS FLAGGED', () => {
+  const t = flagged();
+  const row = t.rows.find(r => r.component === 'PS_F');
+  assert.strictEqual(row.inFlight, 5, 'fixture check: five of the six epics are not Automated');
+  assert.deepStrictEqual(row.keys.attention.slice().sort(),
+    ['E-BLOCKED', 'E-BOTH', 'E-OBS', 'E-OBS-WITH-STATUS'],
+    'the flagged set is not the four that are stuck or retired');
+  assert.strictEqual(row.attention, 4, 'the count and the key list disagree');
+});
+
+check('AND IT IS A SUBSET OF IN FLIGHT, never a column of its own', () => {
+  /* The marker qualifies the number beside it. If it ever counted something
+     the In flight number does not, "4 in flight, 5 of them stuck" would be on
+     screen and the table would be unreadable. */
+  const t = flagged();
+  const row = t.rows.find(r => r.component === 'PS_F');
+  assert.ok(row.attention <= row.inFlight, `${row.attention} flagged out of ${row.inFlight} in flight`);
+  for (const k of row.keys.attention) {
+    assert.ok(row.keys.inFlight.includes(k), `${k} is flagged but is not in flight`);
+  }
+});
+
+check('AN AUTOMATED SUITE IS NOT FLAGGED, however it is labelled', () => {
+  /* E-DONE-OBS is Automated AND labelled obsolete. It is finished, so it is
+     not in flight, so there is nothing to flag — a marker there would send
+     somebody to look at work that is done. */
+  const t = flagged();
+  const row = t.rows.find(r => r.component === 'PS_F');
+  assert.ok(row.keys.automated.includes('E-DONE-OBS'), 'fixture check: it is automated');
+  assert.ok(!row.keys.attention.includes('E-DONE-OBS'), 'a finished suite was flagged as going nowhere');
+  assert.ok(!row.keys.attention.includes('E-MOVING'), 'a suite genuinely in progress was flagged');
+});
+
+check('AND A RETIRED SUITE THAT KEPT A REAL STATUS IS STILL FLAGGED', () => {
+  /* THE CASE `bucketOf` ALONE CANNOT SEE. An epic labelled obsolete that also
+     carries a real Automation Status comes back in THAT status by design — so
+     `bucketOf` says "ready" for E-OBS-WITH-STATUS and never says "obsoleted".
+     Asking only that question would have missed it, silently, and this is the
+     shape his board actually has. */
+  const t = flagged();
+  const row = t.rows.find(r => r.component === 'PS_F');
+  assert.strictEqual(cov.bucketOf({ automationStatus: 'Ready for Automation', labels: ['obsoleted'] }), 'ready',
+    'precondition: the shared classifier reports the status, not the label');
+  assert.ok(row.keys.attention.includes('E-OBS-WITH-STATUS'),
+    'a retired suite that kept a status was not flagged');
+});
+
+check('THE REASON TRAVELS WITH THE KEY, in the epic\'s own words', () => {
+  /* The drawer has to say WHY, and quote Jira rather than paraphrase it:
+     "Automation Status is Blocked" can be checked against the ticket. */
+  const t = flagged();
+  const why = t.attentionReasons || {};
+  assert.deepStrictEqual(why['E-BLOCKED'].why, ['blocked']);
+  assert.strictEqual(why['E-BLOCKED'].automationStatus, 'Blocked');
+  assert.deepStrictEqual(why['E-OBS'].why, ['obsolete']);
+  assert.deepStrictEqual(why['E-OBS'].labels, ['obsolete']);
+
+  /* BOTH REASONS, NOT THE FIRST ONE. Blocked means chase it; obsolete means it
+     should not be in flight at all. A note showing only one would send
+     somebody to unblock a suite that was retired months ago. */
+  assert.deepStrictEqual(why['E-BOTH'].why, ['blocked', 'obsolete'],
+    'an epic that is both only reported one reason');
+  assert.ok(why['E-BOTH'].labels.includes('obsolete'), 'the labels did not travel');
+  assert.strictEqual(why['E-MOVING'], undefined, 'a suite in progress carries a reason');
+});
+
+check('AND THE CATALOGUE CARRIES WHAT THE DRAWER NEEDS TO SAY IT', () => {
+  /* The drawer marks each row from the row's OWN fields, so an entry without
+     them can name the epic and say nothing about it. */
+  const t = flagged();
+  const e = t.catalogue['E-BOTH'];
+  assert.ok(e, 'the flagged epic is not in the catalogue');
+  assert.strictEqual(e.automationStatus, 'Blocked', 'the catalogue drops the automation status');
+  assert.ok((e.labels || []).includes('obsolete'), 'the catalogue drops the labels');
+});
+
+check('AND THE SPRINT TOTAL COUNTS EACH SUITE ONCE', () => {
+  /* An epic in two components is in two rows. Adding the rows would report it
+     twice — the trap every other total on this table documents. */
+  const items = [...FLAG_ITEMS, story('F-7', 'E-BOTH', ['PS_G'])];
+  const epics = FLAG_EPICS.map(e => (e.key === 'E-BOTH' ? { ...e, components: ['PS_F', 'PS_G'] } : e));
+  const t = insights.testCaseSummary(items, store(epics));
+  const rows = t.rows.filter(r => r.component === 'PS_F' || r.component === 'PS_G');
+  assert.strictEqual(rows.reduce((n, r) => n + r.attention, 0), 5, 'fixture check: the rows double-count it');
+  assert.strictEqual(t.totals.attention, 4, 'the sprint total counted one suite twice');
+  assert.deepStrictEqual(t.totals.keys.attention.slice().sort(),
+    ['E-BLOCKED', 'E-BOTH', 'E-OBS', 'E-OBS-WITH-STATUS']);
+});
 
 (async () => {
   for (const [name, fn] of checks) {

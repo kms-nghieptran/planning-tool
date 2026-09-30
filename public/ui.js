@@ -784,10 +784,19 @@ const UI = (() => {
   const PRIORITY_UNSET_SORT = '—';
   const prioritySort = (value) => (value == null ? PRIORITY_UNSET_SORT : value);
 
-  function drillNumber(n, attrs = {}, { zero = '—' } = {}) {
+  /**
+   * `fmt` — how the number reads, because not every drillable number is a count.
+   *
+   * Every caller until now opened a COUNT, so `int` was the only formatting
+   * this needed. The Per-component progress table opens points as well, and
+   * `int` would round 12.5 pts to 13 in a cell that reads 12.5 everywhere
+   * else on the same screen — a number that changes when it becomes clickable
+   * is worse than one that is not clickable.
+   */
+  function drillNumber(n, attrs = {}, { zero = '—', fmt = int } = {}) {
     if (!n) return `<span class="muted">${zero}</span>`;
     const data = Object.entries(attrs).map(([k, v]) => ` data-${k}="${esc(v)}"`).join('');
-    return `<button type="button" class="numlink"${data}>${int(n)}</button>`;
+    return `<button type="button" class="numlink"${data}>${fmt(n)}</button>`;
   }
 
   /**
@@ -839,8 +848,75 @@ const UI = (() => {
         ${r.summary ? `<div style="font-size:13px">${esc(r.summary)}</div>` : ''}
         ${r.absent ? `<div class="muted" style="font-size:11.5px;margin-top:3px">Not in the local store — open it in Jira to see this ${esc(r.kind || 'item')}</div>` : ''}
         ${(r.components || []).length ? `<div class="muted" style="font-size:11.5px;margin-top:3px">${esc(r.components.join(', '))}</div>` : ''}
+        ${blockedNote(r)}
+        ${retiredNote(r)}
         ${why(r.key)}
       </div>`;
+
+    /**
+     * WHY THIS ONE IS BLOCKED, on the row it is about.
+     *
+     * Every drawer that lists a blocked epic already RECEIVED the answer and
+     * threw it away: the payload carries `automationStatus` and Jira's own
+     * "is blocked by" links, and the row drew a key, a status and a summary.
+     * So the Blocked column on the Capacity sheet opened a panel listing
+     * twenty epics with nothing anywhere saying what was blocking them —
+     * which is the one question the panel is opened to answer.
+     *
+     * TWO DIFFERENT FACTS, and the gap between them is the useful part. The
+     * column comes from the Automation Status FIELD; the link comes from
+     * somebody recording what it is waiting on. An epic with the field set
+     * and no link is blocked with nothing to chase, and saying so is worth a
+     * line — it is the difference between "go and look at this ticket" and
+     * "nobody has written down why".
+     *
+     * DRAWN FROM THE ROW, so it appears wherever the fact is present and
+     * nowhere it is not: a Ready or Automated epic carries neither, and
+     * renders nothing extra.
+     */
+    /* RETIRED IS ITS OWN REASON, and it stacks with blocked rather than
+       replacing it. On his board two of one component's in-flight epics are
+       BOTH Blocked and labelled obsolete, and either fact alone is a different
+       conversation: blocked means chase it, obsolete means it should not be in
+       flight at all. A note that showed only the first would send somebody to
+       unblock a suite that was retired months ago. */
+    const OBSOLETE = /^obsolete(d)?$/i;
+    const retiredNote = (r) => {
+      const found = (r.labels || []).filter(l => OBSOLETE.test(String(l || '').trim()));
+      if (!found.length) return '';
+      return `<div class="drill-blocked">
+        <span class="lbl">Retired</span>
+        <span class="muted">labelled ${esc(found.join(', '))} in Jira — it is not work in progress</span>
+      </div>`;
+    };
+
+    const blockedNote = (r) => {
+      const links = (r.blockedBy || []).filter(Boolean);
+      const flagged = /blocked/i.test(String(r.automationStatus || '').trim());
+      /* MARKED, NOT JUST PRINTED. As a plain grey line it sat below the
+         component list and read as one more piece of metadata — on a panel
+         where it is the ONE thing the reader opened the panel for. `.drill-
+         blocked` gives it the risk accent this app already uses for work that
+         is held up, so the eye finds it while scanning twenty rows.
+         BOTH SHAPES GET IT, because "blocked with nothing recorded" is the
+         same class of fact as "blocked by this ticket" and a reader
+         scanning for the mark must not read its absence as "not blocked". */
+      if (!links.length) {
+        if (!flagged) return '';
+        return `<div class="drill-blocked">
+          <span class="lbl">Blocked</span>
+          <span class="muted">Automation Status is ${esc(r.automationStatus)} — nothing is linked in Jira, so there is no ticket to chase</span>
+        </div>`;
+      }
+      return `<div class="drill-blocked">
+        <span class="lbl">Blocked by</span>
+        ${links.map((l) => {
+    const k = linkKey(l);
+    const sum = l && typeof l === 'object' ? l.summary : '';
+    return `${issueKey(k)}${sum ? ` <span class="muted">${esc(clip(sum, 80))}</span>` : ''}`;
+  }).join(', ')}
+      </div>`;
+    };
 
     /* THE REASON, under the thing it explains. Indented and rule-marked rather
        than run on as another muted line, because it is about a DIFFERENT issue

@@ -181,6 +181,77 @@ const simple = () => grid(`
     <tbody>${ROWS.map(r => `<tr><td>${r.name}</td><td class="num">${r.pts}</td></tr>`).join('')}</tbody>
   </table>`);
 
+/* ── A BANDED HEADER, LIKE "TEST CASES BY COMPONENT — BY TOOL" ──────────
+   That grid puts a TrueTest band and a KSE band over five columns each, so its
+   first header row is four cells wide while its body rows are twelve. Sorting
+   maps a heading to a body column BY INDEX, and this is what that means in
+   practice — which is why the bands opt out and Component and Priority do not. */
+
+const BANDED = (rows) => grid(`
+  <table class="pz">
+    <thead>
+      <tr>
+        <th rowspan="2">Component</th>
+        <th rowspan="2">Priority</th>
+        <th class="num" colspan="2" data-nosort>TrueTest</th>
+        <th class="num" colspan="2" data-nosort>KSE</th>
+      </tr>
+      <tr>
+        <th class="num">Automated</th><th class="num">In Flight</th>
+        <th class="num">Automated</th><th class="num">In Flight</th>
+      </tr>
+    </thead>
+    <tbody>${rows.map(r => `<tr>
+      <td>${r.c}</td>
+      <td data-sort-value="${r.p == null ? '—' : r.p}">${r.p == null ? '—' : `P${r.p}`}</td>
+      <td class="num">${r.tta}</td><td class="num">${r.tti}</td>
+      <td class="num">${r.ka}</td><td class="num">${r.ki}</td>
+    </tr>`).join('')}</tbody>
+  </table>`);
+
+const BAND_ROWS = [
+  { c: 'C_P3', p: 3, tta: '1', tti: '9', ka: '0', ki: '0' },
+  { c: 'C_NONE', p: null, tta: '2', tti: '8', ka: '0', ki: '0' },
+  { c: 'C_P1', p: 1, tta: '3', tti: '7', ka: '0', ki: '0' },
+];
+
+check('PRIORITY SORTS UNDER A BANDED HEADER, and the unjudged stay last', () => {
+  /* Cells 0 and 1 of the header row are cells 0 and 1 of every body row, so
+     they line up whatever the bands do to the right of them. */
+  assert.deepStrictEqual(BANDED(BAND_ROWS).click('Priority').col(0),
+    ['C_P1', 'C_P3', 'C_NONE'], 'priority did not sort ascending');
+  /* Reversed, the unjudged is still last: it is the absence of a judgement,
+     not the bottom of the scale — the rule `PRIORITY_UNSET_SORT` encodes. */
+  assert.deepStrictEqual(BANDED(BAND_ROWS).click('Priority', 2).col(0),
+    ['C_P3', 'C_P1', 'C_NONE'], 'the unjudged row moved to the top when reversed');
+  assert.deepStrictEqual(BANDED(BAND_ROWS).click('Priority', 3).col(0),
+    ['C_P3', 'C_NONE', 'C_P1'], 'a third click did not give back the view\'s own order');
+});
+
+check('AND A BAND HEADING IS NOT A CONTROL, because it would sort the wrong column', () => {
+  /* "TrueTest" is cell 2 of the header and would order the table by body cell
+     2 — TrueTest's Automated count — under a heading that names a tool, not a
+     measure. Nothing on screen would say what it had just done. */
+  const g = BANDED(BAND_ROWS);
+  assert.ok(!g.th('TrueTest').className.includes('sortable'),
+    'a band heading is wired as a sort control');
+  const before = g.col(0);
+  g.click('TrueTest');
+  assert.deepStrictEqual(g.col(0), before, 'clicking a band heading reordered the table');
+});
+
+check('and the columns under a band are not controls either', () => {
+  /* They sit in the SECOND header row, which `sortable` never wires — and
+     `sortTable` only ever puts an arrow on the first row, so a column wired by
+     hand there would sort with nothing to show for it. */
+  const g = BANDED(BAND_ROWS);
+  const second = g.table.querySelector('thead').children.filter(r => r.tagName === 'TR')[1];
+  for (const th of second.children) {
+    assert.ok(!String(th.className).includes('sortable'),
+      `${th.textContent.trim()} under a band is wired as a sort control`);
+  }
+});
+
 /* ── the basics ───────────────────────────────────────────────────────── */
 
 check('a heading sorts the rows under it', () => {

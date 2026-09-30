@@ -104,6 +104,43 @@ check('and it sorts BELOW every set level, whichever way the column points', () 
     'the rows he has judged come first; the ones he has not are not data');
 });
 
+check('byPriority ORDERS P1 → P4 THEN THE UNJUDGED, and is stable within a level', () => {
+  /* The Active sprint's two tables and its CSV all rank this way, which is why
+     it is a helper rather than a comparator written out three times. */
+  /* NAMED AGAINST THE ALPHABET ON PURPOSE. The rows within each level are in
+     the caller's order, which here is the REVERSE of alphabetical — so a
+     comparator that quietly added a name tie-break would rearrange them and
+     fail, instead of agreeing by coincidence. */
+  const rows = [
+    { c: 'zz-unjudged', priority: null }, { c: 'p3', priority: 3 },
+    { c: 'p1-zebra', priority: 1 }, { c: 'aa-unjudged', priority: null },
+    { c: 'p4', priority: 4 }, { c: 'p1-alpha', priority: 1 }, { c: 'p2', priority: 2 },
+  ];
+  assert.deepStrictEqual(priority.byPriority(rows).map(r => r.c),
+    ['p1-zebra', 'p1-alpha', 'p2', 'p3', 'p4', 'zz-unjudged', 'aa-unjudged'],
+    'the order is not P1 → P4 then the unjudged, with the caller\'s order kept inside a level');
+
+  /* STABLE IS THE CONTRACT, not an accident of the engine. The callers hand
+     over rows already sorted busiest-first and rely on that surviving — a
+     comparator that also compared names or counts would silently replace
+     their tie-break with its own. */
+  const p1s = priority.byPriority(rows).filter(r => r.priority === 1).map(r => r.c);
+  assert.deepStrictEqual(p1s, ['p1-zebra', 'p1-alpha'],
+    'two rows at one level were reordered — something other than the level is being compared');
+});
+
+check('and it does not disturb the list it was given', () => {
+  /* It sorts a copy: the callers pass the model's own array, and sorting in
+     place would reorder a list other readers still hold. */
+  const rows = [{ c: 'b', priority: 2 }, { c: 'a', priority: 1 }];
+  const before = rows.map(r => r.c);
+  priority.byPriority(rows);
+  assert.deepStrictEqual(rows.map(r => r.c), before, 'the input array was sorted in place');
+  assert.deepStrictEqual(priority.byPriority(null), [], 'a missing list is not an error');
+  assert.deepStrictEqual(priority.byPriority([null, { priority: 1 }]).length, 2,
+    'a hole in the list threw rather than sorting last');
+});
+
 check('CLEARING A PRIORITY REMOVES THE KEY, it does not store a null', () => {
   // A map that accumulates a null for every component ever touched grows without
   // bound, and makes "has a priority" mean two different things depending on how
