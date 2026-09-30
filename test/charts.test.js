@@ -331,6 +331,373 @@ check('the hover title survives the wrapper', () => {
     /<title>Aug — New TT Build: 12 automated<\/title>/);
 });
 
+/* ── READING THE PAGE AS IF IT WERE LIGHT ───────────────────────────────
+ *
+ * A chart that leaves the tool goes somewhere this app does not control: an
+ * email body, a deck, a document — all overwhelmingly light. A dark-theme chart
+ * dropped into one arrives as a black slab with a hole punched in the page.
+ *
+ * The theme lives in one attribute on `<html>` and every token keys off it, so
+ * the export flips it, takes every measurement, and flips it back inside ONE
+ * task. A browser paints between tasks and never inside one, so nothing reaches
+ * the screen. What has to be guaranteed is that it always flips BACK — leaving
+ * somebody's app in the wrong theme because an export failed is a far worse bug
+ * than the one being fixed.
+ */
+
+/** `<html>` and nothing else — it is all `inLightTheme` touches. */
+function stubDoc(theme) {
+  let attr = theme;
+  ctx.document = {
+    documentElement: {
+      getAttribute: (k) => (k === 'data-theme' ? attr : null),
+      setAttribute: (k, v) => { if (k === 'data-theme') attr = v; },
+    },
+  };
+  return () => attr;
+}
+
+check('THE EXPORT READS THE PAGE IN LIGHT THEME, not in his', () => {
+  const read = stubDoc('dark');
+  let sawInside = null;
+  Charts.inLightTheme(() => { sawInside = read(); });
+  assert.strictEqual(sawInside, 'light',
+    `the colours were read in ${sawInside} theme, so the emailed chart is dark`);
+});
+
+check('AND PUTS IT BACK, so nobody is left in the wrong theme', () => {
+  const read = stubDoc('dark');
+  Charts.inLightTheme(() => 'done');
+  assert.strictEqual(read(), 'dark', `his theme was left as ${read()}`);
+});
+
+check('AND PUTS IT BACK EVEN WHEN THE EXPORT THROWS', () => {
+  /* The whole reason it is a `finally`. An export can fail — a canvas the
+     browser will not allocate, a token that resolves to nothing — and the
+     failure must not also flip his app to light until he reloads. */
+  const read = stubDoc('dark');
+  assert.throws(() => Charts.inLightTheme(() => { throw new Error('canvas refused'); }), /canvas refused/);
+  assert.strictEqual(read(), 'dark', `a failed export left his theme as ${read()}`);
+});
+
+check('AND THE RETURN VALUE COMES BACK OUT', () => {
+  /* The background colour is measured inside and used outside. A wrapper that
+     swallowed it would paint every chart on the fallback white. */
+  stubDoc('dark');
+  assert.strictEqual(Charts.inLightTheme(() => '#FFFFFF'), '#FFFFFF');
+});
+
+check('A PAGE ALREADY IN LIGHT THEME IS NOT TOUCHED AT ALL', () => {
+  const read = stubDoc('light');
+  let seen = null;
+  Charts.inLightTheme(() => { seen = read(); });
+  assert.strictEqual(seen, 'light');
+  assert.strictEqual(read(), 'light', 'a light page was left as something else');
+});
+
+/* ── A CHART THAT HAS TO STAND ALONE ────────────────────────────────────
+ *
+ * The emailed report carried a photograph of the bars and nothing else: four
+ * colours, no key, and no caption saying what the picture was of. On the page
+ * the surrounding markup supplied all of that — an `<h3>` in the section head,
+ * a `.mixkey` under the card — and none of it is inside the element the
+ * capture clips.
+ *
+ * So the title and the key are drawn INTO the SVG, which fixes both exits at
+ * once: the server-side capture clips one element and gets the whole figure,
+ * and Save PNG serializes the same SVG.
+ */
+
+const KEYED = [
+  { key: 'ttBuild', label: 'New TT Build', color: '#0047B3', ink: '#FFFFFF' },
+  { key: 'kseBuild', label: 'New KSE Build', color: '#2E86FF', ink: '#10112A' },
+  { key: 'ttMaint', label: 'TT Maintenance', color: '#A3004A', ink: '#FFFFFF' },
+  { key: 'kseMaint', label: 'KSE Maintenance', color: '#FF5C9B', ink: '#10112A' },
+];
+const KEYED_DATA = [
+  { label: 'Aug', start: '2026-08-01', counts: { ttBuild: 12, kseBuild: 9, ttMaint: 4, kseMaint: 2 }, total: 27 },
+  { label: 'Sep', start: '2026-09-01', partial: true, counts: { ttBuild: 7, kseBuild: 4, ttMaint: 3, kseMaint: 1 }, total: 15 },
+];
+const viewBoxOf = (svg) => (svg.match(/viewBox="0 0 (\d+(?:\.\d+)?) (\d+(?:\.\d+)?)"/) || []).slice(1).map(Number);
+
+check('THE CHART CARRIES ITS OWN TITLE, so a photograph of it says what it is', () => {
+  const svg = Charts.stacked(KEYED_DATA, KEYED, { title: 'Backlog Movement', legend: true });
+  assert.ok(svg.includes('>Backlog Movement<'), 'the title is not drawn');
+  /* AS TEXT IN THE PICTURE, not as an SVG <title>. `<title>` is a tooltip and
+     an accessible name — it does not appear in a screenshot or a rasterized
+     PNG at all, which is exactly the trap here. */
+  assert.ok(!/<title>Backlog Movement<\/title>/.test(svg),
+    'the title was put somewhere a photograph cannot see it');
+});
+
+check('AND ITS OWN KEY, naming every series it draws', () => {
+  const svg = Charts.stacked(KEYED_DATA, KEYED, { title: 'Backlog Movement', legend: true });
+  for (const s of KEYED) {
+    assert.ok(svg.includes(`>${s.label}<`), `the key does not name ${s.label}`);
+    /* AND THE SWATCH BESIDE IT. A list of four names with no colours is not a
+       key — the reader still cannot tell which band is which. */
+    assert.ok(svg.includes(`fill="${s.color}"`), `no swatch is drawn for ${s.label}`);
+  }
+  const swatches = (svg.match(/<rect[^>]*rx="2"[^>]*\/>/g) || []).length;
+  assert.strictEqual(swatches, KEYED.length, `${swatches} swatches for ${KEYED.length} series`);
+});
+
+check('THE CANVAS GROWS FOR THEM — the plot does not shrink to make room', () => {
+  /* A chart that gets shorter every time you give it a longer caption is one
+     nobody trusts to be to scale. */
+  const bare = viewBoxOf(Charts.stacked(KEYED_DATA, KEYED, {}));
+  const full = viewBoxOf(Charts.stacked(KEYED_DATA, KEYED, {
+    title: 'Backlog Movement', subtitle: 'Aug – Sep', legend: true,
+  }));
+  assert.strictEqual(bare[0], full[0], 'the chart changed width');
+  assert.ok(full[1] > bare[1], `the canvas did not grow: ${bare[1]} → ${full[1]}`);
+});
+
+check('AND THE BARS KEEP THEIR SCALE, which is the point of growing it', () => {
+  /* The tallest bar must still reach the same proportion of the plot. If the
+     plot had absorbed the caption instead, every bar would be shorter and the
+     picture would understate the work. */
+  const tallest = (svg) => {
+    const rects = [...svg.matchAll(/<rect x="[\d.]+" y="([\d.]+)" width="[\d.]+" height="([\d.]+)"/g)];
+    return Math.max(...rects.map(m => Number(m[2])));
+  };
+  const bare = Charts.stacked(KEYED_DATA, KEYED, {});
+  const full = Charts.stacked(KEYED_DATA, KEYED, { title: 'Backlog Movement', legend: true });
+  assert.ok(Math.abs(tallest(bare) - tallest(full)) < 1,
+    `the bars were rescaled: ${tallest(bare)} vs ${tallest(full)}`);
+});
+
+check('THE X-AXIS LABELS CLEAR THE KEY, rather than being drawn through it', () => {
+  /* They were pinned to the bottom of the canvas. The key now sits there, and a
+     period label measured from `H` would be drawn over it. */
+  const svg = Charts.stacked(KEYED_DATA, KEYED, { title: 'Backlog Movement', legend: true });
+  const [, H] = viewBoxOf(svg);
+  const periodY = [...svg.matchAll(/<text x="[\d.]+" y="([\d.]+)" text-anchor="middle" font-size="9\.5" fill="[^"]*">(?:Aug|Sep)</g)]
+    .map(m => Number(m[1]));
+  assert.ok(periodY.length, 'no period labels were found at all');
+  /* AND THE "so far" MARKER, which is the one that actually collides. It sits
+     11px BELOW the period label, so a version that cleared the key by a
+     comfortable margin on the period labels alone still drew this one straight
+     through the swatches — and a check that looked only at the labels above it
+     went on passing. */
+  const soFarY = [...svg.matchAll(/<text x="[\d.]+" y="([\d.]+)" text-anchor="middle" font-size="8"[^>]*>so far</g)]
+    .map(m => Number(m[1]));
+  assert.ok(soFarY.length, 'fixture check: no partial period, so the lower label is not exercised');
+
+  const keyTop = Number((svg.match(/<rect x="[\d.]+" y="([\d.]+)" width="9" height="9" rx="2"/) || [])[1]);
+  assert.ok(Number.isFinite(keyTop), 'no key swatch was found');
+
+  /* THE INVARIANT IS THE BAND, NOT THE NEAR MISS. Asserting only "above the
+     swatches" passed a version that measured the labels from the bottom of the
+     CANVAS instead of from the bottom of the PLOT — it happened to land ten
+     pixels clear at four series and one legend row, and would have been drawn
+     straight through a second row. What has to hold is that the axis furniture
+     stays inside the plot's own bottom padding and the key has the band below
+     it to itself. */
+  const bare = viewBoxOf(Charts.stacked(KEYED_DATA, KEYED, { title: 'Backlog Movement' }))[1];
+  const keyBand = H - bare;
+  assert.ok(keyBand > 0, 'fixture check: the key reserved no space at all');
+  for (const y of [...periodY, ...soFarY]) {
+    /* STRICTLY ABOVE. A baseline sitting exactly ON the boundary puts the
+       label's descenders into the key's band, and "exactly on it" is precisely
+       where a version that measured from the canvas instead of from the plot
+       happened to land. */
+    assert.ok(y < H - keyBand,
+      `an axis label at y=${y} reaches the key's own band, which starts at y=${H - keyBand}`);
+    assert.ok(y < keyTop, `an axis label sits at y=${y}, on top of the key which starts at y=${keyTop}`);
+    assert.ok(y < H, `an axis label at y=${y} is off the bottom of a ${H}px canvas`);
+  }
+});
+
+check('NOTHING IS DRAWN WHEN NOTHING WAS ASKED FOR', () => {
+  /* Four other charts share this function and none of them wants a caption. */
+  const svg = Charts.stacked(KEYED_DATA, KEYED, { drill: true });
+  assert.ok(!svg.includes('Backlog Movement'));
+  assert.strictEqual((svg.match(/rx="2"/g) || []).length, 0, 'a key was drawn unasked');
+  assert.deepStrictEqual(viewBoxOf(svg), [900, 300], 'the default canvas changed size');
+});
+
+check('A SUBTITLE IS OPTIONAL AND DOES NOT DISPLACE THE TITLE', () => {
+  const withSub = Charts.stacked(KEYED_DATA, KEYED, { title: 'Backlog Movement', subtitle: 'Aug – Sep · all components' });
+  assert.ok(withSub.includes('>Aug – Sep · all components<'), 'the subtitle is not drawn');
+  const titleY = Number(withSub.match(/y="([\d.]+)"[^>]*font-weight="700"[^>]*>Backlog Movement</)[1]);
+  const subY = Number(withSub.match(/y="([\d.]+)"[^>]*>Aug – Sep/)[1]);
+  assert.ok(subY > titleY, `the subtitle (${subY}) is not below the title (${titleY})`);
+});
+
+check('AND THE CAPTION IS ESCAPED, because a component name is somebody else\'s string', () => {
+  /* Component names come from Jira and go straight into the subtitle. */
+  const svg = Charts.stacked(KEYED_DATA, KEYED, { title: 'A & B', subtitle: '<script>x</script>' });
+  assert.ok(svg.includes('A &amp; B'), 'the title was not escaped');
+  assert.ok(!svg.includes('<script>'), 'markup from a component name reached the SVG');
+});
+
+/* ── A CHART THAT LEAVES THE PAGE ───────────────────────────────────────
+ *
+ * Every colour in these charts is a CSS custom property, which is what makes
+ * them theme correctly and what makes them WORTHLESS the moment they are
+ * serialized: `var(--cov-automated)` resolves against nothing outside the
+ * document, so a naive export is a black-on-transparent rectangle. The `Save
+ * PNG` button and the chart in the emailed report both depend on that not
+ * happening.
+ *
+ * `literal` is the part of it that can be checked without a DOM, and it is the
+ * part that carries the whole risk — so it is checked hard.
+ */
+
+const ROOT = {
+  '--cov-automated': '#2E7D32',
+  '--app-fg-3': '#6B7280',
+  '--indirect': 'var(--cov-automated)',
+  '--loop': 'var(--loop)',
+  '--blank': '',
+};
+const rootStyle = { getPropertyValue: (k) => (ROOT[k] == null ? '' : ROOT[k]) };
+
+check('A COLOUR TOKEN IS RESOLVED TO SOMETHING A CANVAS UNDERSTANDS', () => {
+  assert.strictEqual(Charts.literal('var(--cov-automated)', rootStyle), '#2E7D32');
+  assert.strictEqual(Charts.literal('var(--app-fg-3)', rootStyle), '#6B7280');
+});
+
+check('and a plain colour passes through untouched', () => {
+  assert.strictEqual(Charts.literal('#123456', rootStyle), '#123456');
+  assert.strictEqual(Charts.literal('none', rootStyle), 'none');
+  assert.strictEqual(Charts.literal('', rootStyle), '');
+});
+
+check('A TOKEN DEFINED AS ANOTHER TOKEN RESOLVES ALL THE WAY DOWN', () => {
+  /* Normal in this stylesheet — the brand file defines the `--cov-*` set in
+     terms of other tokens — and a single-pass resolver would leave `var(` in
+     the output and paint the bar black. */
+  assert.strictEqual(Charts.literal('var(--indirect)', rootStyle), '#2E7D32');
+});
+
+check('AND A TOKEN THAT REFERS TO ITSELF DOES NOT HANG THE TAB', () => {
+  /* A stylesheet bug must not become a browser that stops responding while
+     somebody waits for a download. */
+  assert.strictEqual(Charts.literal('var(--loop)', rootStyle), '');
+});
+
+check('A FALLBACK IS USED WHEN THE TOKEN IS NOT DEFINED', () => {
+  assert.strictEqual(Charts.literal('var(--nope, #ABCDEF)', rootStyle), '#ABCDEF');
+  /* An EMPTY token with a fallback takes the fallback — which is what CSS
+     itself does, and the difference between a legible chart and a black one on
+     any theme that does not define every token. */
+  assert.strictEqual(Charts.literal('var(--blank, #FEDCBA)', rootStyle), '#FEDCBA');
+});
+
+check('AN UNRESOLVED TOKEN COMES BACK EMPTY, never as the literal "var(...)"', () => {
+  /* The caller skips empty answers and keeps the element's own attribute.
+     Writing `var(--nope)` onto the clone instead would put that string into the
+     serialized SVG, where the canvas reads it as an invalid paint and draws
+     black — the exact failure this function exists to prevent. */
+  const out = Charts.literal('var(--nope)', rootStyle);
+  assert.strictEqual(out, '');
+  assert.ok(!out.includes('var('), 'a var() reached the output');
+});
+
+/* ── THE BUG THAT SHIPPED ────────────────────────────────────────────────
+ *
+ * "Could not save the chart — The browser could not turn the chart into an
+ * image." Nothing was wrong with the browser. The padding read
+ *
+ *     Math.max(0, Number(o.padding) == null ? 16 : Number(o.padding))
+ *
+ * meaning "no padding given, use 16" — but `Number(undefined)` is `NaN`, and
+ * `NaN == null` is FALSE, so the default never fired. The padding came out
+ * `NaN`, the canvas was sized `NaN` and clamped to 0 × 0, and `toBlob` on a
+ * zero-size canvas hands back `null` rather than throwing. Every step reported
+ * success and the message blamed the browser for arithmetic done here.
+ *
+ * It shipped because nothing checked the ONE call the button actually makes:
+ * `toPng(svg, { scale: 2 })`, with no padding. Every check covered the parts
+ * that needed a DOM or the parts that took explicit arguments.
+ */
+
+check('THE DEFAULT PADDING IS A NUMBER — the NaN canvas', () => {
+  /* `{ scale: 2 }` and nothing else is exactly what Save PNG passes. */
+  const box = Charts.shotBox(900, 300, { scale: 2 });
+  assert.strictEqual(box.ok, true, `the button's own call is refused: ${box.why}`);
+  assert.strictEqual(box.pad, 16, `the padding default did not fire: ${box.pad}`);
+  assert.ok(Number.isFinite(box.width) && Number.isFinite(box.height),
+    `the canvas is ${box.width}×${box.height}`);
+  assert.strictEqual(box.width, 1864);
+  assert.strictEqual(box.height, 664);
+});
+
+check('AND WITH NO OPTIONS AT ALL, which is the other way in', () => {
+  const box = Charts.shotBox(900, 300);
+  assert.strictEqual(box.ok, true);
+  assert.strictEqual(box.pad, 16);
+  assert.strictEqual(box.scale, 2);
+  assert.ok(box.width > 0 && box.height > 0, `${box.width}×${box.height}`);
+});
+
+check('AN EXPLICIT ZERO PADDING IS HONOURED, not treated as absent', () => {
+  /* The bug's tempting one-character fix — `Number(o.padding) || 16` — passes
+     every check above and silently turns a deliberate 0 into 16. */
+  const box = Charts.shotBox(900, 300, { padding: 0 });
+  assert.strictEqual(box.pad, 0, 'an explicit 0 was overridden by the default');
+  assert.strictEqual(box.width, 1800);
+});
+
+check('AND RUBBISH PADDING FALLS BACK rather than producing a NaN canvas', () => {
+  for (const bad of [{ padding: 'wide' }, { padding: NaN }, { padding: Infinity }]) {
+    const box = Charts.shotBox(900, 300, bad);
+    assert.strictEqual(box.ok, true, `${JSON.stringify(bad)} was refused`);
+    assert.ok(Number.isFinite(box.width), `${JSON.stringify(bad)} gave width ${box.width}`);
+    assert.ok(box.width > 0, `${JSON.stringify(bad)} gave a ${box.width}px canvas`);
+  }
+  /* A NEGATIVE ONE IS CLAMPED, not subtracted — it would crop the chart. */
+  assert.strictEqual(Charts.shotBox(900, 300, { padding: -50 }).pad, 0);
+});
+
+check('A CHART WITH NO SIZE IS REFUSED BY NAME, not as "the browser failed"', () => {
+  /* The zero-size canvas is the case that produced the useless message. It is
+     now caught where the arithmetic is, and says what it measured. */
+  for (const [w, h] of [[0, 0], [0, 300], [900, 0], [NaN, 300]]) {
+    const box = Charts.shotBox(w, h, { scale: 2 });
+    assert.strictEqual(box.ok, false, `${w}×${h} was accepted`);
+    assert.match(box.why, /cannot be drawn|not something/i, `unhelpful reason: ${box.why}`);
+  }
+});
+
+check('AND A CHART SO LARGE THE CANVAS OVERFLOWS IS REFUSED TOO', () => {
+  /* The second guard, and the only thing that reaches it: a finite width that
+     is still large enough for `(w + pad) * scale` to come out Infinity. The
+     first guard passes it — 1e308 is a finite number — and without the second
+     one the canvas is sized Infinity, clamps to 0, and `toBlob` hands back the
+     null that started all this. */
+  const box = Charts.shotBox(1e308, 300, { scale: 4 });
+  assert.strictEqual(box.ok, false, 'a canvas that overflows to Infinity was accepted');
+  assert.match(box.why, /canvas/i, `the reason does not name what went wrong: ${box.why}`);
+  /* AND THE FIRST GUARD LETS IT THROUGH, which is what makes the second one
+     load-bearing rather than decorative. */
+  assert.ok(Number.isFinite(1e308), 'fixture check: this must pass the chart-size guard');
+});
+
+check('THE SCALE IS CLAMPED, so a wild one cannot ask for a canvas nothing will allocate', () => {
+  assert.strictEqual(Charts.shotBox(900, 300, { scale: 99 }).scale, 4);
+  assert.strictEqual(Charts.shotBox(900, 300, { scale: 0 }).scale, 2, 'zero should take the default');
+  assert.strictEqual(Charts.shotBox(900, 300, { scale: -3 }).scale, 1);
+  assert.strictEqual(Charts.shotBox(900, 300, { scale: 'big' }).scale, 2);
+});
+
+check('THE EXPORT IS EXPOSED AT ALL, because two callers now depend on it', () => {
+  assert.strictEqual(typeof Charts.toPng, 'function', 'Save PNG has nothing to call');
+  assert.strictEqual(typeof Charts.literal, 'function');
+});
+
+check('AND IT REFUSES SOMETHING THAT IS NOT A CHART rather than throwing past the handler', async () => {
+  /* The button hands over whatever `querySelector` found. A null there means
+     the page changed shape, and the click handler turns the rejection into a
+     message saying so — but only if this REJECTS. A synchronous throw from an
+     async function is still a rejection; a throw before the promise exists
+     would not be, and would reach the user as a dead button. */
+  await assert.rejects(() => Charts.toPng(null), /not a chart/i);
+  await assert.rejects(() => Charts.toPng({}), /not a chart/i);
+});
+
 /* ── run ───────────────────────────────────────────────────────────── */
 
 (async () => {

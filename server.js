@@ -480,11 +480,20 @@ async function sendReport(cfg, body = {}, { trigger = 'manual' } = {}) {
     return record(false, `The ${kind.label} report could not be built — ${err.message}`,
       { template: tpl.name, recipients: [...tpl.to, ...tpl.cc] });
   }
-  const composed = reportMail.compose(tpl, report, { from: mail.from, fromName: mail.fromName });
+  /* COMPOSED TWICE, AND THE FIRST ONE IS ONLY A QUESTION. The body decides
+     whether a chart is wanted, and that has to be known BEFORE Chrome is
+     launched — there is no point photographing a chart for a template that does
+     not mention one, and no point launching Chrome at all for a template that
+     wants neither the picture nor the PDF. The second compose, below, is the
+     one that produces the message. */
+  const draft = reportMail.compose(tpl, report, { from: mail.from, fromName: mail.fromName });
+  const wantsChart = draft.wantsChart;
 
   let attachment = null;
+  let chart = null;
+  let chartNote = '';
   let bytes = 0;
-  if (tpl.attachPdf) {
+  if (tpl.attachPdf || wantsChart) {
     try {
       /* THE PORT THE SERVER IS ACTUALLY ON, asked of the running server
          rather than read from config. Under the test harness the config says
@@ -509,29 +518,71 @@ async function sendReport(cfg, body = {}, { trigger = 'manual' } = {}) {
            the attachment is. */
         view: body.view || {},
       });
-      const out = await pdfRender.render(url, { landscape: tpl.landscape !== false });
-      attachment = {
-        filename: reportMail.pdfName(report, tpl),
-        content: fs.readFileSync(out.file),
-        contentType: 'application/pdf',
-      };
-      bytes = out.bytes;
-      try { fs.rmSync(path.dirname(out.file), { recursive: true, force: true }); } catch { /* temp */ }
+      /* ONE CHROME, BOTH PICTURES. The chart is photographed from the same page
+         load that is printed, so the body and the attachment cannot disagree
+         about a sprint that closed between two renders — and a send that wants
+         both costs one launch rather than two. */
+      const out = await pdfRender.render(url, {
+        landscape: tpl.landscape !== false,
+        pdf: !!tpl.attachPdf,
+        capture: wantsChart ? pdfRender.BACKLOG_CHART : null,
+      });
+      if (tpl.attachPdf) {
+        attachment = {
+          filename: reportMail.pdfName(report, tpl),
+          content: fs.readFileSync(out.file),
+          contentType: 'application/pdf',
+        };
+        bytes = out.bytes;
+        try { fs.rmSync(path.dirname(out.file), { recursive: true, force: true }); } catch { /* temp */ }
+      }
+      /* THE CHART FAILS SOFT, AND THE PDF DOES NOT. They are not the same kind
+         of promise: he asked for a report with a document attached, and one
+         arriving without it is something he would have to apologise for. The
+         chart is a garnish on the covering note — a backlog that has never been
+         backfilled has no chart to photograph, and refusing to send the whole
+         report over that would be the tool holding his Monday hostage. So the
+         reason is carried back to him instead. */
+      if (wantsChart) {
+        const shot = out.capture;
+        if (shot && shot.ok) {
+          chart = { cid: reportMail.CHART_CID, filename: 'backlog-chart.png', content: shot.png, contentType: 'image/png' };
+        } else {
+          chartNote = ` The Backlog chart is not in it — ${(shot && shot.reason) || 'the page did not offer one'}.`;
+        }
+      }
     } catch (err) {
       /* REFUSED RATHER THAN SENT WITHOUT IT. He asked for a report with the
          PDF attached; a mail arriving with the words and no document is not a
          smaller version of that, it is a thing he would have to apologise
          for. */
-      return record(false, `The PDF could not be rendered, so nothing was sent — ${err.message}`,
-        { template: tpl.name, subject: composed.subject, recipients: [...tpl.to, ...tpl.cc] });
+      if (tpl.attachPdf) {
+        return record(false, `The PDF could not be rendered, so nothing was sent — ${err.message}`,
+          { template: tpl.name, subject: draft.subject, recipients: [...tpl.to, ...tpl.cc] });
+      }
+      /* NO PDF ASKED FOR, so Chrome was launched for the picture alone and the
+         picture alone is what is lost. */
+      chartNote = ` The Backlog chart is not in it — ${err.message}`;
     }
   }
+
+  /* THE REAL ONE, now that it is known whether there is a picture to refer to.
+     A body that says `{{chart}}` and got no image must not go out with an
+     `<img>` pointing at a part that is not there. */
+  const composed = reportMail.compose(tpl, report, {
+    from: mail.from, fromName: mail.fromName, chart,
+  });
 
   let msg;
   try {
     msg = mimeLib.build({
       from: composed.from, to: composed.to, cc: composed.cc,
       subject: composed.subject, text: composed.text,
+      /* `composed.html` IS NULL UNLESS THERE IS A PICTURE IN IT, and `build`
+         falls back to its own rendering of the text — so a template with no
+         chart produces exactly the message it did before this feature. */
+      html: composed.html || null,
+      inline: chart ? [chart] : [],
       attachments: attachment ? [attachment] : [],
     });
   } catch (err) {
@@ -540,10 +591,13 @@ async function sendReport(cfg, body = {}, { trigger = 'manual' } = {}) {
 
   try {
     const sent = await smtp.send(mail, { ...msg, from: mimeLib.bare(mail.from) });
-    store.audit('mail.sent', { template: tpl.name, to: msg.to.length, trigger });
-    return record(true, sent.response, {
+    store.audit('mail.sent', { template: tpl.name, to: msg.to.length, trigger, chart: !!chart });
+    /* A SUCCESS THAT SAYS WHAT IS MISSING FROM IT. The mail went; the chart it
+       asked for did not make it. Reported on the SUCCESS rather than swallowed,
+       because the alternative is him finding out from the client. */
+    return record(true, `${sent.response}${chartNote}`, {
       template: tpl.name, subject: composed.subject,
-      recipients: [...msg.to, ...msg.cc], bytes,
+      recipients: [...msg.to, ...msg.cc], bytes, chart: !!chart,
     });
   } catch (err) {
     return record(false, err.message, {

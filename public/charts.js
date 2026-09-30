@@ -7,6 +7,9 @@ const Charts = (() => {
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const AXIS = 'var(--app-fg-3)';
   const GRID = 'var(--app-line-soft)';
+  /* A chart's own title is not axis furniture — it is the strongest thing in
+     the picture, and the muted grey the axes use would make it the weakest. */
+  const INK = 'var(--app-fg)';
 
   /* width:100% + height:auto, NOT a fixed height attribute: a fixed height makes
      the viewBox letterbox and centre itself inside a wider card, which reads as
@@ -312,12 +315,37 @@ const Charts = (() => {
    * mouse-only numbers — makes the data unreachable rather than merely tedious,
    * and a chart is a region a keyboard user can tab past in one go.
    */
-  function stacked(periods, series, { height = 300, unit = 'items', drill = false } = {}) {
+  function stacked(periods, series, {
+    height = 300, unit = 'items', drill = false, title = '', subtitle = '', legend = false,
+  } = {}) {
     const data = (periods || []).filter(Boolean);
     const keys = (series || []).filter(s => s && s.key);
     if (!data.length || !keys.length) return '';
 
-    const W = 900, H = height, padL = 42, padR = 14, padT = 16, padB = 44;
+    /* ── THE TITLE AND THE KEY LIVE INSIDE THE SVG ──────────────────────
+     *
+     * They used to be siblings of it: an `<h3>` in the section head and a
+     * `.mixkey` div under the card. On screen that is fine — the surrounding
+     * page supplies the context. The moment the chart LEAVES the page it is
+     * not: the emailed report carried a photograph of the bars alone, four
+     * colours with no key and nothing saying what the picture was of.
+     *
+     * Drawing them into the SVG fixes both exits at once and for free. The
+     * server-side capture clips one element and gets the whole figure; the Save
+     * PNG button serializes the same SVG and gets it too. A caption bolted on
+     * beside the chart would have had to be built twice, once per path, and the
+     * two would have drifted.
+     *
+     * THE CANVAS GROWS TO FIT THEM rather than the plot shrinking into the same
+     * 300px: a chart that gets shorter every time you give it a longer title is
+     * one nobody trusts to be to scale.
+     */
+    const titleH = title ? 30 : 0;
+    const subH = subtitle ? 15 : 0;
+    const legendH = legend ? 26 : 0;
+
+    const W = 900, H = height + titleH + subH + legendH;
+    const padL = 42, padR = 14, padT = 16 + titleH + subH, padB = 44 + legendH;
     const iw = W - padL - padR, ih = H - padT - padB;
     const max = nice(Math.max(1, ...data.map(p => p.total || 0)));
     const step = iw / data.length;
@@ -325,6 +353,12 @@ const Charts = (() => {
     const y = (v) => padT + ih - (v / max) * ih;
 
     let body = '';
+    if (title) {
+      body += `<text x="${padL - 4}" y="20" font-size="15" font-weight="700" fill="${INK}">${esc(title)}</text>`;
+    }
+    if (subtitle) {
+      body += `<text x="${padL - 4}" y="${20 + (title ? 15 : 0)}" font-size="10.5" fill="${AXIS}">${esc(subtitle)}</text>`;
+    }
     for (let g = 0; g <= 4; g++) {
       const v = max * g / 4, yy = y(v);
       body += `<line x1="${padL}" x2="${W - padR}" y1="${yy}" y2="${yy}" stroke="${GRID}"/>`;
@@ -373,17 +407,263 @@ const Charts = (() => {
           + ` fill="${AXIS}">${acc}</text></g>`;
       }
       // Every other label once the bars get tight, so they never overlap.
+      // Measured up from the axis, NOT from the bottom of the canvas — the key
+      // sits below them and a label pinned to `H` would be drawn through it.
       const skip = step < 34 && i % 2 === 1;
       if (!skip) {
-        body += `<text x="${cx}" y="${H - 26}" text-anchor="middle" font-size="9.5" fill="${AXIS}">${esc(p.label)}</text>`;
+        body += `<text x="${cx}" y="${H - legendH - 26}" text-anchor="middle" font-size="9.5" fill="${AXIS}">${esc(p.label)}</text>`;
       }
       if (p.partial) {
-        body += `<text x="${cx}" y="${H - 15}" text-anchor="middle" font-size="8" fill="${AXIS}" opacity=".75">so far</text>`;
+        body += `<text x="${cx}" y="${H - legendH - 15}" text-anchor="middle" font-size="8" fill="${AXIS}" opacity=".75">so far</text>`;
       }
     });
+
+    /* THE KEY, LAID OUT BY MEASUREMENT RATHER THAN BY FLEXBOX. An SVG has no
+       layout engine, so each entry is placed at a running x and the label's
+       width is estimated from its character count. It is an estimate, and the
+       cost of it being wrong is a gap that is slightly too wide — which is why
+       the entries are laid out left to right at a generous pitch rather than
+       justified across the full width, where one bad guess would overlap two
+       labels. */
+    if (legend) {
+      const yy = H - 8;
+      let lx = padL - 4;
+      for (const s of keys) {
+        body += `<rect x="${lx}" y="${yy - 8}" width="9" height="9" rx="2" fill="${s.color}"/>`;
+        body += `<text x="${lx + 14}" y="${yy}" font-size="10.5" fill="${AXIS}">${esc(s.label)}</text>`;
+        lx += 14 + String(s.label || '').length * 5.9 + 24;
+      }
+    }
 
     return frame(W, H, body);
   }
 
-  return { velocity, burndown, supplyDemand, ranked, spark, load, trend, stacked };
+  /* ── A CHART AS A PNG ───────────────────────────────────────────────────
+   *
+   * These charts are hand-rolled SVG whose every colour is a CSS custom
+   * property — `var(--cov-automated)`, `var(--app-fg-3)`. That is what makes
+   * them theme-correctly on screen and what makes them WORTHLESS the moment
+   * they leave the page: serialize one as it stands and every `var()` resolves
+   * against nothing, so the PNG comes out black-on-transparent, or blank.
+   *
+   * So the colours are read off the LIVE nodes with `getComputedStyle`, which
+   * has the cascade to resolve them, and written onto the clone as literals.
+   * The clone is what gets serialized; the original on the page is untouched.
+   *
+   * AND A BACKGROUND, because a transparent PNG dropped into an email body
+   * lands on whatever the client's reading pane is — which for half of them is
+   * dark, and a chart drawn in dark-theme text on a dark background is a
+   * rectangle. The card's own background travels with it.
+   */
+  const PAINT = ['fill', 'stroke', 'stop-color', 'color'];
+  const NUMS = ['opacity', 'fill-opacity', 'stroke-opacity', 'stroke-width',
+    'font-size', 'font-weight', 'font-family', 'text-anchor', 'dominant-baseline'];
+
+  /** `var(--x)` / `var(--x, fallback)`, resolved against the document root. */
+  function literal(value, root) {
+    let v = String(value == null ? '' : value).trim();
+    if (!v || !v.includes('var(')) return v;
+    /* Up to a few levels, because a token defined as another token is normal in
+       this stylesheet — and bounded, because a token that refers to itself is a
+       stylesheet bug that must not become a hung tab. */
+    for (let i = 0; i < 6 && v.includes('var('); i++) {
+      v = v.replace(/var\(\s*(--[\w-]+)\s*(?:,([^()]*))?\)/g, (_, name, fallback) =>
+        (root.getPropertyValue(name) || '').trim() || (fallback || '').trim());
+    }
+    return v.includes('var(') ? '' : v;
+  }
+
+  /**
+   * HOW BIG THE CANVAS IS, as a pure function so it can be checked.
+   *
+   * THIS EXISTS BECAUSE OF A PRECEDENCE BUG THAT SHIPPED. The padding was
+   * `Math.max(0, Number(o.padding) == null ? 16 : Number(o.padding))` —
+   * intending "no padding given, use 16". But `Number(undefined)` is `NaN` and
+   * `NaN == null` is FALSE, so the default never fired, the padding came out
+   * `NaN`, the canvas was sized `NaN` → clamped to 0 × 0, and `toBlob` on a
+   * zero-size canvas hands back `null` instead of throwing. Every step of the
+   * export reported success and the button said the browser had failed.
+   *
+   * Pulled out here because the whole of it is arithmetic on three numbers, and
+   * arithmetic that decides whether a feature works at all should be checkable
+   * without a browser in the room.
+   */
+  function shotBox(w, h, o = {}) {
+    const scale = Math.max(1, Math.min(4, Number(o.scale) || 2));
+    /* THE NULLISH TEST IS ON THE INPUT, not on `Number()` of it. */
+    const asked = o.padding == null ? 16 : Number(o.padding);
+    const pad = Number.isFinite(asked) ? Math.max(0, asked) : 16;
+    /* THE CHART'S OWN SIZE IS CHECKED, NOT THE CANVAS'S. Padding alone gives a
+       zero-width chart a 64px canvas that allocates fine and encodes fine — a
+       perfectly valid PNG of nothing, which is the failure this whole guard
+       exists to prevent, wearing a disguise. */
+    if (!Number.isFinite(w) || !Number.isFinite(h) || w < 1 || h < 1) {
+      return { ok: false, why: `The chart measured ${w}×${h}, which is not something that can be drawn.` };
+    }
+    const width = Math.round((w + pad * 2) * scale);
+    const height = Math.round((h + pad * 2) * scale);
+    if (!Number.isFinite(width) || !Number.isFinite(height) || width < 1 || height < 1) {
+      return { ok: false, why: `That would need a ${width}×${height} canvas, which cannot be drawn.` };
+    }
+    return { ok: true, scale, pad, width, height };
+  }
+
+  /** What is actually painted behind the chart, from the nearest ancestor that
+      paints anything. `rgba(0, 0, 0, 0)` is "not painted here" and keeps
+      walking, which is what makes this different from reading one element. */
+  function paintedBackground(el) {
+    for (let n = el && el.parentElement; n; n = n.parentElement) {
+      const c = getComputedStyle(n).backgroundColor;
+      if (c && c !== 'transparent' && !/^rgba\(\s*0,\s*0,\s*0,\s*0\s*\)$/.test(c)) return c;
+    }
+    return '';
+  }
+
+  /**
+   * READ THE PAGE AS IF IT WERE IN LIGHT THEME.
+   *
+   * A chart that leaves the tool is going somewhere this app does not control:
+   * an email body, a deck, a document. Those are overwhelmingly light, and a
+   * dark-theme chart dropped into one arrives as a black slab with a hole
+   * punched in the page around it.
+   *
+   * NO FLASH, AND NOT A TRICK. The theme lives in one attribute on `<html>`,
+   * and every token in the stylesheet keys off it. Flipping it, taking every
+   * measurement, and flipping it back all happen inside ONE task — and a
+   * browser paints between tasks, never inside one. `getComputedStyle` forces a
+   * style recalculation, which is synchronous and invisible; nothing reaches
+   * the screen. The `finally` is what makes that a promise rather than a hope:
+   * a throw in the middle must not leave him in the wrong theme.
+   *
+   * Tried and rejected: cloning into an offscreen container tagged
+   * `data-theme="light"`. Custom properties INHERIT, the dark values are
+   * declared on `<html>`, and there is no `[data-theme="light"]` block to
+   * override them with — light is simply the absence of dark. A nested
+   * container would have inherited every dark token and reported success.
+   */
+  function inLightTheme(fn) {
+    const el = document.documentElement;
+    const was = el.getAttribute('data-theme');
+    if (was !== 'dark') return fn();
+    el.setAttribute('data-theme', 'light');
+    try {
+      return fn();
+    } finally {
+      el.setAttribute('data-theme', was);
+    }
+  }
+
+  /**
+   * @param {SVGElement} svg   the chart on the page — NOT modified
+   * @param {object} o         { scale, background, padding }
+   * @returns {Promise<Blob>}  an image/png blob
+   */
+  function toPng(svg, o = {}) {
+    if (!svg || !svg.viewBox) return Promise.reject(new Error('That is not a chart.'));
+    const box = svg.viewBox.baseVal;
+    const w = box.width || svg.clientWidth || 900;
+    const h = box.height || svg.clientHeight || 300;
+    const shot = shotBox(w, h, o);
+    /* A CANVAS THAT IS NOT A RECTANGLE IS THE ONE FAILURE THAT LOOKS LIKE
+       NOTHING. `toBlob` on a 0×0 canvas hands back `null` rather than throwing,
+       so the whole thing arrives as "the browser could not turn the chart into
+       an image" — a sentence that blames the browser for arithmetic done here.
+       Checked where the arithmetic happens, and named. */
+    if (!shot.ok) return Promise.reject(new Error(shot.why));
+
+    const clone = svg.cloneNode(true);
+    const live = [svg, ...svg.querySelectorAll('*')];
+    const copy = [clone, ...clone.querySelectorAll('*')];
+
+    /* EVERY MEASUREMENT IN ONE PASS, AND IN ONE THEME. The colours and the
+       background have to come from the same reading of the page — taking the
+       fills in light theme and the background in dark is how a chart ends up
+       legible in neither. */
+    const bg = inLightTheme(() => {
+      const root = getComputedStyle(document.documentElement);
+      for (let i = 0; i < live.length && i < copy.length; i++) {
+        const cs = getComputedStyle(live[i]);
+        for (const prop of PAINT) {
+          const v = literal(cs.getPropertyValue(prop), root);
+          /* `none` is meaningful and is kept. An empty answer is not — writing
+             it would override the element's own attribute with nothing. */
+          if (v) copy[i].setAttribute(prop, v);
+        }
+        for (const prop of NUMS) {
+          const v = String(cs.getPropertyValue(prop) || '').trim();
+          if (v) copy[i].setAttribute(prop, v);
+        }
+      }
+      /* THE BACKGROUND IS ASKED OF THE CARD, NOT OF A TOKEN NAME.
+         This read `var(--app-card)`, which does not exist — the token is
+         `--app-surface` — so it silently fell through to white. In dark theme
+         that was a chart of pale grey text and white bar labels on a white
+         background: an unreadable PNG that every step of the export called a
+         success. The element knows what is painted behind it; a name typed here
+         is a second copy of that fact, and that is what the second copy being
+         wrong looks like. */
+      return literal(o.background, root)
+        || paintedBackground(svg)
+        || literal('var(--app-surface)', root)
+        || '#FFFFFF';
+    });
+
+    /* THE TOOLTIPS GO. `<title>` is the hover text on screen and, in a
+       standalone SVG, it is the document's accessible name — so a serialized
+       chart would announce itself as "Sep — Automated: 12 automated". */
+    for (const t of copy.slice(1)) { if (t.tagName === 'title') t.remove(); }
+    /* AND THE DRILL HOOKS, which are dead weight in an image and would make the
+       PNG's markup claim to be a row of buttons. */
+    for (const el of clone.querySelectorAll('[data-act]')) {
+      for (const a of ['data-act', 'data-period', 'data-bucket', 'role', 'tabindex', 'class', 'aria-label']) {
+        el.removeAttribute(a);
+      }
+    }
+    clone.setAttribute('xmlns', NS);
+    clone.setAttribute('width', String(w));
+    clone.setAttribute('height', String(h));
+    clone.removeAttribute('style');
+
+    const src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(
+      `<?xml version="1.0" encoding="UTF-8"?>${new XMLSerializer().serializeToString(clone)}`)}`;
+
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      /* NO `crossOrigin`, and nothing external in the markup, so the canvas is
+         never tainted and `toBlob` cannot throw a security error. */
+      img.onload = () => {
+        try {
+          const cv = document.createElement('canvas');
+          cv.width = shot.width;
+          cv.height = shot.height;
+          /* AND CHECKED AFTER SETTING. A canvas silently clamps a size it will
+             not allocate, so the one number that decides whether `toBlob` can
+             work is read back from the canvas rather than assumed. */
+          if (cv.width !== shot.width || cv.height !== shot.height) {
+            reject(new Error(`The browser would not make a ${shot.width}×${shot.height} canvas`
+              + ` — it gave ${cv.width}×${cv.height}. Try saving at a smaller scale.`));
+            return;
+          }
+          const ctx = cv.getContext('2d');
+          if (!ctx) { reject(new Error('This browser has no 2D canvas to draw the chart on.')); return; }
+          ctx.fillStyle = bg;
+          ctx.fillRect(0, 0, cv.width, cv.height);
+          ctx.drawImage(img, shot.pad * shot.scale, shot.pad * shot.scale, w * shot.scale, h * shot.scale);
+          cv.toBlob((blob) => (blob && blob.size
+            ? resolve(blob)
+            : reject(new Error(`The browser returned no image for a ${cv.width}×${cv.height} canvas.`))), 'image/png');
+        } catch (err) {
+          /* A THROW IN HERE IS NOT A REJECTION. `drawImage` and `toBlob` both
+             throw on a tainted canvas, and a throw inside an event handler
+             escapes the promise entirely — leaving the button spinning on a
+             promise that never settles, which is worse than any message. */
+          reject(new Error(`The chart could not be drawn — ${err.name}: ${err.message}`));
+        }
+      };
+      img.onerror = () => reject(new Error('The chart could not be drawn as an image.'));
+      img.src = src;
+    });
+  }
+
+  return { velocity, burndown, supplyDemand, ranked, spark, load, trend, stacked, toPng, literal, shotBox, inLightTheme };
 })();

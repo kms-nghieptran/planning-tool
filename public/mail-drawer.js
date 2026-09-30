@@ -380,6 +380,18 @@ const MailDrawer = (() => {
           <div style="font-size:13.5px;font-weight:600;margin-bottom:8px">${UI.esc(p.subject)}</div>
           <div style="font-size:13px;line-height:1.6;white-space:pre-wrap">${UI.esc(p.text)}</div>
           <div class="muted" style="font-size:12px;margin-top:10px">📎 ${UI.esc(p.attachmentName)}</div>
+          ${/* THE PREVIEW SHOWS THE PLAIN-TEXT HALF, which is the one half the
+                chart cannot be in — so the substitute line sits in the body
+                above and looks, without this, like what the client is going to
+                get. The picture is taken at send time by the same Chrome that
+                prints the PDF, so there is nothing to show here yet, and saying
+                so is better than a preview that quietly understates the mail. */''}
+          ${p.wantsChart ? `<div class="tag" style="margin-top:8px">The Backlog chart goes where
+            <code>{{chart}}</code> is — a picture for anyone reading the HTML version, the line above for
+            anyone reading plain text. It is photographed when the mail is sent.</div>` : ''}
+          ${(p.misplaced || []).length ? `<div class="tag risk" style="margin-top:8px">A subject line is text, so
+            ${p.misplaced.map(u => `{{${UI.esc(u)}}}`).join(', ')} cannot go in it — it is dropped from the
+            subject. Put it in the body instead.</div>` : ''}
           ${(p.warnings || []).map(w => `<div class="tag warn" style="margin-top:8px">${UI.esc(w)}</div>`).join('')}
           ${(p.unknown || []).length ? `<div class="tag risk" style="margin-top:8px">Nothing will replace ${p.unknown.map(u => `{{${UI.esc(u)}}}`).join(', ')}</div>` : ''}
         </div>` : `

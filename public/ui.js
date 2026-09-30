@@ -850,6 +850,7 @@ const UI = (() => {
         ${(r.components || []).length ? `<div class="muted" style="font-size:11.5px;margin-top:3px">${esc(r.components.join(', '))}</div>` : ''}
         ${blockedNote(r)}
         ${retiredNote(r)}
+        ${outsideNote(r)}
         ${why(r.key)}
       </div>`;
 
@@ -887,6 +888,27 @@ const UI = (() => {
       return `<div class="drill-blocked">
         <span class="lbl">Retired</span>
         <span class="muted">labelled ${esc(found.join(', '))} in Jira — it is not work in progress</span>
+      </div>`;
+    };
+
+    /* WHY A ROW IS OUTSIDE THE BACKLOG COLUMNS, when the drawer is the one
+       listing them. Read from `outsideReason`, which the model decided where it
+       counted the epic, rather than re-derived here from a status and a label —
+       the drawer and the tag have to agree about every row, and two
+       implementations of "is this retired" is exactly how they stop agreeing.
+       `obsoleted` is deliberately silent: `retiredNote` above already says it,
+       with the labels, and two notes saying the same thing on one row is worse
+       than one. */
+    const OUTSIDE_NOTE = {
+      none: ['No Automation Status', 'the field is empty in Jira, so this suite is in no queue and no report — it needs triaging'],
+      na: ['N/A for automation', 'marked not applicable, so it is deliberately outside the automation ratio'],
+    };
+    const outsideNote = (r) => {
+      const said = OUTSIDE_NOTE[r.outsideReason];
+      if (!said) return '';
+      return `<div class="drill-blocked">
+        <span class="lbl">${esc(said[0])}</span>
+        <span class="muted">${esc(said[1])}</span>
       </div>`;
     };
 
@@ -1820,10 +1842,47 @@ const UI = (() => {
     if (added) added.length = 0;
   }
 
+  /**
+   * THE NAME ON A FILE THAT LEAVES THE TOOL.
+   *
+   * Lifted out of `exportPdf` when a second caller needed it. The PDF's name is
+   * the document title and a saved PNG's is a download attribute, but it is the
+   * same string doing the same job — it lands in a Downloads folder beside
+   * forty other things and gets found again by searching for whatever it was
+   * called. Two copies of this rule is how one export starts allowing a colon
+   * that the other strips, on the one OS that then refuses to save the file.
+   */
+  const slugPart = (v) => String(v == null ? '' : v).trim().replace(/[\\/:*?"<>|]+/g, '-');
+  const fileName = (parts, ext = '') => {
+    const name = (Array.isArray(parts) ? parts : [parts]).map(slugPart).filter(Boolean).join(' — ');
+    return ext ? `${name || 'export'}.${ext}` : name;
+  };
+
+  /**
+   * HAND A BLOB TO THE BROWSER AS A DOWNLOAD.
+   *
+   * The object URL is revoked on the next tick rather than immediately: some
+   * browsers have not finished reading it when `click()` returns, and revoking
+   * too early produces a download that fails with no message at all — which
+   * looks exactly like a button that does nothing.
+   */
+  function saveBlob(blob, name) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => {
+      if (a.parentNode) a.parentNode.removeChild(a);
+      URL.revokeObjectURL(url);
+    }, 0);
+  }
+
   function exportPdf(title, opts = {}) {
     const was = document.title;
-    const slug = (v) => String(v == null ? '' : v).trim().replace(/[\\/:*?"<>|]+/g, '-');
-    const name = (Array.isArray(title) ? title : [title]).map(slug).filter(Boolean).join(' — ');
+    const name = fileName(title);
     if (name) document.title = name;
 
     /* Marked on the node itself as well as on the body, because the rule has
@@ -1997,5 +2056,5 @@ const UI = (() => {
     itemsTable, wireItemEdits, filterItems, wireItemsFilter, ITEM_UNASSIGNED: UNASSIGNED, componentLink, dueState,
     epicCell, byStatusThenPoints, statusText, statusStage, drillNumber, drillDrawer, dueCell, dueSort,
     inRefinement, epicBlockerIcon, epicBlockersDrawer, testCasesDrawer,
-    tagList, wireTagList, splitKeywords, exportPdf, printNotes, unprintNotes, priorityTag, prioritySort, PRIORITY_UNSET_SORT, busy };
+    tagList, wireTagList, splitKeywords, exportPdf, fileName, saveBlob, printNotes, unprintNotes, priorityTag, prioritySort, PRIORITY_UNSET_SORT, busy };
 })();

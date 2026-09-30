@@ -516,6 +516,34 @@ const CapacityView = (() => {
       aria-label="${UI.esc(`Show the ${n} retired ${label} ${n === 1 ? 'suite' : 'suites'} in ${r.component}`)}">!</button>`;
   }
 
+  /**
+   * WHAT THE THREE COLUMNS DO NOT COUNT — NOT DRAWN ON THE ROW.
+   *
+   * `coverage.BUCKETS` has seven buckets; this table draws three, plus the
+   * planned pair. Automated is the fourth and nobody misses it — this is a
+   * backlog table. The other three go missing silently: an epic that is N/A for
+   * automation, retired with an `obsolete` label, or with no Automation Status
+   * set at all is indistinguishable from backlog in Jira and appears in no
+   * column here. PS_Evolve_RN is the case that found it: 94 epics, 40 of them
+   * retired, and the row read "27 in backlog" with nothing saying where the
+   * rest went.
+   *
+   * IT WAS A TAG ON THE ROW NAME AND HE ASKED FOR IT OFF. On his board 28 of
+   * 128 components carry leftovers, so the column of names grew a second pill
+   * on a quarter of its rows — and the thing that column is for is reading
+   * component names down the page.
+   *
+   * THE FIGURE STAYS ON THE SCOPE LINE, where one number qualifies the backlog
+   * total beside it rather than 28 of them interrupting the names. That is
+   * where the original complaint is actually answered: a backlog figure with
+   * 549 epics missing from behind it, and nothing anywhere saying so, is the
+   * number somebody checks against Jira once and then stops believing.
+   *
+   * The model still counts them and `out-all` still lists them, so turning the
+   * per-row tag back on is this function and one call below.
+   */
+  function outsideTag() { return ''; }
+
   function byComponentRow(r, tools, buckets, planned) {
     // Every key the row counted, both halves, for the component name itself.
     // The NAME still goes to Jira: it is the whole suite, which is a search
@@ -535,6 +563,7 @@ const CapacityView = (() => {
                 open the list, and a third way in would be a third chance for
                 the number and the list to disagree. */''}
           ${r.stuck ? `<span class="tag risk" title="${UI.esc(`${r.stuck} ${r.stuck === 1 ? 'item' : 'items'} planned against this component cannot be started — in Refinement, or marked Blocked for automation`)}">${r.stuck} blocked</span>` : ''}
+          ${outsideTag(r)}
         </td>
         <td class="prio-cell"><span class="tag prio-tag prio-${UI.esc(r.priorityKey)}"
           title="${UI.esc(`${r.priorityLabel} — ${r.priorityName}`)}">${UI.esc(r.priorityLabel)}</span></td>
@@ -683,6 +712,24 @@ const CapacityView = (() => {
      the button still says: they can differ if the table was redrawn while the
      drawer was opening, and saying so is better than showing a heading that
      quietly disagrees with the page behind it. */
+  /* THE THREE REASONS, IN WORDS, and only the ones that are actually there —
+     "0 N/A" in a sentence is noise, and the reader has to count it before
+     discarding it. The labels are the Coverage screen's own, so a pile called
+     Obsoleted there is not called something else here. */
+  const OUTSIDE_WORDS = {
+    obsoleted: 'retired (labelled obsolete)',
+    none: 'no Automation Status set',
+    na: 'N/A for automation',
+  };
+  function outsideSplit(by) {
+    const parts = Object.keys(OUTSIDE_WORDS)
+      .filter(k => Number((by || {})[k]) > 0)
+      .map(k => `${UI.int(by[k])} ${OUTSIDE_WORDS[k]}`);
+    if (!parts.length) return 'none';
+    if (parts.length === 1) return parts[0];
+    return `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`;
+  }
+
   async function openByComponentCell(state, ds, shown) {
     const qs = [
       `team=${encodeURIComponent(state.teamId)}`,
@@ -698,7 +745,15 @@ const CapacityView = (() => {
       /* THE DRAWER SAYS WHICH POPULATION IT IS LISTING. The two halves are
          counted over different scopes, and a drawer that explained them the
          same way would make the backlog's extra rows look like a bug. */
-      const what = r.flagged
+      const what = r.outside
+        /* IT SAYS WHY THE COLUMNS DO NOT ADD UP, and gives the split, because
+           "retired" and "nobody set the field" are two different jobs for two
+           different people and a single total hides which one this is. */
+        ? `Epics on this component that none of the three backlog columns counts, across`
+          + ` ${UI.esc(((r.scopes || {}).backlog || {}).label || 'all teams')}: ${outsideSplit(r.outsideBy)}.`
+          + ' They look like backlog in Jira, which is why they are called out here rather than dropped.'
+          + ' The reason is on each row.'
+        : r.flagged
         /* A SUBSET, AND IT SAYS SO. Two rows under a column reading 425 has to
            explain itself immediately or it reads as the column being wrong. */
         ? `Of the ${UI.esc(String(r.label).split('·').pop().replace(/ — retired$/, '').trim())} queue`
@@ -746,6 +801,13 @@ const CapacityView = (() => {
              as a portfolio 25. -->
         <span>${UI.int(t.backlog || 0)} in backlog
           <strong>${UI.esc((s(d).backlog || {}).label || 'all teams')}</strong></span>
+        <!-- AND WHAT THE THREE COLUMNS DO NOT COUNT, on the same line as the
+             number it qualifies. A backlog figure with 589 epics missing from
+             behind it is the kind of number somebody checks once against Jira
+             and then stops believing. The per-component breakdown is the tag on
+             each row; this is so the size of the pile is visible without
+             hunting for it. -->
+        ${(t.out || 0) ? `<span title="${UI.esc(`Epics on ranked components that none of the three backlog columns counts — ${outsideSplit(t.outside)}. Each row's own share is the tag beside its name.`)}">· ${UI.int(t.out)} outside it</span>` : ''}
         <span>· ${UI.int(t.planned || 0)} planned by
           <strong>${UI.esc((s(d).planned || {}).label || 'this team')}</strong>
           in ${UI.esc(name || 'this sprint')}</span>

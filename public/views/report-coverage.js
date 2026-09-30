@@ -150,6 +150,12 @@ const CoverageReport = (() => {
       ${attentionSection(d)}
     `;
 
+    /* REGISTERED ON EVERY RENDER, because the hook closes over THIS render's
+       data. A chart captured after he narrows to two components must be that
+       chart — a hook registered once at boot would photograph the window and
+       scope the page had when it first loaded. */
+    registerShot(d, backlog);
+
     mount.addEventListener('click', async (e) => {
       const w = e.target.closest('[data-days]');
       if (w) { e.preventDefault(); days = Number(w.dataset.days) || 180; App.refresh(); return; }
@@ -182,6 +188,18 @@ const CoverageReport = (() => {
             ? `Scoped to ${d.selected.join(' + ')}`
             : 'All components',
         });
+        return;
+      }
+
+      /* SAVE PNG comes BEFORE the drill handler below, because the button sits
+         inside the same section and `[data-act="backlog"]` would not match it —
+         but `backlog-png` starts with `backlog`, and a future `closest` written
+         with a prefix match would silently open a drawer instead. Ordered so
+         the specific one wins whatever the selector becomes. */
+      const png = e.target.closest('[data-act="backlog-png"]');
+      if (png) {
+        e.preventDefault();
+        await saveBacklogPng(png, d, backlog);
         return;
       }
 
@@ -743,14 +761,124 @@ const CoverageReport = (() => {
       + (b.clamped ? ' There is more history than fits — the oldest is off the left edge.' : '');
   }
 
+  /**
+   * ── THE CHART AS IT LEAVES THE TOOL ──────────────────────────────────────
+   *
+   * A CAPTION IS A PROPERTY OF THE EXPORT, NOT OF THE CHART. On the page the
+   * chart needs neither title nor key: the section heading says "Backlog" two
+   * lines above it and the row underneath names every colour. Drawing them into
+   * the SVG as well put three statements of the same thing in one card, which
+   * is why the first version of this made the page worse.
+   *
+   * The moment the chart leaves that card it has none of it. The email carried
+   * a photograph of four coloured bands with no key and no caption. So the
+   * caption is added HERE, on the way out, and both exits come through this one
+   * function: the Save PNG button calls it directly, and the headless Chrome
+   * that captures the emailed chart calls it through `window.ptChartShot`.
+   *
+   * One builder, so the file he downloads and the picture his client receives
+   * cannot end up captioned differently.
+   *
+   * THE SUBTITLE IS THE SCOPE, which the page states above the card and the
+   * picture cannot. A chart captioned only "Backlog Movement" is one a client
+   * can read as the whole portfolio when it is two components and one quarter.
+   */
+  function backlogShotSvg(d, b) {
+    if (!b || !b.periods || !b.periods.length) return '';
+    const series = (b.buckets || []).map(x => ({ ...x, ...(BACKLOG_COLORS[x.key] || { color: 'var(--app-fg-3)' }) }));
+    const first = b.periods[0];
+    const last = b.periods[b.periods.length - 1];
+    const scope = (b.components && b.components.length) ? b.components.join(', ') : 'all components';
+    return Charts.stacked(b.periods, series, {
+      /* NO `drill`. The hooks are a page affordance — a picture cannot be
+         clicked, and carrying `role="button"` into a PNG makes its markup claim
+         to be a row of controls. */
+      unit: 'automated',
+      title: 'Backlog Movement',
+      subtitle: `${first.label} – ${last.label} · ${scope}`,
+      legend: true,
+    });
+  }
+
+  /* THE SEAM THE RENDERER USES. `pdf-render.js` photographs one element of this
+     page, and the element on the page is deliberately the bare chart — so the
+     renderer asks the page to draw the export version first. A hook the PAGE
+     owns, rather than the renderer knowing how a chart is built: the two live
+     in different processes and only one of them should have an opinion about
+     what a Backlog chart looks like. */
+  function registerShot(d, b) {
+    if (typeof window === 'undefined') return;
+    window.ptChartShot = window.ptChartShot || {};
+    window.ptChartShot.backlog = () => backlogShotSvg(d, b);
+  }
+
+  /**
+   * THE CHART, SAVED.
+   *
+   * Named after what it is a picture of, because this is a file that leaves the
+   * tool: it lands in a Downloads folder beside forty other things and gets
+   * attached to something a month later. "chart.png" is not findable; the
+   * window, the scope and the date are.
+   *
+   * THE BUTTON REPORTS ITS OWN FAILURE. A canvas export can fail — a theme
+   * token that resolves to nothing, a browser that refuses `toBlob` — and the
+   * failure mode is silence: the click does nothing and there is no file, which
+   * reads as a dead button rather than a problem.
+   */
+  async function saveBacklogPng(btn, d, b) {
+    const was = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Saving…';
+    /* THE CAPTIONED CHART IS BUILT AND MOUNTED, NOT READ OFF THE PAGE. The one
+       on screen has no caption by design, so exporting it would export the bare
+       bars. It has to be in the DOM for `getComputedStyle` to resolve a single
+       colour — a detached node has no cascade — so it goes somewhere with a
+       real layout and no pixels: off the left edge, `aria-hidden`, and removed
+       in the `finally` whatever happens. `display:none` would have been the
+       obvious choice and is the wrong one: it has no computed paint at all. */
+    const stage = document.createElement('div');
+    stage.setAttribute('aria-hidden', 'true');
+    stage.style.cssText = 'position:fixed;left:-99999px;top:0;width:1200px;pointer-events:none';
+    try {
+      const markup = backlogShotSvg(d, b);
+      if (!markup) { UI.toast('There is no chart to save.', true); return; }
+      stage.innerHTML = markup;
+      document.body.appendChild(stage);
+      const svg = stage.querySelector('svg');
+      if (!svg) { UI.toast('The chart could not be drawn for saving.', true); return; }
+
+      const blob = await Charts.toPng(svg, { scale: 2 });
+      const scope = (d.selected || []).length ? d.selected.join('+') : 'all components';
+      const name = UI.fileName([
+        'Backlog', GRAIN_LABEL[grain] || grain, scope, new Date().toISOString().slice(0, 10),
+      ], 'png');
+      UI.saveBlob(blob, name);
+      UI.toast(`Saved ${name}`);
+    } catch (err) {
+      UI.toast(`Could not save the chart — ${err.message}`, true);
+    } finally {
+      if (stage.parentNode) stage.parentNode.removeChild(stage);
+      btn.disabled = false;
+      btn.textContent = was;
+    }
+  }
+
   function backlogSection(b) {
     const chips = WINDOWS.map(g =>
       `<button class="chip${grain === g ? ' active' : ''}" data-grain="${g}">${GRAIN_LABEL[g]}</button>`).join('');
+    /* SAVE THE CHART, drawn from what is on screen right now — this window,
+       this grain, this theme. Offered only where there IS a chart: the two
+       states below draw no bars, and a button that hands somebody a blank PNG
+       is worse than no button. */
+    const save = (b && b.periods && b.periods.length && b.backfilled)
+      ? `<button class="btn ghost sm" data-act="backlog-png"
+          title="Save these bars as a PNG — the window, grain and theme you are looking at">Save PNG</button>`
+      : '';
     const head = `
       <div class="section-head" style="margin-bottom:4px">
         <h3>Backlog</h3>
         <div class="spacer"></div>
-        <div style="display:flex;gap:6px;flex-wrap:wrap">${chips}</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">${chips}${save}</div>
       </div>`;
 
     if (!b || !b.periods || !b.periods.length) {
@@ -796,11 +924,27 @@ const CoverageReport = (() => {
               <span>across ${UI.esc(first.label)} – ${UI.esc(last.label)}</span>
             </div>
           </div>
-          ${Charts.stacked(b.periods, series, { drill: true, unit: 'automated' })}
+          ${/* A STABLE HOOK ON THE CHART, because two things now go looking for
+                it: the Save PNG button beside it, and the headless Chrome that
+                captures it for the emailed report. Neither can key off the
+                `<svg>` alone — there are five charts on this page and more on
+                the others — and a selector either of them invented would break
+                the day a card gained a second one. */''}
+          ${/* THE CHART ON THE PAGE IS THE BARE ONE, and that is deliberate.
+                A title and a key inside the SVG duplicated the section heading
+                above it and the row below it — three statements of the same
+                thing in one card. On the page they are redundant because the
+                page supplies the context; in an exported image they are the
+                only context there is. So the caption belongs to the EXPORT and
+                not to the chart, and `backlogShotSvg` below is where it is
+                added. See the note there. */''}
+          <div class="chart-holder" data-chart="backlog">
+            ${Charts.stacked(b.periods, series, { drill: true, unit: 'automated' })}
+          </div>
           <div class="mixkey" style="margin-top:10px">
             ${series.map(x => `<span><i style="background:${x.color}"></i>${UI.esc(x.label)}
               ${UI.drillNumber((last.counts || {})[x.key] || 0,
-                { act: 'backlog', period: last.start, bucket: x.key })}</span>`).join('')}
+    { act: 'backlog', period: last.start, bucket: x.key })}</span>`).join('')}
           </div>
           <p class="muted" style="font-size:11.5px;margin:10px 0 0">
             ${UI.esc(b.basis)}

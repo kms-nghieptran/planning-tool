@@ -879,10 +879,11 @@ check('AN UNKNOWN CELL IS REFUSED, and says what would have worked', () => {
   assert.strictEqual(at({ component: 'PS_iGO_Columbus' }).ok, false, 'an unranked component got a drawer');
   /* The `flag-*` names are the backlog columns' attention markers: the part of
      each queue that is retired or blocked. They are cells in their own right
-     for the same reason `stuck-*` is — one drawer, one population. */
+     for the same reason `stuck-*` is — one drawer, one population. `out-all` is
+     the row's leftovers, the epics no column counts. */
   assert.deepStrictEqual(at({ cell: 'automated' }).known,
     ['maintenance', 'ready', 'blocked', 'build', 'maint', 'stuck-build', 'stuck-maint',
-      'flag-maintenance', 'flag-ready', 'flag-blocked']);
+      'flag-maintenance', 'flag-ready', 'flag-blocked', 'out-all']);
   assert.strictEqual(at({ cell: 'automated' }).count, 0, 'a refusal still returned a count');
 
   /* THE WARNING MARKERS ARE CELLS TOO, and refusable the same way. They list
@@ -1124,6 +1125,148 @@ const flagSnap = () => {
   for (const e of FLAG_BASE) snap.issues[e.key] = e;
   return snap;
 };
+
+/* ── THE EPICS NO COLUMN COUNTS ─────────────────────────────────────────
+   The PS_Evolve_RN defect. 94 epics on the component, 27 Automated, 27
+   Maintenance and 40 retired — and the row read "27 in backlog" with nothing
+   anywhere accounting for the other 40. `coverage.BUCKETS` has seven buckets;
+   this table draws three. Automated's absence is obvious. N/A, obsoleted and
+   "no status set" are not: in Jira they look exactly like backlog. */
+
+const OUT_BASE = [
+  epic('O-NA', { components: ['PS_iGO_NLG', 'Katalon'], automationStatus: 'N/A for Automation' }),
+  epic('O-OBS', { components: ['PS_iGO_NLG', 'Katalon'], labels: ['obsolete'] }),
+  epic('O-NONE', { components: ['PS_iGO_NLG', 'Katalon'] }),
+  /* THE SAME THREE ON THE OTHER TOOL, so a tally that quietly counted one tool
+     twice — or only one of them — is visible as a wrong row total. */
+  epic('O-TT-NONE', { components: ['PS_iGO_NLG', 'TrueTest'] }),
+  /* AND ONE SPANNING TWO RANKED COMPONENTS, because the leftovers are counted
+     inside the component loop like every other number here: an epic on two
+     ranked suites belongs to both rows.
+
+     BOTH HALVES MUST BE RANKED. Pairing PS_iGO_NLG with an unranked component
+     made this fixture useless — the second row never existed, so a model that
+     counted each epic once instead of once per component passed every check
+     here. `PS_RES_NLG` is ranked and otherwise empty, which is exactly what is
+     needed: if the epic does not reach it, that row stays at zero and says so. */
+  epic('O-TWO', { components: ['PS_iGO_NLG', 'PS_RES_NLG', 'Katalon'] }),
+];
+const outSnap = () => {
+  const snap = withSprints({});
+  for (const e of [...FLAG_BASE, ...OUT_BASE]) snap.issues[e.key] = e;
+  return snap;
+};
+
+check('THE LEFTOVERS ARE COUNTED, not dropped', () => {
+  /* `A-5`, `A-6` and `A-7` come from BASE — one per reason, on PS_iGO_NLG with
+     no tool component, so they are KSE. They were already in every fixture in
+     this file and counted in nothing, which is the defect in miniature. */
+  const v = build(outSnap(), PLAN());
+  const cell = cellOf(v, 'PS_iGO_NLG', 'kse');
+  assert.deepStrictEqual(cell.outside.na.slice().sort(), ['A-5', 'O-NA'], 'the N/A epics are not held');
+  assert.deepStrictEqual(cell.outside.obsoleted.slice().sort(), ['A-6', 'O-OBS'], 'the retired epics are not held');
+  assert.deepStrictEqual(cell.outside.none.slice().sort(), ['A-7', 'O-NONE', 'O-TWO'], 'the untriaged epics are not held');
+  assert.strictEqual(cell.out, 7, `the cell total disagrees with its own lists: ${cell.out}`);
+});
+
+check('AND THEY ARE IN NO BACKLOG COLUMN, which is the whole point', () => {
+  /* If one of these ever started counting as backlog the tag would go on
+     explaining a number that had already absorbed it. */
+  const v = build(outSnap(), PLAN());
+  const cell = cellOf(v, 'PS_iGO_NLG', 'kse');
+  const counted = [...cell.keys.maintenance, ...cell.keys.ready, ...cell.keys.blocked];
+  for (const k of ['O-NA', 'O-OBS', 'O-NONE', 'O-TWO']) {
+    assert.ok(!counted.includes(k), `${k} is outside the backlog AND counted in a column`);
+  }
+  assert.strictEqual(cell.backlog, cell.keys.maintenance.length + cell.keys.ready.length + cell.keys.blocked.length,
+    'the backlog total no longer equals the columns behind it');
+});
+
+check('THE ROW TOTAL SPANS BOTH TOOLS, and the epic-on-two-components is on both rows', () => {
+  const v = build(outSnap(), PLAN());
+  const row = v.rows.find(r => r.component === 'PS_iGO_NLG');
+  assert.strictEqual(row.kse.out, 7, 'the KSE cell lost one');
+  assert.strictEqual(row.truetest.out, 1, 'the TrueTest cell lost one');
+  assert.strictEqual(row.out, 8, `the row total is not the two cells: ${row.out}`);
+  /* THE OTHER COMPONENT GETS IT TOO. One epic, two ranked suites, one count
+     each — not two on one row and none on the other. Asserted without a guard:
+     an `if (other)` here is how a fixture that had quietly stopped producing
+     the second row went on passing. */
+  const other = v.rows.find(r => r.component === 'PS_RES_NLG');
+  assert.ok(other, 'fixture check: the second ranked component is not on the sheet');
+  assert.deepStrictEqual(other.kse.outside.none, ['O-TWO'],
+    'an epic on two ranked components was counted on only one of them');
+  assert.strictEqual(other.out, 1, `the second row's total is wrong: ${other.out}`);
+});
+
+check('THE FOOTER SPLITS THEM BY REASON, because they are different problems', () => {
+  /* One total would say "589 missing" and leave him no way to tell a retired
+     pile from a field nobody filled in — and on his board the second is the
+     bigger one. */
+  const v = build(outSnap(), PLAN());
+  assert.ok(v.totals.out > 0, 'the footer total is zero');
+  assert.strictEqual(v.totals.out,
+    v.rows.reduce((t, r) => t + r.out, 0), 'the footer total is not the rows it summarises');
+  const by = v.totals.outside;
+  assert.strictEqual(by.na + by.obsoleted + by.none, v.totals.out,
+    `the split does not add up to the total: ${JSON.stringify(by)} vs ${v.totals.out}`);
+  assert.ok(by.none > 0 && by.na > 0 && by.obsoleted > 0,
+    `fixture check: every reason should be represented — ${JSON.stringify(by)}`);
+});
+
+check('THE TAG OPENS ITS OWN SET, with the reason on each row', () => {
+  const snap = outSnap(), plan = PLAN();
+  const d = pz.sprintComponentCell(snap, plan, {
+    team: RUBY, sprint: sprintOf(plan, 's40'),
+    component: 'PS_iGO_NLG', tool: 'all', cell: 'out-all',
+  });
+  assert.ok(d.ok, `the out cell was refused: ${JSON.stringify(d.known)}`);
+  assert.strictEqual(d.outside, true, 'the drawer does not know what it is listing');
+  /* BOTH TOOLS, because the tag sits beside the component name and not inside a
+     tool band. `tool: 'all'` is not a real tool and must not narrow it. */
+  assert.strictEqual(d.count, 8, `the drawer lists a different number from the tag: ${d.count}`);
+  assert.deepStrictEqual(d.epics.map(e => e.key).sort(),
+    ['A-5', 'A-6', 'A-7', 'O-NA', 'O-NONE', 'O-OBS', 'O-TT-NONE', 'O-TWO']);
+  assert.match(d.label, /Outside the backlog/i, 'the heading does not say what it is');
+  assert.ok(!/TrueTest|KSE/.test(d.label), `a row-level drawer named one tool: ${d.label}`);
+  assert.deepStrictEqual(d.outsideBy, { na: 2, obsoleted: 2, none: 4 },
+    `the split is wrong: ${JSON.stringify(d.outsideBy)}`);
+  /* THE REASON TRAVELS PER ROW, decided where the epic was counted rather than
+     re-derived in the browser from a status and a label. */
+  const byKey = Object.fromEntries(d.epics.map(e => [e.key, e.outsideReason]));
+  assert.deepStrictEqual(byKey, {
+    'A-5': 'na', 'A-6': 'obsoleted', 'A-7': 'none',
+    'O-NA': 'na', 'O-OBS': 'obsoleted', 'O-NONE': 'none', 'O-TT-NONE': 'none', 'O-TWO': 'none',
+  });
+});
+
+check('AND `tool` IS IGNORED FOR IT, rather than silently halving the list', () => {
+  /* The tag sends `tool=all`; a route that fell back to a real tool would
+     answer with half the set under a heading promising all of it. */
+  const snap = outSnap(), plan = PLAN();
+  const at = (tool) => pz.sprintComponentCell(snap, plan, {
+    team: RUBY, sprint: sprintOf(plan, 's40'),
+    component: 'PS_iGO_NLG', tool, cell: 'out-all',
+  });
+  const all = at('all').epics.map(e => e.key).sort();
+  assert.deepStrictEqual(at('kse').epics.map(e => e.key).sort(), all, 'KSE narrowed a row-level cell');
+  assert.deepStrictEqual(at('truetest').epics.map(e => e.key).sort(), all, 'TrueTest narrowed a row-level cell');
+});
+
+check('A COMPONENT WITH NO LEFTOVERS REPORTS ZERO, so the tag can stay away', () => {
+  /* PS_iGO_Lincoln has an Automated epic, a Maintenance one and one belonging
+     to another squad — every one of them accounted for. A tag there would be a
+     caveat on a row that has nothing to caveat. */
+  const v = build(outSnap(), PLAN());
+  const row = v.rows.find(r => r.component === 'PS_iGO_Lincoln');
+  assert.ok(row, 'fixture check: PS_iGO_Lincoln is not on the sheet');
+  assert.strictEqual(row.out, 0, 'a clean component claims leftovers');
+  for (const t of coverage.TOOLS) {
+    for (const b of ['na', 'obsoleted', 'none']) {
+      assert.deepStrictEqual(row[t.key].outside[b], [], `${t.key}/${b} is not empty on a clean row`);
+    }
+  }
+});
 
 check('THE MAINTENANCE QUEUE FLAGS THE SUITES THAT ARE RETIRED', () => {
   const snap = flagSnap(), plan = PLAN();

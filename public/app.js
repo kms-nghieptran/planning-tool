@@ -152,6 +152,23 @@ const App = (() => {
 
     if (printing) {
       document.body.classList.add('print-mode');
+      /* ── LIGHT, WHATEVER THE STORED THEME SAYS ────────────────────────
+         This page is not being read, it is being photographed: headless Chrome
+         loads it to print the emailed PDF and to capture the Backlog chart that
+         goes in the mail body. Both end up in front of a client, on paper or in
+         a reading pane, and both are overwhelmingly light.
+
+         The print STYLESHEET already turns the dark tokens back to ink on paper
+         — but only under `@media print`, and a screenshot is screen media. So
+         the PDF came out light and a capture of the same page would have come
+         out dark, from one page load, which is the kind of inconsistency nobody
+         finds until a client asks about it.
+
+         IT ONLY LOOKED RIGHT BY ACCIDENT BEFORE. Headless Chrome runs a fresh
+         profile with no `localStorage` and reports a light system preference,
+         so the theme resolved to light — until the day it did not. Said out
+         loud here rather than relied upon. */
+      document.documentElement.dataset.theme = 'light';
       if (q.get('landscape') === '1') {
         const st = document.createElement('style');
         st.textContent = '@page { size: landscape; margin: 10mm; }';

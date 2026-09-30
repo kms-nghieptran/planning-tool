@@ -831,6 +831,210 @@ check('EVERY PLACEHOLDER ON EVERY REPORT IS CLOSED AND WORKS', async () => {
   }
 });
 
+/* ── A PICTURE IN THE BODY ──────────────────────────────────────────────
+ *
+ * An inline image is not a small attachment. It is a part the HTML REFERS TO
+ * by `cid:`, and the reference resolves only when the two are wrapped together
+ * in a `multipart/related` — nested INSIDE the mixed part that holds the PDF
+ * and OUTSIDE the alternative that holds the two body versions. Get the
+ * nesting wrong and the failure is invisible from this end: the send returns
+ * 250 OK, and the client sees a broken-image box with a stray chart.png filed
+ * beside it.
+ */
+
+const PNG = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex');
+const relOf = (raw) => {
+  const m = raw.match(/Content-Type: multipart\/related; boundary="([^"]+)"/);
+  return m ? m[1] : null;
+};
+
+check('AN INLINE IMAGE IS WRAPPED IN A multipart/related, not hung off the mixed part', () => {
+  const html = '<html><body><img src="cid:ptchart"></body></html>';
+  const m = mime.build({
+    from: 'a@b.com', to: ['c@d.com'], subject: 'S', text: 'plain', html,
+    inline: [{ cid: 'ptchart', content: PNG, contentType: 'image/png', filename: 'chart.png' }],
+  });
+  assert.ok(relOf(m.raw), 'there is no related part, so the cid cannot resolve');
+  assert.match(m.raw, /Content-ID: <ptchart>/, 'the image carries no Content-ID');
+  /* ANGLE BRACKETS ON THE HEADER AND NOT ON THE `src`. Getting that asymmetry
+     wrong is the classic way to ship a broken-image box to a client. */
+  assert.ok(!m.raw.includes('Content-ID: ptchart\r'), 'the Content-ID lost its angle brackets');
+  assert.ok(m.raw.includes('Content-Type: image/png'), 'the image part lost its type');
+  assert.match(m.raw, /Content-Disposition: inline; filename="chart\.png"/,
+    'the image is filed as an attachment, so the body will show a hole where it should be');
+});
+
+check('AND THE NESTING IS related > alternative, not the other way round', () => {
+  /* The alternative must be INSIDE the related: a reader that picks the HTML
+     branch has to still be within the part that carries the image. Reversed,
+     the picture sits beside a multipart/alternative and half the clients in the
+     world cannot find it. */
+  const html = '<html><body><img src="cid:ptchart"></body></html>';
+  const m = mime.build({
+    from: 'a@b.com', to: ['c@d.com'], subject: 'S', text: 'plain', html,
+    inline: [{ cid: 'ptchart', content: PNG }],
+  });
+  const rel = m.raw.indexOf('multipart/related');
+  const alt = m.raw.indexOf('multipart/alternative');
+  assert.ok(rel > -1 && alt > rel, `related must come first: related@${rel} alternative@${alt}`);
+});
+
+check('AND THE PDF STAYS OUTSIDE IT, as an attachment', () => {
+  const html = '<html><body><img src="cid:ptchart"></body></html>';
+  const m = mime.build({
+    from: 'a@b.com', to: ['c@d.com'], subject: 'S', text: 'plain', html,
+    inline: [{ cid: 'ptchart', content: PNG }],
+    attachments: [{ filename: 'r.pdf', content: Buffer.from('%PDF-1.4 x'), contentType: 'application/pdf' }],
+  });
+  const mixed = m.raw.indexOf('multipart/mixed');
+  const rel = m.raw.indexOf('multipart/related');
+  assert.ok(mixed > -1 && rel > mixed, 'the mixed part must be outermost');
+  assert.match(m.raw, /Content-Disposition: attachment; filename="r\.pdf"/,
+    'the PDF became inline, which is how it disappears from the paperclip');
+  assert.match(m.raw, /Content-Disposition: inline/, 'and the image stopped being inline');
+});
+
+check('AN IMAGE NOTHING REFERS TO IS DROPPED, not attached silently', () => {
+  /* Same rule as the mixed-of-one: a related part nobody cites makes some
+     clients draw a paperclip, and the reader goes looking for an attachment
+     that is not there. A body with no {{chart}} must produce exactly the
+     message it produced before this feature existed. */
+  const m = mime.build({
+    from: 'a@b.com', to: ['c@d.com'], subject: 'S', text: 'plain',
+    html: '<html><body>no picture here</body></html>',
+    inline: [{ cid: 'ptchart', content: PNG }],
+  });
+  assert.strictEqual(relOf(m.raw), null, 'an uncited image was wrapped in anyway');
+  assert.ok(!m.raw.includes('Content-ID'), 'an uncited image was sent');
+});
+
+check('AND AN EMPTY IMAGE IS DROPPED, so a failed capture cannot ship a 0-byte part', () => {
+  const html = '<html><body><img src="cid:ptchart"></body></html>';
+  for (const bad of [{ cid: 'ptchart', content: Buffer.alloc(0) }, { cid: '', content: PNG }, null]) {
+    const m = mime.build({ from: 'a@b.com', to: ['c@d.com'], subject: 'S', text: 't', html, inline: [bad] });
+    assert.strictEqual(relOf(m.raw), null, `a bad inline part was sent: ${JSON.stringify(bad)}`);
+  }
+});
+
+check('A MAIL WITH NO IMAGE IS WHAT IT ALWAYS WAS', () => {
+  /* The regression that matters most: every existing template goes through this
+     function and none of them mentions a chart. */
+  const base = { from: 'a@b.com', to: ['c@d.com'], subject: 'S', text: 'hello' };
+  const before = mime.build(base).raw;
+  const after = mime.build({ ...base, inline: [] }).raw;
+  const strip = (s) => s.replace(/=_pt_[0-9a-f]+/g, 'B').replace(/^(Date|Message-ID):.*$/gm, '$1: X');
+  assert.strictEqual(strip(after), strip(before), 'an empty inline list changed the message');
+  assert.ok(!before.includes('multipart/related'), 'a plain mail grew a related part');
+});
+
+/* ── {{chart}}, THE ONE PLACEHOLDER THAT IS NOT A NUMBER ─────────────── */
+
+const CHART_TPL = {
+  report: 'coverage',
+  subject: 'Coverage {{coverage}}',
+  body: 'Hi,\n\nCoverage is {{coverage}}.\n\n{{chart}}\n\nThanks.',
+  to: ['c@d.com'], cc: [],
+};
+
+check('{{chart}} PUTS A PICTURE IN THE HTML AND A SENTENCE IN THE TEXT', () => {
+  const m = rmail.compose(CHART_TPL, REPORT, { from: 'a@b.com', chart: { cid: rmail.CHART_CID, content: PNG } });
+  assert.ok(m.wantsChart, 'the body asked for a chart and compose did not notice');
+  assert.match(m.html, new RegExp(`<img src="cid:${rmail.CHART_CID}"`), 'the html carries no picture');
+  /* THE TEXT HALF CANNOT HAVE ONE, and must not be left with a gap where a
+     sentence introduced something that never arrives. */
+  assert.match(m.text, /\[Backlog chart/, 'the plain-text half says nothing about the chart');
+  assert.ok(!m.text.includes('<img'), 'markup leaked into the plain-text part');
+  assert.ok(!m.text.includes('cid:'), 'a cid reference leaked into the plain-text part');
+});
+
+check('AND WITH NO PICTURE THERE IS NO HTML HALF REFERRING TO ONE', () => {
+  /* The capture fails soft — an un-backfilled backlog has no chart to
+     photograph — and the body must not then go out with an `<img>` pointing at
+     a part that is not in the message. */
+  const m = rmail.compose(CHART_TPL, REPORT, { from: 'a@b.com', chart: null });
+  assert.ok(m.wantsChart, 'the caller still needs to know it was asked for');
+  assert.strictEqual(m.html, null, 'an img was written with no image to point at');
+  assert.match(m.text, /\[Backlog chart/, 'the text half lost its substitute too');
+});
+
+check('AND A TEMPLATE THAT NEVER MENTIONS IT IS UNTOUCHED', () => {
+  const plain = { ...CHART_TPL, body: 'Hi,\n\nCoverage is {{coverage}}.\n\nThanks.' };
+  const m = rmail.compose(plain, REPORT, { from: 'a@b.com', chart: { cid: rmail.CHART_CID, content: PNG } });
+  assert.strictEqual(m.wantsChart, false, 'a body with no {{chart}} claimed to want one');
+  assert.strictEqual(m.html, null, 'a picture was forced into a body that did not ask for one');
+});
+
+check('THE BODY IS FILLED ONCE, so the two halves cannot disagree', () => {
+  /* The html is built from the same filled body as the text, with the chart
+     standing in as a marker. A second independent pass over the template is how
+     one half quotes 63.3% and the other quotes last week's. */
+  const m = rmail.compose(CHART_TPL, REPORT, { from: 'a@b.com', chart: { cid: rmail.CHART_CID, content: PNG } });
+  const num = (s) => (s.match(/Coverage is ([0-9.]+%)/) || [])[1];
+  assert.ok(num(m.text), `the text half lost its figure: ${m.text}`);
+  assert.strictEqual(num(m.html), num(m.text), 'the two halves quote different numbers');
+});
+
+check('AND THE HTML HALF IS STILL ESCAPED, so a template cannot inject markup', () => {
+  /* The tag is inserted AFTER escaping, which is the only safe order — and the
+     thing that makes it safe has to be checked, because the reverse order
+     produces a body that works perfectly until a component is called
+     `<script>`. */
+  const nasty = { ...CHART_TPL, body: 'Hi <b>there</b> & welcome\n\n{{chart}}' };
+  const m = rmail.compose(nasty, REPORT, { from: 'a@b.com', chart: { cid: rmail.CHART_CID, content: PNG } });
+  assert.ok(m.html.includes('&lt;b&gt;there&lt;/b&gt;'), 'the body was not escaped');
+  assert.ok(!m.html.includes('<b>there</b>'), 'raw markup from the template reached the html');
+  assert.ok(m.html.includes('&amp;'), 'an ampersand was not escaped');
+  assert.match(m.html, /<img src="cid:/, 'and the one tag that IS meant to be there is gone');
+});
+
+check('{{chart}} IN A SUBJECT IS DROPPED AND REPORTED, never printed', () => {
+  /* A header is text. Resolving it there to the substitute line would put
+     "[Backlog chart — shown in the HTML version of this email]" on the subject
+     line of a client email. */
+  const m = rmail.compose({ ...CHART_TPL, subject: 'Coverage {{coverage}} {{chart}}' },
+    REPORT, { from: 'a@b.com', chart: { cid: rmail.CHART_CID, content: PNG } });
+  assert.ok(!/Backlog chart/.test(m.subject), `the substitute line reached the subject: ${m.subject}`);
+  assert.ok(!/\{\{chart\}\}/.test(m.subject), 'the raw token reached the subject');
+  assert.deepStrictEqual(m.misplaced, ['chart'], 'it was dropped without telling anybody');
+  assert.match(m.subject, /63\.3%/, 'the rest of the subject was lost with it');
+});
+
+check('AND THE MARKER NEVER SURVIVES INTO ANYTHING A CLIENT READS', () => {
+  /* The html is built by filling the body with a marker and swapping it for the
+     tag. A marker that failed to match its own replacement arrives as a line of
+     hex in the middle of a client email.
+
+     BOTH PLACEMENTS, because they take different paths. `{{chart}}` alone on a
+     line becomes its own paragraph and is replaced as `<p>marker</p>`; one
+     mid-sentence is replaced on its own. Checking only the tidy placement let a
+     mutation that removed the second replacement survive — and the untidy one
+     is exactly what somebody writing prose around the chart will type. */
+  const alone = rmail.compose(CHART_TPL, REPORT, { from: 'a@b.com', chart: { cid: rmail.CHART_CID, content: PNG } });
+  assert.ok(!/ptchartmark/.test(alone.html), `the marker survived into the html: ${alone.html}`);
+  assert.ok(!/ptchartmark/.test(alone.text), 'the marker reached the plain-text half');
+
+  const inline = rmail.compose(
+    { ...CHART_TPL, body: 'Hi,\n\nCoverage is {{coverage}} — see {{chart}} for the trend.\n\nThanks.' },
+    REPORT, { from: 'a@b.com', chart: { cid: rmail.CHART_CID, content: PNG } });
+  assert.ok(!/ptchartmark/.test(inline.html),
+    `a mid-sentence chart left its marker behind: ${inline.html}`);
+  assert.match(inline.html, /<img src="cid:/, 'a mid-sentence chart produced no picture at all');
+  assert.ok(inline.html.includes('see '), 'the sentence around it was lost');
+  assert.ok(inline.html.includes(' for the trend.'), 'the rest of the sentence was lost');
+});
+
+check('THE CID IS ONE STRING, agreed between the html and the MIME part', () => {
+  /* Two spellings of it is the classic broken-image bug, and it cannot be seen
+     from this end — the send returns 250 OK either way. */
+  const m = rmail.compose(CHART_TPL, REPORT, { from: 'a@b.com', chart: { cid: rmail.CHART_CID, content: PNG } });
+  const built = mime.build({
+    from: 'a@b.com', to: ['c@d.com'], subject: m.subject, text: m.text, html: m.html,
+    inline: [{ cid: rmail.CHART_CID, content: PNG, contentType: 'image/png' }],
+  });
+  assert.match(built.raw, /multipart\/related/, 'the html and the part disagree, so nothing was wrapped');
+  assert.match(built.raw, new RegExp(`Content-ID: <${rmail.CHART_CID}>`));
+});
+
 (async () => {
   for (const [name, fn] of checks) {
     try { await fn(); passed++; console.log(`  ✓ ${name}`); }

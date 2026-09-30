@@ -790,6 +790,12 @@ const BC_SNAP = {
        be agreeing with a page that had quietly started marking three columns. */
     'E-ROBS': bcEpic('E-ROBS', ['PS_iGO_NLG'], 'Ready for Automation', { labels: ['obsolete'] }),
     'E-BOBS': bcEpic('E-BOBS', ['PS_iGO_NLG'], 'Blocked', { labels: ['obsoleted'] }),
+    /* THE THREE THE COLUMNS DO NOT COUNT — one per reason, which is the
+       PS_Evolve_RN defect. Each is indistinguishable from backlog in Jira and
+       appeared in no column on this table until the "outside" tag. */
+    'E-NA': bcEpic('E-NA', ['PS_iGO_NLG'], 'N/A for Automation'),
+    'E-RET': bcEpic('E-RET', ['PS_iGO_NLG'], '', { labels: ['obsolete'] }),
+    'E-NOSTAT': bcEpic('E-NOSTAT', ['PS_iGO_NLG'], ''),
     /* NO JIRA TEAM — the PS_iGO_Lafayette defect. `coverageTeams` below is
        given a real allow-list so it actually bites; with an empty one every
        epic is in scope anyway and this case cannot be reproduced. */
@@ -1341,6 +1347,118 @@ check('AND NO COLUMN IS MARKED WHERE NOTHING IS FLAGGED', async () => {
     assert.ok((((x[tool] || {}).flagged || {})[bucket] || []).length > 0,
       `${row}/${tool}/${bucket} carries a marker with nothing flagged behind it`);
   }
+});
+
+/* ── THE ROW SAYS WHAT ITS COLUMNS DO NOT COUNT ─────────────────────────
+   PS_Evolve_RN: 94 epics, 27 of them Maintenance, 40 retired — and the row read
+   "27 in backlog" with nothing saying where the other 40 went. */
+
+check('THE COMPONENT NAME CARRIES NO OUTSIDE TAG — he asked for it off', async () => {
+  /* It was there and it came off. On his board 28 of 128 components have
+     leftovers, so a quarter of the rows grew a second pill in the one column
+     whose job is reading component names down the page.
+
+     THE PRECONDITION IS ASSERTED FIRST. Without it this passes on a fixture
+     that simply has nothing outside the backlog, and would go on passing if the
+     tag came back. */
+  const r = await renderByComp();
+  const section = byCompSection(r.html);
+  const row = r.payload.byComponent.rows.find(x => x.out > 0);
+  assert.ok(row, 'fixture check: no component has epics outside the backlog, so this cannot bite');
+
+  assert.ok(!/data-cell="out-all"/.test(section),
+    'the outside tag is back on the rows');
+  assert.ok(!/\d+ outside</.test(section),
+    'something on the rows is still printing an outside count');
+  assert.ok(!/class="[^"]*out-tag/.test(section), 'the tag markup is still being drawn');
+});
+
+check('AND THE OTHER TWO ROW TAGS ARE UNTOUCHED, which is what the column is for', async () => {
+  /* `clear` and `N blocked` are the tags that belong there. Removing the third
+     must not have taken a working one with it. */
+  const r = await renderByComp();
+  const section = byCompSection(r.html);
+  const stuck = r.payload.byComponent.rows.find(x => x.stuck > 0);
+  assert.ok(stuck, 'fixture check: nothing is blocked, so this check cannot bite');
+  assert.match(section, /class="tag risk"[^>]*>\d+ blocked</, 'the blocked tag went with it');
+});
+
+check('AND THE SCOPE LINE SAYS HOW BIG THE PILE IS, beside the backlog figure', async () => {
+  /* The per-row tags answer "which component"; this answers "how much of this
+     table is not in the table". A backlog total with 589 epics missing from
+     behind it is a number somebody checks against Jira once and then stops
+     believing — so the caveat sits on the same line as the figure. */
+  const r = await renderByComp();
+  const section = byCompSection(r.html);
+  const t = r.payload.byComponent.totals;
+  assert.ok(t.out > 0, 'fixture check: nothing is outside, so this check cannot bite');
+  assert.ok(section.includes(`${t.out} outside it`), `the scope line does not carry the total: ${t.out}`);
+  /* IT IS BESIDE THE BACKLOG NUMBER, not parked at the end of the line where it
+     reads as a footnote about the excludes. Measured on the TEXT the reader
+     sees — comments and attributes stripped — because the tooltip that explains
+     the split is 200 characters of markup sitting between two words that render
+     next to each other, and measuring the source would fail on a page that is
+     perfectly laid out. */
+  const words = section
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/\s+/g, ' ');
+  const backlogAt = words.indexOf('in backlog');
+  const outAt = words.indexOf('outside it');
+  const excludesAt = words.indexOf('backlog excludes');
+  assert.ok(backlogAt > -1 && outAt > backlogAt,
+    'the outside figure does not follow the backlog figure it qualifies');
+  assert.ok(excludesAt === -1 || outAt < excludesAt,
+    'the outside figure sits past the excludes, where it reads as a note about them');
+  assert.ok(outAt - backlogAt < 80,
+    `the outside figure reads ${outAt - backlogAt} characters after the number it qualifies:`
+    + ` "${words.slice(backlogAt, outAt + 12).trim()}"`);
+  /* AND THE SPLIT IS IN ITS OWN TOOLTIP, so the reason is one hover away rather
+     than requiring a drill into some component to find out.
+
+     ASSERTED ON THE SCOPE LINE'S ELEMENT, not on the section. Every row tag
+     carries a tooltip naming the same three reasons, so a section-wide match
+     was satisfied by the first component's tag and went on passing with the
+     scope line's own tooltip stripped to nothing. */
+  const el = section.match(/<span title="([^"]*)">[^<]*outside it/);
+  assert.ok(el, 'the outside figure on the scope line carries no tooltip at all');
+  assert.match(el[1], /no Automation Status set/i,
+    `the scope line's tooltip does not break the pile down by reason: "${el[1]}"`);
+  assert.match(el[1], /retired/i, `the scope line's tooltip does not name the retired pile: "${el[1]}"`);
+});
+
+check('THE `out-all` DRAWER STILL WORKS, with no tag on the page to open it', async () => {
+  /* NOT REACHABLE FROM THE ROWS ANY MORE, and kept on purpose. The model still
+     counts the leftovers, the scope line still reports the size of the pile,
+     and this is what would list them — so turning the per-row tag back on is a
+     one-line change rather than rebuilding the drawer behind it.
+
+     THE CHECK NO LONGER CLICKS A TAG, and says so in its name. A check titled
+     "clicking it" that drives the handler directly is a check claiming to cover
+     a path that does not exist. */
+  const r = await renderByComp();
+  const row = r.payload.byComponent.rows.find(x => x.out > 0);
+  await r.mount.click({ act: 'bc-epics', row: row.component, tool: 'all', cell: 'out-all', __text: String(row.out) });
+  const d = r.mount.drawn;
+  assert.ok(d, 'the route behind the removed tag opened no drawer');
+
+  const keys = coverage.TOOLS.flatMap(t =>
+    ['na', 'obsoleted', 'none'].flatMap(b => (row[t.key].outside || {})[b] || []));
+  assert.ok(keys.length, 'fixture check: the row has no leftover keys');
+  for (const k of keys) assert.ok(d.includes(k), `the drawer does not list ${k}`);
+
+  const head = (d.match(/<div class="eyebrow">(?:<i><\/i>)?([^<]*)</) || [])[1] || '';
+  assert.match(head, /Outside the backlog/i, `the heading does not say what it is: ${head}`);
+  assert.ok(!/TrueTest|KSE/.test(head), `a row-level drawer named one tool: ${head}`);
+
+  /* THE SPLIT IS IN WORDS, because "retired" and "nobody set the field" are two
+     different jobs and one total cannot say which this is. */
+  assert.match(d, /no Automation Status set/i, 'the drawer does not name the untriaged pile');
+  assert.match(d, /retired \(labelled obsolete\)/i, 'the drawer does not name the retired pile');
+
+  /* AND ON EACH ROW, from `outsideReason` rather than re-derived in the browser. */
+  assert.match(d, /class="drill-blocked"/, 'no reason is marked on the rows');
+  assert.match(d, /No Automation Status<\/span>/, 'an untriaged suite is not said to be untriaged');
 });
 
 check('CLICKING IT OPENS THE RETIRED SUITES, and says it is a subset', async () => {

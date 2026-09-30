@@ -238,11 +238,58 @@ async function bootWith({ search = '', stored = {}, teams, sprints, currentByTea
      stopped, which is what turned "teamId is null" from a mystery into a
      missing `document.documentElement` stub. */
   try { await ctx.__app.boot(); } catch (e) { if (process.env.DBG) console.log('BOOT STOPPED AT:', e.message); }
-  return { state: ctx.__app.state, stored, noteCalls };
+  return { state: ctx.__app.state, stored, noteCalls, doc: ctx.document };
 }
 
 const TEAMS = [{ id: 'ruby', name: 'Katalon RDA' }, { id: 'titan', name: 'Katalon PSA' }];
 const SPRINTS = [{ id: 'S40' }, { id: 'S41' }, { id: 'S42' }];
+
+check('A PRINTED PAGE IS LIGHT, whatever theme he has stored', async () => {
+  /* This page is not read, it is PHOTOGRAPHED: headless Chrome loads it to
+     print the emailed PDF and to capture the Backlog chart that goes in the
+     mail body. Both land in front of a client, on paper or in a reading pane,
+     and both are overwhelmingly light — a dark chart arrives as a black slab
+     with a hole punched in the page around it.
+
+     IT ONLY LOOKED RIGHT BY ACCIDENT BEFORE. The print STYLESHEET turns the
+     dark tokens back to ink, but only under `@media print`, and a screenshot is
+     SCREEN media. The capture came out light solely because headless Chrome
+     runs a fresh profile with no stored theme and reports a light system
+     preference. This fixes it where it is decided rather than relying on
+     that. */
+  const { doc } = await bootWith({
+    search: '?print=1&team=titan',
+    stored: { 'pt-theme': 'dark' },
+    teams: TEAMS, sprints: SPRINTS, currentSprintId: 'S42',
+  });
+  assert.strictEqual(doc.documentElement.dataset.theme, 'light',
+    `a printed page rendered in ${doc.documentElement.dataset.theme} theme`);
+});
+
+check('AND HIS STORED THEME IS NOT REWRITTEN BY PRINTING ONE', async () => {
+  /* Same rule as the team and sprint above: `?print=1` is an ordinary URL he
+     can open himself, and rendering a report must not edit the reader's
+     settings. Forcing the attribute is a render-time decision; writing it back
+     to localStorage would flip his own app to light. */
+  const stored = { 'pt-theme': 'dark' };
+  await bootWith({
+    search: '?print=1&team=titan', stored, teams: TEAMS, sprints: SPRINTS, currentSprintId: 'S42',
+  });
+  assert.strictEqual(stored['pt-theme'], 'dark',
+    `printing rewrote his stored theme to ${stored['pt-theme']}`);
+});
+
+check('AND AN ORDINARY PAGE STILL HONOURS IT', async () => {
+  /* The force must be scoped to printing. Applying it unconditionally would
+     take the dark theme away from the person using the app. */
+  const { doc } = await bootWith({
+    search: '?team=titan',
+    stored: { 'pt-theme': 'dark' },
+    teams: TEAMS, sprints: SPRINTS, currentSprintId: 'S42',
+  });
+  assert.strictEqual(doc.documentElement.dataset.theme, 'dark',
+    'the dark theme was taken away from an ordinary page load');
+});
 
 check('THE PRINTED PAGE IS ABOUT THE TEAM THE URL NAMED', async () => {
   /* THE BUG, exactly as it reached him: the report said Titan, the document
