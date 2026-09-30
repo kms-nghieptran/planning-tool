@@ -576,29 +576,49 @@ const CapacityView = (() => {
       </tr>`;
   }
 
-  /* THE NOTE IS EDITABLE HERE, and it is THE SAME NOTE the Prioritization
-     screen edits — one entry per component in the plan, through one route.
-     Not a second, capacity-only note: "waiting on the migration" is a fact
-     about the suite, not about this sprint, and two boxes holding two
-     versions of it is how the one you are not looking at goes stale.
+  /* THIS NOTE IS THE SPRINT'S, and it is NOT the one the Prioritization screen
+     edits. That was the arrangement until now and the reasoning was sound as
+     far as it went: "waiting on the migration" is a fact about the suite, not
+     about this sprint, and two boxes holding two versions of it is how the one
+     you are not looking at goes stale.
 
-     A CLOSED SPRINT DOES NOT MAKE IT READ-ONLY, unlike the points and due
-     date above. Those write to Jira and rewrite a finished sprint's history;
-     this is plan data about a suite, and noticing something about
-     PS_iGO_NLG while reading a closed sprint is a perfectly good reason to
-     write it down.
+     WHAT IT MISSED IS WHAT ACTUALLY GETS TYPED HERE. Fourteen notes had been
+     written into the global field from this sheet, and they read: "2 cases
+     remaining; both will be picked up for implementation in the sprint", "plan
+     to build 3 new TT cases based on the current available capacity". Those are
+     not facts about a suite. They are this sprint's plan, sitting in a field
+     that will still be showing them in March.
 
-     The same `textarea.note` markup the Prioritization grid uses, so the two
-     look and behave identically — and `maxlength` comes off the payload
-     rather than being typed here, or one screen offers a length the server
-     then refuses. */
+     So there are two boxes now, and they are different questions rather than
+     two versions of one. The column beside a row of THIS SPRINT's numbers gets
+     this sprint's note.
+
+     A CLOSED SPRINT DOES NOT MAKE IT READ-ONLY, unlike the points and due date
+     above. Those write to Jira and rewrite a finished sprint's history; this is
+     plan data, and noticing something about PS_iGO_NLG while reading a closed
+     sprint is a perfectly good reason to write it down.
+
+     NO SPRINT, NO BOX. Without one there is nothing to key a note to, and a box
+     that accepted text it could not file would lose it on blur. */
   function byComponentNote(r) {
-    const v = r.note || '';
+    const v = r.sprintNote || '';
+    const key = (data.byComponent || {}).sprintNoteKey || '';
+    if (!key) {
+      return `<td class="note-col tool-start"><span class="muted" style="font-size:11.5px"
+        title="A note here belongs to a sprint, and none is selected">—</span></td>`;
+    }
+    /* THE GLOBAL NOTE IS STILL REACHABLE, as the box's tooltip rather than a
+       second column. It is the context you want while writing this sprint's
+       note — "no longer supported", "client asked us to hold" — and having to
+       open another screen to remember it is how the two end up contradicting
+       each other. Read-only here; the Prioritization screen owns it. */
+    const global = r.note ? `Prioritization note: ${r.note}` : 'Add a note for this sprint…';
     return `
       <td class="note-col tool-start">
         <textarea class="note" rows="1" maxlength="${Number((data.byComponent || {}).noteMax) || 600}"
           data-bc-note="${UI.esc(r.component)}" data-was="${UI.esc(v)}"
-          placeholder="Add a note…">${UI.esc(v)}</textarea>
+          title="${UI.esc(global)}"
+          placeholder="${r.note ? 'This sprint…' : 'Add a note…'}">${UI.esc(v)}</textarea>
       </td>`;
   }
 
@@ -614,12 +634,18 @@ const CapacityView = (() => {
     if (value === was.trim()) return;
     box.disabled = true;
     try {
-      await UI.jsonPut('/api/component-note', { component: name, note: value });
+      /* THE TEAM AND SPRINT GO WITH IT, and the server turns them into the
+         storage key. The browser is not trusted to name the key itself: it is
+         the Jira sprint behind the selected row, and a client free to invent
+         one could write a note nothing will ever read back. */
+      await UI.jsonPut('/api/sprint-note', {
+        team: bcState.teamId, sprint: bcState.sprintId, component: name, note: value,
+      });
       box.dataset.was = value;
       box.value = value;
       const r = ((data.byComponent || {}).rows || []).find(x => x.component === name);
-      if (r) r.note = value || null;
-      UI.toast(value ? `${name} — note saved` : `${name} — note cleared`);
+      if (r) r.sprintNote = value || null;
+      UI.toast(value ? `${name} — note saved for this sprint` : `${name} — note cleared`);
     } catch (err) {
       // Put the old text back rather than leaving the box showing something
       // that was refused: a box that keeps what you typed reads as saved.

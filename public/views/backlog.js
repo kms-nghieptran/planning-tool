@@ -37,6 +37,43 @@ const BacklogView = (() => {
   const FOLD_KEY = 'pt-backlog-fold';
   let folded = new Set();
 
+  /* ── STACKED OR SIDE BY SIDE ──────────────────────────────────────────
+   *
+   * Stacked is what this page has always been: the open sprints, then the queue
+   * under them. It reads well, and it is the wrong shape for the thing the page
+   * is actually for. Deciding what a sprint takes on is a comparison between
+   * two lists, and with sixty unplanned items the sprint you are dragging
+   * toward is three screens above the row you are dragging.
+   *
+   * SPLIT PUTS THEM SIDE BY SIDE and gives each pane its own scrollbar, so the
+   * sprint holds still while you hunt for the item. Independent panes rather
+   * than one page scroll is the whole of it: a drop target you cannot see is
+   * one you cannot use, and the browser's own auto-scroll during a drag is not
+   * something to build a workflow on.
+   *
+   * BOTH ARE KEPT. Stacked still reads better narrow, and it is the only one
+   * that prints — a fixed-height scrolling pane prints as a cropped box. So
+   * this is a preference, not a migration, and it is remembered PER BROWSER
+   * rather than per team like the folds: it is about the screen you are sitting
+   * at, not about the work in front of you. */
+  const LAYOUT_KEY = 'pt-backlog-layout';
+  const LAYOUTS = ['stack', 'split'];
+  let layout = 'stack';
+
+  function loadLayout() {
+    /* Same wrapping as the folds, and the same reasoning: localStorage throws
+       in a few browser contexts, and a layout that fails to load is not worth a
+       message when the default is the one this page always had. */
+    try {
+      const v = localStorage.getItem(LAYOUT_KEY);
+      layout = LAYOUTS.includes(v) ? v : 'stack';
+    } catch { layout = 'stack'; }
+  }
+
+  function saveLayout() {
+    try { localStorage.setItem(LAYOUT_KEY, layout); } catch { /* not worth a message */ }
+  }
+
   function loadFold(teamId) {
     folded = new Set();
     try {
@@ -60,6 +97,10 @@ const BacklogView = (() => {
     // nothing once the team picker has moved to Ruby's 77 items.
     page = 1;
     loadFold(state.teamId);
+    /* NOT keyed on the team — see LAYOUT_KEY. Loaded here anyway so a tab left
+       open while the layout was changed in another one picks it up on the next
+       team switch rather than disagreeing with the toggle it is showing. */
+    loadLayout();
     /* THE FACE PILE IS CHOSEN ONCE, HERE. A fresh payload is a fresh set of
        people, and whoever was selected on the last team is not necessarily
        on this one — so the selection is dropped with it, the same way the
@@ -138,6 +179,18 @@ const BacklogView = (() => {
         <div class="section-head">
           <h2>Sprints and backlog</h2>
           <div class="spacer"></div>
+          ${/* THE LAYOUT SWITCH, beside the export rather than down with the
+                filters. A filter changes WHICH rows you are looking at; this
+                changes how the page is arranged, which is the same kind of
+                thing as the export sitting next to it — about the page, not
+                about the work. */''}
+          <div style="display:flex;gap:6px">
+            ${LAYOUTS.map(v => `<button class="chip${layout === v ? ' active' : ''}" data-layout="${v}"
+              title="${v === 'split'
+    ? 'Backlog and sprints side by side, each scrolling on its own — drag straight across'
+    : 'Sprints above the queue, one page scroll'}"
+              >${v === 'split' ? 'Side by side' : 'Stacked'}</button>`).join('')}
+          </div>
           <a class="btn ghost sm" href="/api/export?what=backlog&team=${encodeURIComponent(state.teamId)}">Export CSV</a>
         </div>
         <div class="filters">
@@ -581,18 +634,38 @@ const BacklogView = (() => {
        about what a screen can usefully show, and Jira has no such problem —
        a link that opened only the hundred rows you happened to be looking at
        would change meaning every time you pressed Next. */
-    UI.$('#blTable', mount).innerHTML = `
-      ${(d.sections || []).map(sec => sprintSection(state, sec)).join('')}
-      ${section({
-    id: 'backlog',
-    kind: 'backlog',
-    title: 'Backlog',
-    meta: countMeta(items, data.items || []),
-    right: jiraLink(items),
-    body: items.length
-      ? `${rowsTable(state, d, p.rows, blockedKeys)}${UI.pager({ ...p, pageSize, sizeId: 'blPageSize', unit: 'items' })}`
-      : `<div class="empty">${(data.items || []).length ? 'Nothing in the queue matches these filters.' : 'The queue is empty — everything is in a sprint.'}</div>`,
-  })}`;
+    const sprints = (d.sections || []).map(sec => sprintSection(state, sec)).join('');
+    const queue = section({
+      id: 'backlog',
+      kind: 'backlog',
+      title: 'Backlog',
+      meta: countMeta(items, data.items || []),
+      right: jiraLink(items),
+      body: items.length
+        ? `${rowsTable(state, d, p.rows, blockedKeys)}${UI.pager({ ...p, pageSize, sizeId: 'blPageSize', unit: 'items' })}`
+        : `<div class="empty">${(data.items || []).length ? 'Nothing in the queue matches these filters.' : 'The queue is empty — everything is in a sprint.'}</div>`,
+    });
+
+    /* ── THE TWO ARRANGEMENTS, FROM ONE SET OF SECTIONS ────────────────
+       Both layouts render the SAME `sprints` and `queue` markup — the sections
+       are built once above and only their container differs. That is what
+       stops the two drifting: a second copy of the section builders would let
+       one layout gain a column, a fold or a drop target the other did not, and
+       the drag depends on `[data-sec]` being present and identical in both.
+
+       THE QUEUE IS ON THE LEFT, as asked. Jira's own screen puts it on the
+       right; his request says left and his request is the one being built.
+
+       `data-pane` IS FOR THE DRAG, not for the CSS — the auto-scroll while
+       dragging needs to find the scrolling ancestor, and `closest('.bl-pane')`
+       would tie that behaviour to a class name chosen for appearance. */
+    UI.$('#blTable', mount).innerHTML = layout === 'split'
+      ? `<div class="bl-split">
+           <div class="bl-pane" data-pane="backlog">${queue}</div>
+           <div class="bl-pane" data-pane="sprints">${sprints
+    || '<div class="empty">No open sprints — nothing to plan into yet.</div>'}</div>
+         </div>`
+      : `${sprints}${queue}`;
 
     wirePager(state, mount);
   }
@@ -741,6 +814,38 @@ const BacklogView = (() => {
     UI.$$('.bl-over', mount).forEach(n => n.classList.remove('bl-over'));
   }
 
+  /* How close to an edge counts as "asking to scroll", and how far one event
+     moves. 48px is about a row and a half — close enough that it never fires
+     while you are aiming at a section, wide enough to find without precision.
+     The step is deliberately small: a drag produces a stream of these events,
+     so the speed comes from the repetition rather than from the distance, and
+     a large step overshoots the sprint you were heading for. */
+  const EDGE_PX = 48;
+  const EDGE_STEP = 18;
+
+  /**
+   * SCROLL THE PANE UNDER THE CURSOR, if the cursor is near its edge.
+   *
+   * Does nothing in the stacked layout, where there is no pane and the page's
+   * own scroll is still the reader's — the whole function is a no-op unless a
+   * `[data-pane]` is an ancestor of whatever is being hovered.
+   *
+   * `data-pane` rather than the CSS class: the class is chosen for appearance
+   * and could reasonably be renamed, and this behaviour must not quietly stop
+   * working when it is.
+   */
+  function edgeScroll(e) {
+    const pane = e.target.closest && e.target.closest('[data-pane]');
+    if (!pane || typeof pane.getBoundingClientRect !== 'function') return;
+    const box = pane.getBoundingClientRect();
+    /* A pane that cannot scroll is not scrolled — below the breakpoint, and in
+       print, the panes are ordinary blocks and moving them would be a jump. */
+    if (pane.scrollHeight <= pane.clientHeight + 1) return;
+    const y = e.clientY;
+    if (y < box.top + EDGE_PX) pane.scrollTop -= EDGE_STEP;
+    else if (y > box.bottom - EDGE_PX) pane.scrollTop += EDGE_STEP;
+  }
+
   function wireDrag(state, mount) {
     mount.addEventListener('dragstart', (e) => {
       const tr = e.target.closest && e.target.closest('[data-row-key]');
@@ -756,7 +861,22 @@ const BacklogView = (() => {
     mount.addEventListener('dragend', () => { dragKey = null; clearDrag(mount); });
 
     mount.addEventListener('dragover', (e) => {
-      const sec = dragKey && e.target.closest && e.target.closest('[data-sec]');
+      if (!dragKey) return;
+      /* THE PANE SCROLLS WHILE YOU HOLD A ROW OVER ITS EDGE.
+         Side by side, each column has its own scrollbar and a sprint can sit
+         below the fold of a pane that is only 500px tall — and you cannot
+         reach it, because during a drag the wheel and the scrollbar are not
+         yours. Browsers do auto-scroll a container in this situation, but only
+         sometimes and only near the very edge, which is not something to build
+         a workflow on. This is deliberate and predictable: within 48px of an
+         edge, move by a fixed step per event.
+
+         BEFORE the drop-target work below, because a pane you are scrolling
+         past is not a section you are dropping into, and the highlight should
+         follow the row under the cursor either way. */
+      edgeScroll(e);
+
+      const sec = e.target.closest && e.target.closest('[data-sec]');
       if (!sec) return;
       // WITHOUT THIS THERE IS NO DROP. preventDefault on dragover is what
       // marks an element as a destination; the default is to refuse.
@@ -860,6 +980,27 @@ const BacklogView = (() => {
         return;
       }
       if (near('[data-who-more]')) { whoOpen = !whoOpen; redrawWho(mount); return; }
+
+      /* ── THE LAYOUT SWITCH ────────────────────────────────────────
+         Redraws the table only. `App.refresh()` would refetch the whole
+         payload and throw away the page you were on and every filter — for a
+         change that rearranges markup this screen already holds. */
+      const lay = near('[data-layout]');
+      if (lay) {
+        const want = lay.dataset.layout;
+        if (!LAYOUTS.includes(want) || want === layout) return;
+        layout = want;
+        saveLayout();
+        /* THE CHIPS ARE IN THE PAGE HEAD, OUTSIDE `#blTable`, so redrawing the
+           table alone would leave the old one looking active. Flipped here
+           rather than by re-rendering the head, which would take the filters'
+           focus and scroll position with it. */
+        UI.$$('[data-layout]', mount).forEach((b) => {
+          b.classList.toggle('active', b.dataset.layout === layout);
+        });
+        renderTable(state, mount);
+        return;
+      }
       /* A CLICK ANYWHERE ELSE SHUTS THE MENU — except inside it, or the
          next box you meant to tick would close the thing you are ticking. */
       if (whoOpen && !near('[data-who-panel]')) { whoOpen = false; redrawWho(mount); }

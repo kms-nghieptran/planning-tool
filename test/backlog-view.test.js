@@ -113,9 +113,22 @@ const STATE = {
 
 function fakeEl(id) {
   const on = {};
+  /* A REAL CLASS SET, not a no-op. The layout switch flips `active` between
+     two chips that live OUTSIDE `#blTable` and therefore survive the redraw —
+     so "the one you clicked is active and the other is not" is a claim about
+     these objects, and a `toggle()` that swallowed its argument would agree
+     with a page that had stopped flipping them. */
+  const cls = new Set();
   return {
     id, value: '', dataset: {},
-    classList: { toggle() {}, add() {}, remove() {}, contains: () => false },
+    classList: {
+      toggle(c, on2) {
+        const want = on2 === undefined ? !cls.has(c) : !!on2;
+        if (want) cls.add(c); else cls.delete(c);
+        return want;
+      },
+      add: (c) => cls.add(c), remove: (c) => cls.delete(c), contains: (c) => cls.has(c),
+    },
     addEventListener(type, fn) { (on[type] = on[type] || []).push(fn); },
     fire(type, e = {}) { for (const fn of on[type] || []) fn({ target: this, preventDefault() {}, ...e }); },
     set innerHTML(v) { this._html = v; }, get innerHTML() { return this._html || ''; },
@@ -184,22 +197,30 @@ function headTree(id, { kind = 'sprint' } = {}) {
    the chips — genuinely do survive, and stay cached. */
 const INSIDE_TABLE = new Set(['[data-page]', '#blPageSize']);
 
-function bootBacklog() {
+/* THE STORE, SEPARATE FROM THE CONTEXT THAT USES IT.
+   A real one rather than a no-op: "folded, then folded again, is open" is a
+   round trip through this, and a stub that swallowed writes would make every
+   toggle look like the first one.
+
+   IT IS PASSABLE because "remembered" means remembered by the BROWSER, not by
+   the module. A second render in the same context reads the layout back out of
+   a module-level variable the click already set, which proves nothing about
+   storage — deleting the load entirely leaves that check green. Handing a
+   fresh module the same store is the real shape of the claim: a new tab. */
+function mkStore() {
+  const m = new Map();
+  return {
+    getItem: (k) => (m.has(k) ? m.get(k) : null),
+    setItem: (k, v) => m.set(k, String(v)),
+    removeItem: (k) => m.delete(k),
+  };
+}
+
+function bootBacklog(store = mkStore()) {
   const ctx = {
     console, Promise, setTimeout, clearTimeout, encodeURIComponent,
     Charts: new Proxy({}, { get: () => () => '' }),
-    /* THE FOLD STATE IS KEPT HERE, so the harness needs a store. A real one
-       rather than a no-op: "folded, then folded again, is open" is a round
-       trip through this, and a stub that swallowed writes would make every
-       toggle look like the first one. */
-    localStorage: (() => {
-      const m = new Map();
-      return {
-        getItem: (k) => (m.has(k) ? m.get(k) : null),
-        setItem: (k, v) => m.set(k, String(v)),
-        removeItem: (k) => m.delete(k),
-      };
-    })(),
+    localStorage: store,
     document: { createElement: () => fakeEl('x'), querySelector: () => fakeEl('x'), querySelectorAll: () => [] },
   };
   vm.createContext(ctx);
@@ -249,6 +270,11 @@ async function renderBacklog(payload = PAYLOAD, app = null, st = STATE) {
     return nodes.get(k);
   };
 
+  /* DECLARED ABOVE `getAll` because the layout chips are read back out of it
+     — the page head is markup like any other, and a chip list built from
+     anything else is a list only this harness could produce. */
+  let mountHtml = '';
+
   // The state chips and category chips are sets, so they need their own nodes.
   const many = new Map();
   const getAll = (sel) => {
@@ -264,6 +290,19 @@ async function renderBacklog(payload = PAYLOAD, app = null, st = STATE) {
           n.disabled = !!m[2];
           return n;
         }));
+      } else if (sel === '[data-layout]') {
+        /* BUILT FROM THE HEAD THE VIEW ACTUALLY RENDERED, active flag and all.
+           Seeding these `stack`-active would make "the chips agree with the
+           page" a claim about the seed: a page that came back from storage in
+           side-by-side and drew its own chip active would still read as
+           stacked here, and the remembered-layout check would fail against a
+           page that was right. */
+        many.set(k, [...mountHtml.matchAll(/class="chip( active)?"\s*data-layout="([a-z]+)"/g)].map(m => {
+          const n = fakeEl(sel);
+          n.dataset = { layout: m[2] };
+          if (m[1]) n.classList.add('active');
+          return n;
+        }));
       } else {
         const keys = sel === '[data-state]' ? ['ready', 'unestimated', 'blocked', 'unassigned']
           : sel === '[data-cat]' ? ['new', 'maintenance'] : [];
@@ -277,7 +316,6 @@ async function renderBacklog(payload = PAYLOAD, app = null, st = STATE) {
     return many.get(k);
   };
 
-  let mountHtml = '';
   /* THE SPRINT PICKER IS DELEGATED to the mount — the table is rebuilt on
      every filter keystroke and page turn, so a handler on the select would go
      with the markup that replaced it. A harness that swallowed mount
@@ -298,6 +336,8 @@ async function renderBacklog(payload = PAYLOAD, app = null, st = STATE) {
      new module with brand new state, which is exactly the condition under
      which a page number leaking between teams is invisible. */
   const ctx = app ? app.ctx : bootBacklog();
+  // The browser's store, whichever module is currently reading it.
+  const store = ctx.localStorage;
   ctx.UI.api = async () => payload;
   /* THE DRAWER IS A REAL RENDER, not a stub that records its arguments. What
      these checks are about is whether the list matches the number, and only
@@ -346,19 +386,50 @@ async function renderBacklog(payload = PAYLOAD, app = null, st = STATE) {
       for (const fn of mountOn.click || []) fn({ target: tree[part], preventDefault() {} });
       return tree;
     },
-    /** Drag one row onto a section, start to drop, as the browser fires it. */
-    async drag(key, toSection) {
+    /** Click one of the layout chips, as the page delivers it. */
+    layout(which) {
+      const node = fakeEl('[data-layout]');
+      node.dataset = { layout: String(which) };
+      node.closest = (sel) => (sel === '[data-layout]' ? node : null);
+      for (const fn of mountOn.click || []) fn({ target: node, preventDefault() {} });
+      return node;
+    },
+    /** The layout chips the page is currently showing as active. */
+    activeLayouts() {
+      return getAll('[data-layout]').filter(n => n.classList.contains('active')).map(n => n.dataset.layout);
+    },
+    /**
+     * Drag one row onto a section, start to drop, as the browser fires it.
+     *
+     * `pane` puts the section inside a scrolling pane, which is what the split
+     * layout does — and `at` says where in that pane the pointer was, so the
+     * edge auto-scroll can be driven. Both optional: without them this is the
+     * stacked page, exactly as it was.
+     */
+    async drag(key, toSection, { pane = null, at = null } = {}) {
       const cls = () => ({ add() {}, remove() {}, contains: () => false });
       const row = { dataset: { rowKey: key }, classList: cls() };
       row.closest = (sel) => (sel === '[data-row-key]' ? row : null);
       const sec = { dataset: { sec: String(toSection) }, classList: cls() };
-      sec.closest = (sel) => (sel === '[data-sec]' ? sec : null);
+      const paneNode = pane && {
+        dataset: { pane: String(pane.name || 'sprints') },
+        scrollTop: pane.scrollTop || 0,
+        scrollHeight: pane.scrollHeight == null ? 2000 : pane.scrollHeight,
+        clientHeight: pane.clientHeight == null ? 500 : pane.clientHeight,
+        getBoundingClientRect: () => ({
+          top: pane.top == null ? 100 : pane.top,
+          bottom: pane.bottom == null ? 600 : pane.bottom,
+        }),
+      };
+      sec.closest = (sel) => (sel === '[data-sec]' ? sec : (sel === '[data-pane]' ? paneNode : null));
       const dt = { setData() {} };
       let allowed = false;
       for (const fn of mountOn.dragstart || []) fn({ target: row, dataTransfer: dt, preventDefault() {} });
-      for (const fn of mountOn.dragover || []) fn({ target: sec, dataTransfer: dt, preventDefault() { allowed = true; } });
+      for (const fn of mountOn.dragover || []) {
+        fn({ target: sec, dataTransfer: dt, clientY: at == null ? 300 : at, preventDefault() { allowed = true; } });
+      }
       for (const fn of mountOn.drop || []) await fn({ target: sec, dataTransfer: dt, preventDefault() {} });
-      return { allowed };
+      return { allowed, pane: paneNode };
     },
     /* ── THE FACE PILE ────────────────────────────────────────────────
        Two controls, one Set: an avatar in the row and a checkbox in the
@@ -422,6 +493,15 @@ async function renderBacklog(payload = PAYLOAD, app = null, st = STATE) {
     drawn: () => drawnHtml,
     page: () => mountHtml,
     table: () => table.innerHTML,
+    /* HOW MANY TIMES THE TABLE HAS BEEN REWRITTEN.
+       "This click does nothing" cannot be shown by comparing the markup before
+       and after: a redraw that changes nothing produces the same string, so the
+       comparison passes whether or not the redraw happened. The count is the
+       claim. */
+    draws: () => gen,
+    /* THE SAME BROWSER, A NEW TAB — a brand new module reading the store this
+       one has been writing to. */
+    newTab: (p = payload, s = st) => renderBacklog(p, { ctx: bootBacklog(store) }, s),
     /** One section's markup, head and body — `backlog` or a sprint id. */
     sec(id) {
       const html = table.innerHTML;
@@ -823,6 +903,296 @@ check('the link is on the filtered line, NOT in the section head beside Export C
   assert.ok(!/Open in Jira/.test(head),
     'the link is in the section head, where it cannot follow the filters');
   assert.match(b.table(), />Open in Jira</, 'and it is missing from the line that can');
+});
+
+/* ── BACKLOG AND SPRINTS, SIDE BY SIDE ──────────────────────────────────
+ *
+ * Stacked was the only arrangement and it is the wrong shape for what this
+ * page is for. Deciding what a sprint takes on is a comparison between two
+ * lists, and with sixty unplanned items the sprint you are dragging toward is
+ * three screens above the row you are dragging.
+ *
+ * Both layouts are kept: stacked still reads better narrow and is the only one
+ * that prints. So the risk is not "does the new one work" but "do the two stay
+ * the same page" — same rows, same sections, same drop targets, same writes.
+ */
+
+check('THE PAGE OFFERS BOTH LAYOUTS, and starts stacked', async () => {
+  const b = await renderBacklog();
+  assert.match(b.page(), /data-layout="stack"/, 'no stacked option');
+  assert.match(b.page(), /data-layout="split"/, 'no side-by-side option');
+  /* STACKED IS THE DEFAULT, because it is what the page has always been and a
+     stored preference nobody set should not change a screen under them. */
+  assert.deepStrictEqual(b.activeLayouts(), ['stack']);
+  assert.ok(!/bl-split/.test(b.table()), 'the page started split without being asked');
+});
+
+check('SWITCHING PUTS THE BACKLOG ON THE LEFT AND THE SPRINTS ON THE RIGHT', async () => {
+  const b = await renderBacklog();
+  b.layout('split');
+  const t = b.table();
+  assert.match(t, /class="bl-split"/, 'the split container is not there');
+  const backlogPane = t.indexOf('data-pane="backlog"');
+  const sprintPane = t.indexOf('data-pane="sprints"');
+  assert.ok(backlogPane > -1 && sprintPane > -1, 'one of the panes is missing');
+  /* HIS REQUEST, IN SO MANY WORDS: left is the backlog, right is the sprints.
+     Jira's own screen is the other way round and the reference picture he sent
+     shows that — the words are what is being built. */
+  assert.ok(backlogPane < sprintPane,
+    'the sprints came first, so the backlog is on the right');
+  /* AND EACH SECTION IS IN THE RIGHT PANE. */
+  const left = t.slice(backlogPane, sprintPane);
+  const right = t.slice(sprintPane);
+  assert.match(left, /data-sec="backlog"/, 'the queue is not in the left pane');
+  assert.ok(!/data-sec="backlog"/.test(right), 'the queue is in the sprint pane too');
+  assert.match(right, /data-sec="S40"/, 'the sprints are not in the right pane');
+});
+
+check('AND BOTH LAYOUTS DRAW THE SAME SECTIONS AND THE SAME ROWS', async () => {
+  /* THE GUARANTEE THAT MATTERS. Two layouts is two chances for one of them to
+     lose a section, a row or a drop target — and the drag depends on every
+     `data-sec` existing in both. Built from one set of sections for exactly
+     this reason; this is what holds that. */
+  const b = await renderBacklog();
+  const secsOf = (t) => [...t.matchAll(/data-sec="([^"]*)"/g)].map(m => m[1]).sort();
+  const rowsOf = (t) => [...t.matchAll(/data-row-key="([^"]*)"/g)].map(m => m[1]).sort();
+
+  const stackedSecs = secsOf(b.table());
+  const stackedRows = rowsOf(b.table());
+  assert.ok(stackedSecs.length > 1, 'fixture check: one section cannot show a difference');
+  assert.ok(stackedRows.length > 0, 'fixture check: no rows at all');
+
+  b.layout('split');
+  assert.deepStrictEqual(secsOf(b.table()), stackedSecs, 'a section is missing from one layout');
+  assert.deepStrictEqual(rowsOf(b.table()), stackedRows, 'a row is missing from one layout');
+
+  b.layout('stack');
+  assert.deepStrictEqual(secsOf(b.table()), stackedSecs, 'switching back lost a section');
+  assert.deepStrictEqual(rowsOf(b.table()), stackedRows, 'switching back lost a row');
+});
+
+check('THE CHOICE IS REMEMBERED, and read back on the next load', async () => {
+  const b = await renderBacklog();
+  b.layout('split');
+  assert.strictEqual(b.ctx.localStorage.getItem('pt-backlog-layout'), 'split',
+    'the layout was not saved');
+  /* THE SAME APP, A FRESH RENDER — which is what a team switch does. */
+  const again = await renderBacklog(PAYLOAD, b.app);
+  assert.match(again.table(), /bl-split/, 'the saved layout was not picked up on the next draw');
+  assert.deepStrictEqual(again.activeLayouts(), ['split'], 'the chips disagree with the page');
+
+  /* AND A NEW TAB, which is the only one of the three that is actually about
+     storage. The two renders above share a module, so the layout they read
+     back is a variable the click set — deleting the load from storage
+     altogether leaves both of them green. This one is a brand new module
+     handed the same store, and nothing but the round trip can carry the
+     choice into it. */
+  const tab = await b.newTab();
+  assert.match(tab.table(), /bl-split/, 'a new tab did not read the choice back out of storage');
+  assert.deepStrictEqual(tab.activeLayouts(), ['split'], 'the new tab drew the wrong chip active');
+});
+
+check('AND RUBBISH IN STORAGE FALLS BACK TO STACKED', async () => {
+  /* localStorage is shared with every other tab and version of this app. A
+     value this build does not know is not a reason to render nothing. */
+  const b = await renderBacklog();
+  b.ctx.localStorage.setItem('pt-backlog-layout', 'columns-but-diagonal');
+  const again = await renderBacklog(PAYLOAD, b.app);
+  assert.ok(!/bl-split/.test(again.table()), 'an unknown layout was honoured');
+  assert.deepStrictEqual(again.activeLayouts(), ['stack']);
+  // And in a module that has never seen anything else.
+  const tab = await b.newTab();
+  assert.ok(!/bl-split/.test(tab.table()), 'a fresh module honoured an unknown layout');
+  assert.deepStrictEqual(tab.activeLayouts(), ['stack']);
+});
+
+check('AND A CHIP ASKING FOR A LAYOUT THIS BUILD DOES NOT HAVE IS IGNORED', async () => {
+  /* The chips are rendered from `LAYOUTS`, so this cannot happen from the
+     markup this build draws — it happens when the page has been open across a
+     deploy that removed an arrangement, and the tab still holds the old head.
+     Ignored rather than honoured: an unknown name falls through every branch
+     and would leave the board in neither layout with neither chip lit, and
+     WRITE that name to storage on the way, so every later load starts from it. */
+  const b = await renderBacklog();
+  const before = b.table();
+  const draws = b.draws();
+  b.layout('columns-but-diagonal');
+  assert.strictEqual(b.draws(), draws, 'an unknown layout redrew the board');
+  assert.strictEqual(b.table(), before, 'an unknown layout changed the board');
+  assert.deepStrictEqual(b.activeLayouts(), ['stack'], 'it left the chips somewhere else');
+  assert.strictEqual(b.ctx.localStorage.getItem('pt-backlog-layout'), null,
+    'an unknown layout was written to storage, so every later load starts from it');
+});
+
+check('THE CHIPS FLIP WITHOUT REDRAWING THE FILTERS', async () => {
+  /* They sit in the page head, outside `#blTable`. Re-rendering the head to
+     mark one active would take the search box's focus and its caret with it
+     mid-typing, so the class is flipped in place. */
+  const b = await renderBacklog();
+  b.search.value = 'auth';
+  b.layout('split');
+  assert.deepStrictEqual(b.activeLayouts(), ['split'], 'the clicked chip is not active');
+  assert.strictEqual(b.search.value, 'auth', 'the search box was rebuilt under the typing');
+});
+
+check('CLICKING THE LAYOUT YOU ARE ALREADY ON DOES NOTHING', async () => {
+  /* Not an error and not a redraw.
+
+     COUNTED, NOT COMPARED. A redraw of the same layout produces the same
+     markup, so "the table is unchanged" is true whether or not the board was
+     rebuilt — the string comparison this check used to make passed with the
+     guard deleted. What a needless redraw actually costs is the thing you
+     cannot see in the markup: every node in the table is replaced, so a drag
+     in flight loses its row, an open <select> closes, and the scroll position
+     of a pane you were dragging toward goes back to the top. */
+  const b = await renderBacklog();
+  b.layout('split');
+  const before = b.table();
+  const draws = b.draws();
+  b.layout('split');
+  assert.strictEqual(b.draws(), draws, 'the board was rebuilt for a click that changed nothing');
+  assert.strictEqual(b.table(), before, 'the table was redrawn for a click that changed nothing');
+  assert.deepStrictEqual(b.activeLayouts(), ['split'], 'and it left the chips in a different state');
+});
+
+check('A SPLIT BOARD WITH NO OPEN SPRINTS SAYS SO, rather than showing an empty column', async () => {
+  /* Side by side, a sprint pane with nothing in it is a tall blank rectangle
+     next to a full queue, and it reads as a page that failed to load. Stacked,
+     the same emptiness is just the queue starting at the top — which is why
+     this needs saying only in one of the two layouts. */
+  /* BOTH LISTS CLEARED. `sections` is what the board draws and `sprints` is
+     what the row picker offers — a fixture that emptied one and not the other
+     is a board this app cannot produce, and a check written against it proves
+     something about nothing. */
+  const noSprints = { ...PAYLOAD, sections: [], sprints: [] };
+  const b = await renderBacklog(noSprints);
+  b.layout('split');
+  const t = b.table();
+  const at = t.indexOf('data-pane="sprints"');
+  assert.ok(at > -1, 'the sprint pane is missing entirely');
+  assert.match(t.slice(at), /No open sprints/,
+    'the empty sprint pane says nothing about why it is empty');
+  // And the queue is still there beside it, which is the whole point.
+  assert.match(t, /data-sec="backlog"/, 'the queue went with the sprints');
+});
+
+/* ── THE DRAG STILL WORKS, AND IT WORKS BETWEEN SPRINTS ────────────────── */
+
+check('A ROW DRAGS FROM THE QUEUE INTO A SPRINT IN THE SPLIT LAYOUT', async () => {
+  const b = await renderBacklog();
+  b.layout('split');
+  const { allowed } = await b.drag('B-1', 'S40', { pane: { name: 'sprints' } });
+  assert.ok(allowed, 'the section refused the drop — dragover did not preventDefault');
+  assert.strictEqual(b.puts.length, 1, 'the drag saved nothing');
+  assert.strictEqual(b.puts[0].url, '/api/backlog/sprint');
+  assert.strictEqual(b.puts[0].body.sprintId, 'S40');
+});
+
+check('AND BETWEEN TWO SPRINTS, which is the half he thought was missing', async () => {
+  /* It already worked — every row is draggable and any section is a drop
+     target — but nothing pinned it, so either layout could have lost it
+     without a check going red.
+
+     THE ROW IS PUT IN A SPRINT FIRST, by dragging it there. The fixture's
+     sprints start empty, and inventing a row in one would test a shape the
+     page cannot produce; this way the second drag starts from whatever the
+     first one actually left behind. */
+  const b = await renderBacklog();
+  await b.drag('B-1', 'S40');
+  assert.strictEqual(b.puts.length, 1, 'fixture check: the first move did not happen');
+
+  const { allowed } = await b.drag('B-1', 'S41');
+  assert.ok(allowed, 'a sprint refused a row dragged from another sprint');
+  assert.strictEqual(b.puts.length, 2, 'the sprint-to-sprint move saved nothing');
+  assert.strictEqual(b.puts[1].body.sprintId, 'S41', 'it was filed against the wrong sprint');
+  assert.strictEqual(b.puts[1].body.was, 'Ruby Sprint 40',
+    'the read-before-write `was` did not name the sprint it came from');
+});
+
+check('AND THE SAME DRAG WRITES THE SAME THING IN BOTH LAYOUTS', async () => {
+  /* The drag is one code path and must stay one. A layout that produced a
+     different `was`, or a different destination, would corrupt the
+     read-before-write check the server does against Jira — and that failure is
+     silent: it does not look like an error, it looks like somebody else's move
+     vanishing. */
+  const stacked = await renderBacklog();
+  await stacked.drag('B-1', 'S40');
+  await stacked.drag('B-1', 'S41');
+
+  const split = await renderBacklog();
+  split.layout('split');
+  await split.drag('B-1', 'S40', { pane: { name: 'sprints' } });
+  await split.drag('B-1', 'S41', { pane: { name: 'sprints' } });
+
+  assert.strictEqual(split.puts.length, 2, 'the split layout lost a move');
+  /* COMPARED AS THE WIRE SEES THEM. The two renders are two `vm` contexts, so
+     their objects carry two different `Object.prototype`s and are never
+     deepStrictEqual however identical their contents — a realm difference, not
+     a difference in what was written. What the server receives is JSON, so
+     that is what is compared: same keys, same values, nothing dropped, and a
+     real difference still fails. */
+  const wire = (b) => b.puts.map(x => JSON.parse(JSON.stringify(x.body)));
+  assert.deepStrictEqual(wire(split), wire(stacked),
+    'the two layouts wrote different things for the same pair of drags');
+});
+
+/* ── THE PANE SCROLLS WHILE YOU HOLD A ROW OVER ITS EDGE ───────────────── */
+
+check('DRAGGING TO THE BOTTOM EDGE SCROLLS THE PANE DOWN', async () => {
+  /* Side by side, a sprint can sit below the fold of a 500px pane — and during
+     a drag the wheel and the scrollbar are not yours. Browsers do auto-scroll
+     here, but only sometimes and only very near the edge, which is not
+     something to build a workflow on. */
+  const b = await renderBacklog();
+  b.layout('split');
+  const { pane } = await b.drag('B-1', 'S40', {
+    pane: { top: 100, bottom: 600, scrollTop: 200, scrollHeight: 2000, clientHeight: 500 },
+    at: 580,
+  });
+  assert.ok(pane.scrollTop > 200, `the pane did not scroll down: ${pane.scrollTop}`);
+});
+
+check('AND TO THE TOP EDGE SCROLLS IT UP', async () => {
+  const b = await renderBacklog();
+  b.layout('split');
+  const { pane } = await b.drag('B-1', 'S40', {
+    pane: { top: 100, bottom: 600, scrollTop: 200, scrollHeight: 2000, clientHeight: 500 },
+    at: 120,
+  });
+  assert.ok(pane.scrollTop < 200, `the pane did not scroll up: ${pane.scrollTop}`);
+});
+
+check('BUT THE MIDDLE OF A PANE DOES NOT MOVE IT', async () => {
+  /* A pane that crept while you were aiming at a section would make the target
+     move out from under the cursor. */
+  const b = await renderBacklog();
+  b.layout('split');
+  const { pane } = await b.drag('B-1', 'S40', {
+    pane: { top: 100, bottom: 600, scrollTop: 200, scrollHeight: 2000, clientHeight: 500 },
+    at: 350,
+  });
+  assert.strictEqual(pane.scrollTop, 200, 'the pane scrolled while the cursor was nowhere near an edge');
+});
+
+check('AND A PANE WITH NOTHING TO SCROLL STAYS PUT', async () => {
+  /* Below the breakpoint and in print the panes are ordinary blocks. Moving
+     `scrollTop` on one would be a jump with no scrollbar to explain it. */
+  const b = await renderBacklog();
+  b.layout('split');
+  const { pane } = await b.drag('B-1', 'S40', {
+    pane: { top: 100, bottom: 600, scrollTop: 0, scrollHeight: 400, clientHeight: 500 },
+    at: 580,
+  });
+  assert.strictEqual(pane.scrollTop, 0, 'a pane that cannot scroll was scrolled anyway');
+});
+
+check('AND THE STACKED LAYOUT IS NEVER SCROLLED BY A DRAG', async () => {
+  /* There is no pane; the page's own scroll is the reader's. The whole
+     behaviour has to be a no-op there, or the stacked page starts jumping. */
+  const b = await renderBacklog();
+  const { pane } = await b.drag('B-1', 'S40', { at: 580 });
+  assert.strictEqual(pane, null, 'the stacked layout produced a pane to scroll');
+  assert.strictEqual(b.puts.length, 1, 'and the drag itself stopped working');
 });
 
 (async () => {

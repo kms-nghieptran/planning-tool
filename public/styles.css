@@ -1139,6 +1139,64 @@ body.print-mode { background: #fff !important; }
 .bl-sec-head:hover { background: color-mix(in srgb, var(--app-fg) 5%, var(--app-bg-2)); }
 .bl-sec-head :is(input, select, textarea, label) { cursor: auto; }
 .bl-sec.shut .bl-sec-head { border-bottom: none; }
+
+/* ── THE TWO-COLUMN BOARD ────────────────────────────────────────────────
+   Backlog on the left, sprints on the right, each pane scrolling on its own.
+   The point is the INDEPENDENT scroll: choosing what a sprint takes on is a
+   comparison between two lists, and with sixty unplanned items the sprint you
+   are dragging toward is otherwise three screens away from the row.
+
+   THE HEIGHT IS THE WINDOW MINUS WHAT IS ABOVE. `100vh` alone would run the
+   panes off the bottom of the screen behind the two KPI cards and the filters;
+   the subtraction is the space those take, and `min-height` keeps the panes
+   usable on a short window rather than collapsing them to a slot. */
+.bl-split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+}
+.bl-pane {
+  overflow-y: auto;
+  overflow-x: hidden;
+  max-height: calc(100vh - 300px);
+  min-height: 320px;
+  /* Room for the scrollbar so it never sits on top of a row's last column. */
+  padding-right: 2px;
+}
+/* THE SECTION HEAD STAYS PUT while its rows scroll under it. Without this the
+   sprint you are dragging into loses its own name the moment you scroll to the
+   row you want, and a drop target with no label is a guess. */
+.bl-split .bl-sec-head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+/* The pane is the scroll container, so the section inside it must not clip its
+   own sticky head. */
+.bl-split .bl-sec { overflow: visible; }
+
+/* ONE COLUMN WHEN THERE IS NO ROOM FOR TWO. Two 1fr columns at 900px give each
+   list about 430px, which is narrower than the row is — the summary truncates
+   to nothing and the board becomes unreadable. Below that it stacks, which is
+   the other layout and a perfectly good one. */
+@media (max-width: 1100px) {
+  .bl-split { grid-template-columns: minmax(0, 1fr); }
+  .bl-pane { max-height: none; overflow: visible; }
+  .bl-split .bl-sec-head { position: static; }
+}
+
+/* AND IT PRINTS AS THE STACKED PAGE. A fixed-height scrolling pane prints as a
+   cropped box — one screenful of rows and a silent edge where the rest was —
+   which is the kind of wrong that reaches a client looking perfectly fine. The
+   printed page has no scrollbars to offer, so it gets the layout that does not
+   need them. */
+@media print {
+  .bl-split { display: block; }
+  .bl-pane { max-height: none; min-height: 0; overflow: visible; }
+  .bl-split .bl-sec-head { position: static; }
+}
+
 .bl-sec-head h3 { margin: 0; font-size: 13px; }
 .bl-sec-head .bl-meta { font-size: 12px; color: var(--app-fg-3); font-variant-numeric: tabular-nums; }
 .bl-sec-head .spacer { flex: 1; }

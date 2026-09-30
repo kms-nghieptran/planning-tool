@@ -29,6 +29,7 @@ const backlogProfile = require('./lib/backlog-profile');
 const covHistory = require('./lib/coverage-history');
 const priority = require('./lib/priority');
 const componentNote = require('./lib/component-note');
+const sprintNote = require('./lib/sprint-note');
 const componentRank = require('./lib/component-rank');
 const backlogLib = require('./lib/backlog-item');
 const blockersLib = require('./lib/blockers');
@@ -1638,6 +1639,51 @@ async function handleApi(req, res, url) {
     return json(res, 200, { ok: true, componentNote: map, set: Object.keys(map).length });
   }
 
+  /* ── THE SPRINT'S OWN NOTE ─────────────────────────────────────────────
+     A SEPARATE ROUTE, NOT A FLAG ON THE ONE ABOVE. The two notes answer
+     different questions — what is true of a suite, and what is true of it this
+     sprint — and they are stored in different shapes. A single route with a
+     `sprint` parameter that changed which map it wrote to is one typo away from
+     putting a sprint note into the global column, where it would read as wrong
+     for the rest of the year.
+
+     THE KEY COMES FROM THE SERVER, NOT THE BROWSER. The client sends the team
+     and the sprint it is showing; the key is resolved here by the same function
+     the payload used. A client free to name its own key could write a note
+     nothing will ever read back. */
+  if (p === '/api/sprint-note' && req.method === 'PUT') {
+    const body = await readJsonBody(req);
+    const plan = store.getPlan();
+    const team = (plan.teams || []).find(t => t && String(t.id) === String(body.team || ''));
+    if (!team) return json(res, 400, { error: 'That note needs a team this plan knows about.' });
+    const sprint = (plan.sprints || []).find(s => s && String(s.id) === String(body.sprint || ''));
+    if (!sprint) return json(res, 400, { error: 'That note needs a sprint this plan knows about.' });
+
+    const key = sprintNote.keyOf(plan, team, sprint);
+    if (!key) return json(res, 400, { error: 'That sprint cannot carry a note.' });
+
+    const next = sprintNote.set(plan.sprintComponentNote || {}, key, body.component, body.note ?? null);
+    const { map, errors } = sprintNote.validate(next);
+    if (errors.length) return json(res, 400, { error: errors.map(e => e.message).join(' · '), errors });
+
+    plan.sprintComponentNote = map;
+    store.savePlan(plan);
+    store.audit('sprintNote.set', {
+      sprint: key,
+      component: body.component ?? null,
+      /* The text stays out of the audit trail, same as the global note: it is
+         his working note, and a log that quietly keeps every draft of it is not
+         what a note is. */
+      cleared: !((map[key] || {})[String(body.component ?? '').trim()]),
+      total: Object.keys(map[key] || {}).length,
+    });
+    return json(res, 200, {
+      ok: true, sprintNoteKey: key,
+      notes: map[key] || {},
+      set: Object.keys(map[key] || {}).length,
+    });
+  }
+
   /* THE PRIORITIZATION GRID — the components he has decided about, in each
      tool, with the note he keeps on each.
 
@@ -2887,7 +2933,12 @@ async function handleApi(req, res, url) {
           Clear: r.empty ? 'yes' : '',
         },
         grid(r),
-        { Notes: r.note || '' },
+        /* BOTH NOTES, NAMED. They are different questions — what is true of the
+           suite, and what is true of it this sprint — and a single "Notes"
+           column holding whichever one the screen happens to edit is how a
+           forwarded spreadsheet comes to state last quarter's plan as a
+           standing fact about the component. */
+        { 'Sprint note': r.sprintNote || '', 'Component note': r.note || '' },
         keyCols(r),
       ));
       /* The totals the screen shows, labelled as a total rather than left for
@@ -2899,7 +2950,10 @@ async function handleApi(req, res, url) {
           { Component: `Total — ${v.rows.length} components`, Priority: '', Family: '', Clear: '' },
           Object.assign({}, ...v.tools.map(t => Object.fromEntries(
             cols.map(c => [`${t.label} — ${c.label}`, v.totals[t.key][c.key]])))),
-          { Notes: '' },
+          /* THE SAME COLUMNS AS THE ROWS ABOVE, blank. A totals row missing a
+             column the data rows have is how a spreadsheet ends up with the
+             keys shifted one cell left. */
+          { 'Sprint note': '', 'Component note': '' },
         ));
       }
     } else if (what === 'testcases') {

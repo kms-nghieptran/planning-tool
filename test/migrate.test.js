@@ -203,6 +203,11 @@ const PLAN = () => ({
   // nowhere else at all, so a migration that drops it cannot be repaired by
   // re-syncing anything.
   componentNote: { 'R&D_Sig_Regression': 'client asked us to hold until the Q3 release' },
+  /* THE CAPACITY SHEET'S PER-SPRINT NOTES — a different question from the
+     global one above, keyed on the Jira sprint behind the selected row. Here
+     because this check is the proof that the projection is a pure read: a plan
+     key the projection emits and the fixture omits reads as "added". */
+  sprintComponentNote: { 'jira:938': { 'R&D_Sig_Regression': 'two cases left this sprint' } },
   /* And the order he dragged them into WITHIN a level. Same argument again:
      nothing in Jira expresses "of my P1s, this one first", so a migration that
      drops it drops a judgement that cannot be rebuilt from any sync. Two
@@ -502,6 +507,10 @@ check('ROSTER DECISIONS SURVIVE — who you put on a sprint and who you took off
   same(plan.sprintRoster, project.plan().sprintRoster, 'sprintRoster');
   same(plan.componentPriority, project.plan().componentPriority, 'componentPriority');
   same(plan.componentNote, project.plan().componentNote, 'componentNote');
+  /* AND THE SPRINT NOTES SEPARATELY, because they are a separate key: a
+     projection that dropped them would leave every note he typed this sprint in
+     the database and out of the plan, with nothing on screen saying so. */
+  same(plan.sprintComponentNote, project.plan().sprintComponentNote, 'sprintComponentNote');
   same(plan.componentRank, project.plan().componentRank, 'componentRank');
 });
 

@@ -344,6 +344,13 @@ async function renderCapacity(snap = SNAP, plan = PLAN, sprint = SPRINT, opts = 
         add: (c) => _cls.add(c), remove: (c) => _cls.delete(c),
         toggle: () => {}, contains: (c) => _cls.has(c),
       },
+      /* APPEND AND REMOVE, because `UI.busy` puts its progress bar on the body
+         for the duration of every save. A body that cannot be appended to
+         threw on the way back from the note's PUT — after the fetch stub had
+         already recorded it — so the checks that read `puts` passed while
+         every line after the await went unrun. See the note on
+         `getElementById` below: the same lesson, one call further on. */
+      appendChild() {}, removeChild() {}, insertBefore() {}, contains: () => false,
     };
   };
   const body = mkNode();
@@ -418,6 +425,16 @@ async function renderCapacity(snap = SNAP, plan = PLAN, sprint = SPRINT, opts = 
       title: 'Planning Tool',
       body,
       head,
+      /* `getElementById`, BECAUSE THE SAVE PATH RUNS THROUGH `UI.busy`.
+         Without it every note save threw "document.getElementById is not a
+         function" the instant the request came back — AFTER the fetch stub had
+         recorded the PUT. So the checks that assert on `puts` passed, and
+         every line of the save that runs after the await never ran at all: the
+         row was never updated, the toast never fired, and "a refused note puts
+         the old text back" was passing on an exception that had nothing to do
+         with the refusal. A stub that stops the code under test halfway does
+         not fail honestly; it passes dishonestly. */
+      getElementById: () => null,
       createElement: (tag) => (tag === 'style'
         ? { tag, textContent: '', attrs: {}, setAttribute(k, v) { this.attrs[k] = v; }, parentNode: null }
         : mkDiv()),
@@ -763,6 +780,14 @@ const BC_PLAN = {
      away by default, so a fixture whose only note sits there makes every
      check on the note box assert against markup that was never drawn. */
   componentNote: { PS_iGO_NLG: 'waiting on the migration', PS_RES_NLG: 'parked until Q4' },
+  /* AND THE SAME TWO ROWS' SPRINT NOTES, which are a different thing entirely.
+     Keyed on `jira:900` because that is the Jira sprint BC_SPRINT resolves to
+     for titan — the key the model builds, not the plan's `S40`. Deliberately
+     different text from the component notes above, so a box showing the wrong
+     one is visible rather than plausible. */
+  sprintComponentNote: {
+    'jira:900': { PS_iGO_NLG: 'two cases left this sprint', PS_RES_NLG: 'nothing planned' },
+  },
   excludedComponents: [],
   coverageTeams: ['Katalon Auto Titan'],
 };
@@ -1507,24 +1532,62 @@ check('THE NOTE IS AN EDITABLE BOX, capped by the model that enforces it', async
     `the box offers a length other than the server's ${max}`);
   // The existing note is in the box AND in data-was, so a blur with nothing
   // typed can be told from a real edit.
-  assert.ok(/data-was="waiting on the migration"/.test(body),
+  assert.ok(/data-was="two cases left this sprint"/.test(body),
     'the box does not remember what it started as');
+  /* AND IT IS THE SPRINT'S NOTE, not the component's. They are deliberately
+     different strings in the fixture, so a box wired to the wrong one shows a
+     sentence nobody expected rather than passing on a coincidence. */
+  assert.ok(!/data-was="waiting on the migration"/.test(body),
+    'the box is still showing the global component note');
 });
 
-check('EDITING IT SAVES TO THE SAME NOTE THE OTHER SCREEN EDITS', async () => {
-  /* One entry per component in the plan, one route. Not a second
-     capacity-only note: "waiting on the migration" is a fact about the suite,
-     not about this sprint, and two boxes holding two versions of it is how
-     the one you are not looking at goes stale. */
+check('AND IT CARRIES THE COMPONENT NOTE AS CONTEXT, read-only', async () => {
+  /* The global note is what you want in front of you while writing this
+     sprint's — "no longer supported", "client asked us to hold". Having to open
+     another screen to remember it is how the two end up contradicting each
+     other. In the tooltip rather than a second column: this sheet is already
+     sixteen columns wide, and the Prioritization screen owns that note. */
+  const body = byCompSection((await renderByComp()).html);
+  const row = body.slice(body.indexOf('PS_iGO_NLG'), body.indexOf('</tr>', body.indexOf('PS_iGO_NLG')));
+  assert.match(row, /title="[^"]*waiting on the migration[^"]*"/,
+    'the component note is nowhere on the row');
+  assert.ok(!/data-bc-note="PS_iGO_NLG"[^>]*value="waiting on the migration"/.test(row),
+    'the component note is editable here, which is the other screen\'s job');
+});
+
+check('EDITING IT SAVES TO THE SPRINT, not to the component', async () => {
+  /* The change. What gets typed in this column is this sprint's plan — "2 cases
+     remaining; both will be picked up this sprint" — and it used to be written
+     into the field the Prioritization screen shows, where it would still be
+     stating March's plan in March. */
   const r = await renderByComp();
   await r.mount.fire('focusout',
     { bcNote: 'PS_iGO_NLG', was: '' },
     { value: 'chasing the vendor', disabled: false });
   assert.strictEqual(r.puts.length, 1, 'the edit wrote nothing');
   assert.strictEqual(r.puts[0].method, 'PUT');
-  assert.ok(r.puts[0].url.includes('/api/component-note'),
+  assert.ok(r.puts[0].url.includes('/api/sprint-note'),
     `the note went somewhere else: ${r.puts[0].url}`);
-  assert.deepStrictEqual(r.puts[0].body, { component: 'PS_iGO_NLG', note: 'chasing the vendor' });
+  assert.ok(!r.puts[0].url.includes('/api/component-note'),
+    'the sheet is still writing the global note');
+  /* THE TEAM AND SPRINT TRAVEL, and the SERVER turns them into the key. A
+     client free to name its own key could write a note nothing reads back. */
+  assert.deepStrictEqual(r.puts[0].body, {
+    team: 'titan', sprint: 'S40', component: 'PS_iGO_NLG', note: 'chasing the vendor',
+  });
+  assert.ok(!('key' in r.puts[0].body), 'the browser is naming the storage key itself');
+
+  /* AND THE ROW IN MEMORY IS UPDATED, on the right field. The section redraws
+     itself on every chip click and fold without refetching, so a save that
+     wrote the new text onto `note` would put this sprint's plan into the
+     component-note tooltip the moment anything else on the sheet was touched —
+     and leave the box showing the old text. */
+  const row = (r.payload.byComponent.rows || []).find(x => x.component === 'PS_iGO_NLG');
+  assert.ok(row, 'the payload has no row to update');
+  if (process.env.DBGROW) console.log('ROWS:', r.payload.byComponent.rows.map(x => `${x.component}=${x.sprintNote}`).join(' | '));
+  assert.strictEqual(row.sprintNote, 'chasing the vendor', 'the saved text did not reach the row');
+  assert.strictEqual(row.note, 'waiting on the migration',
+    'saving the sprint note overwrote the component note held on the row');
 });
 
 check('A BLUR WITH NOTHING CHANGED IS NOT AN EDIT', async () => {
@@ -1925,24 +1988,61 @@ check('THE NOTE IS AN EDITABLE BOX, capped by the model that enforces it', async
     `the box offers a length other than the server's ${max}`);
   // The existing note is in the box AND in data-was, so a blur with nothing
   // typed can be told from a real edit.
-  assert.ok(/data-was="waiting on the migration"/.test(body),
+  assert.ok(/data-was="two cases left this sprint"/.test(body),
     'the box does not remember what it started as');
+  /* AND IT IS THE SPRINT'S NOTE, not the component's. They are deliberately
+     different strings in the fixture, so a box wired to the wrong one shows a
+     sentence nobody expected rather than passing on a coincidence. */
+  assert.ok(!/data-was="waiting on the migration"/.test(body),
+    'the box is still showing the global component note');
 });
 
-check('EDITING IT SAVES TO THE SAME NOTE THE OTHER SCREEN EDITS', async () => {
-  /* One entry per component in the plan, one route. Not a second
-     capacity-only note: "waiting on the migration" is a fact about the suite,
-     not about this sprint, and two boxes holding two versions of it is how
-     the one you are not looking at goes stale. */
+check('AND IT CARRIES THE COMPONENT NOTE AS CONTEXT, read-only', async () => {
+  /* The global note is what you want in front of you while writing this
+     sprint's — "no longer supported", "client asked us to hold". Having to open
+     another screen to remember it is how the two end up contradicting each
+     other. In the tooltip rather than a second column: this sheet is already
+     sixteen columns wide, and the Prioritization screen owns that note. */
+  const body = byCompSection((await renderByComp()).html);
+  const row = body.slice(body.indexOf('PS_iGO_NLG'), body.indexOf('</tr>', body.indexOf('PS_iGO_NLG')));
+  assert.match(row, /title="[^"]*waiting on the migration[^"]*"/,
+    'the component note is nowhere on the row');
+  assert.ok(!/data-bc-note="PS_iGO_NLG"[^>]*value="waiting on the migration"/.test(row),
+    'the component note is editable here, which is the other screen\'s job');
+});
+
+check('EDITING IT SAVES TO THE SPRINT, not to the component', async () => {
+  /* The change. What gets typed in this column is this sprint's plan — "2 cases
+     remaining; both will be picked up this sprint" — and it used to be written
+     into the field the Prioritization screen shows, where it would still be
+     stating March's plan in March. */
   const r = await renderByComp();
   await r.mount.fire('focusout',
     { bcNote: 'PS_iGO_NLG', was: '' },
     { value: 'chasing the vendor', disabled: false });
   assert.strictEqual(r.puts.length, 1, 'the edit wrote nothing');
   assert.strictEqual(r.puts[0].method, 'PUT');
-  assert.ok(r.puts[0].url.includes('/api/component-note'),
+  assert.ok(r.puts[0].url.includes('/api/sprint-note'),
     `the note went somewhere else: ${r.puts[0].url}`);
-  assert.deepStrictEqual(r.puts[0].body, { component: 'PS_iGO_NLG', note: 'chasing the vendor' });
+  assert.ok(!r.puts[0].url.includes('/api/component-note'),
+    'the sheet is still writing the global note');
+  /* THE TEAM AND SPRINT TRAVEL, and the SERVER turns them into the key. A
+     client free to name its own key could write a note nothing reads back. */
+  assert.deepStrictEqual(r.puts[0].body, {
+    team: 'titan', sprint: 'S40', component: 'PS_iGO_NLG', note: 'chasing the vendor',
+  });
+  assert.ok(!('key' in r.puts[0].body), 'the browser is naming the storage key itself');
+
+  /* AND THE ROW IN MEMORY IS UPDATED, on the right field. The section redraws
+     itself on every chip click and fold without refetching, so a save that
+     wrote the new text onto `note` would put this sprint's plan into the
+     component-note tooltip the moment anything else on the sheet was touched —
+     and leave the box showing the old text. */
+  const row = (r.payload.byComponent.rows || []).find(x => x.component === 'PS_iGO_NLG');
+  assert.ok(row, 'the payload has no row to update');
+  assert.strictEqual(row.sprintNote, 'chasing the vendor', 'the saved text did not reach the row');
+  assert.strictEqual(row.note, 'waiting on the migration',
+    'saving the sprint note overwrote the component note held on the row');
 });
 
 check('A BLUR WITH NOTHING CHANGED IS NOT AN EDIT', async () => {

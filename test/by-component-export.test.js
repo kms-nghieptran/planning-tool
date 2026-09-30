@@ -295,9 +295,21 @@ check('THE KEYS TRAVEL WITH THE COUNTS', async () => {
   assert.ok(got.length > 1, 'fixture check: this cell counts more than one epic');
 });
 
-check('the note travels, commas, quotes and all', async () => {
+check('the component note travels, commas, quotes and all', async () => {
   const s = await sheet();
-  assert.strictEqual(s.cell('PS_iGO_NLG', 'Notes'), 'Waiting on the, ahem, "migration"');
+  assert.strictEqual(s.cell('PS_iGO_NLG', 'Component note'), 'Waiting on the, ahem, "migration"');
+});
+
+check('AND THE SPRINT NOTE IS ITS OWN COLUMN, not folded into that one', async () => {
+  /* They answer different questions — what is true of the suite, and what is
+     true of it this sprint. One column holding whichever the screen happens to
+     edit is how a forwarded spreadsheet comes to state last quarter's plan as a
+     standing fact about a component. */
+  const s = await sheet();
+  assert.notStrictEqual(s.cell('PS_iGO_NLG', 'Sprint note'), undefined,
+    'the file has no sprint-note column');
+  assert.strictEqual(s.cell('PS_iGO_NLG', 'Sprint note'), '',
+    'a sprint with no note of its own borrowed the component one');
 });
 
 check('the family is the SHORT name, the one you group by', async () => {

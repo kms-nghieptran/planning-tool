@@ -924,6 +924,153 @@ check('half an override is refused, and so is a backwards one', async () => {
   assert.strictEqual(gone.status, 404);
 });
 
+/* ── THE SPRINT'S OWN NOTE, OVER THE WIRE ───────────────────────────────
+ *
+ * The Capacity sheet's note column used to write the GLOBAL component note.
+ * What actually got typed into it was this sprint's plan — "2 cases remaining;
+ * both will be picked up this sprint" — sitting in a field that would still be
+ * showing it next quarter.
+ *
+ * The route is separate from `/api/component-note` rather than a flag on it:
+ * the two answer different questions and are stored in different shapes, and a
+ * single route that switched on a parameter is one typo away from putting a
+ * sprint note in the global column.
+ *
+ * S39 is `jira:939` for titan — `sprint()` above builds the id that way.
+ */
+
+/** One by-component row as the Capacity sheet receives it, notes and all.
+    Read through the endpoint the sheet actually calls rather than out of the
+    plan file: a note that is stored and not served is a note he types once and
+    never sees again, and only this path can tell the two apart. */
+const bcRow = async (sprintId, component) => {
+  const r = await call('GET', `/api/capacity?team=titan&sprint=${sprintId}`);
+  assert.strictEqual(r.status, 200, JSON.stringify(r.body).slice(0, 200));
+  const bc = r.body.byComponent || {};
+  return (bc.rows || []).find(x => x.component === component)
+    || { component, note: null, sprintNote: null, __missing: true };
+};
+
+check('A SPRINT NOTE IS STORED AGAINST THE JIRA SPRINT, not the plan row', async () => {
+  const r = await call('PUT', '/api/sprint-note',
+    { team: 'titan', sprint: 'S39', component: 'PS_iGO_NLG', note: 'two cases left' });
+  assert.strictEqual(r.status, 200, JSON.stringify(r.body));
+  assert.strictEqual(r.body.sprintNoteKey, 'jira:939',
+    `keyed on ${r.body.sprintNoteKey} rather than the Jira sprint`);
+  assert.deepStrictEqual(r.body.notes, { PS_iGO_NLG: 'two cases left' });
+});
+
+check('AND IT DOES NOT TOUCH THE COMPONENT NOTE', async () => {
+  await call('PUT', '/api/component-note', { component: 'PS_iGO_NLG', note: 'no longer supported' });
+  await call('PUT', '/api/sprint-note',
+    { team: 'titan', sprint: 'S39', component: 'PS_iGO_NLG', note: 'this sprint only' });
+
+  const row = await bcRow('S39', 'PS_iGO_NLG');
+  assert.strictEqual(row.note, 'no longer supported',
+    'writing the sprint note overwrote the component note');
+  assert.strictEqual(row.sprintNote, 'this sprint only');
+});
+
+check('AND CLEARING ONE LEAVES THE OTHER ALONE', async () => {
+  await call('PUT', '/api/sprint-note',
+    { team: 'titan', sprint: 'S39', component: 'PS_iGO_NLG', note: '' });
+  const row = await bcRow('S39', 'PS_iGO_NLG');
+  assert.strictEqual(row.note, 'no longer supported',
+    'clearing the sprint note cleared the component note');
+  assert.strictEqual(row.sprintNote, null, `the sprint note survived clearing: ${row.sprintNote}`);
+  // Restore, so later checks are not reading a half-cleared fixture.
+  await call('PUT', '/api/component-note', { component: 'PS_iGO_NLG', note: null });
+});
+
+check('TWO SPRINTS KEEP TWO NOTES', async () => {
+  /* ON A COMPONENT THE SHEET ACTUALLY DRAWS. An invented name gets no row —
+     only ranked components do — so reading its note back returns null whatever
+     was stored, and the check passes having tested nothing. */
+  const C = 'PS_iGO_NLG';
+  await call('PUT', '/api/sprint-note', { team: 'titan', sprint: 'S39', component: C, note: 'in 39' });
+  await call('PUT', '/api/sprint-note', { team: 'titan', sprint: 'S40', component: C, note: 'in 40' });
+  const a = await bcRow('S39', C);
+  const b = await bcRow('S40', C);
+  assert.ok(!a.__missing && !b.__missing, 'fixture check: that component has no row, so this cannot bite');
+  assert.strictEqual(a.sprintNote, 'in 39');
+  assert.strictEqual(b.sprintNote, 'in 40', "the second sprint is showing the first sprint's note");
+});
+
+check('A SPRINT WITH NO JIRA ID IS KEYED BY TEAM AND ROW, never shared', async () => {
+  /* `L1` is local to everyone — created here, on nobody's board. Two teams
+     writing to it must not land on one key, which is what an undefined `jiraId`
+     interpolated into a string would do. */
+  const a = await call('PUT', '/api/sprint-note',
+    { team: 'titan', sprint: 'L1', component: 'PS_A', note: 'titan local' });
+  const b = await call('PUT', '/api/sprint-note',
+    { team: 'malphite', sprint: 'L1', component: 'PS_A', note: 'malphite local' });
+  assert.strictEqual(a.status, 200, JSON.stringify(a.body));
+  assert.strictEqual(b.status, 200, JSON.stringify(b.body));
+  assert.notStrictEqual(a.body.sprintNoteKey, b.body.sprintNoteKey,
+    `two teams collapsed onto ${a.body.sprintNoteKey}`);
+  assert.ok(!/undefined|jira:\s*$/.test(a.body.sprintNoteKey), `a broken key: ${a.body.sprintNoteKey}`);
+  assert.deepStrictEqual(a.body.notes, { PS_A: 'titan local' });
+  assert.deepStrictEqual(b.body.notes, { PS_A: 'malphite local' });
+});
+
+check('AND A SPRINT ONE TEAM HAS ADOPTED IS THAT TEAM\'S JIRA SPRINT', async () => {
+  /* `L2` is local to everyone except Titan, which has its own Jira copy. Titan
+     keys on the real sprint; Malphite falls back. */
+  const t = await call('PUT', '/api/sprint-note',
+    { team: 'titan', sprint: 'L2', component: 'PS_A', note: 'titan' });
+  const m = await call('PUT', '/api/sprint-note',
+    { team: 'malphite', sprint: 'L2', component: 'PS_A', note: 'malphite' });
+  assert.strictEqual(t.body.sprintNoteKey, 'jira:9500', `titan keyed on ${t.body.sprintNoteKey}`);
+  assert.ok(m.body.sprintNoteKey.startsWith('plan:'), `malphite keyed on ${m.body.sprintNoteKey}`);
+});
+
+check('THE BROWSER CANNOT NAME ITS OWN KEY', async () => {
+  /* A client free to pick the key could write a note nothing ever reads back —
+     and the box would look like it saved. The key is the server's. */
+  const r = await call('PUT', '/api/sprint-note', {
+    team: 'titan', sprint: 'S39', component: 'PS_KEYED', note: 'x',
+    key: 'jira:9999', sprintNoteKey: 'jira:9999',
+  });
+  assert.strictEqual(r.status, 200);
+  assert.strictEqual(r.body.sprintNoteKey, 'jira:939', 'a key from the request body was honoured');
+});
+
+check('AN UNKNOWN TEAM OR SPRINT IS REFUSED, not filed somewhere odd', async () => {
+  const noTeam = await call('PUT', '/api/sprint-note',
+    { team: 'nope', sprint: 'S39', component: 'PS_A', note: 'x' });
+  assert.strictEqual(noTeam.status, 400, JSON.stringify(noTeam.body));
+  const noSprint = await call('PUT', '/api/sprint-note',
+    { team: 'titan', sprint: 'nope', component: 'PS_A', note: 'x' });
+  assert.strictEqual(noSprint.status, 400, JSON.stringify(noSprint.body));
+  /* A SENTENCE HE CAN ACT ON, not a stack trace. */
+  assert.match(String(noSprint.body.error), /sprint/i);
+});
+
+check('AN OVERSIZED NOTE IS REFUSED RATHER THAN TRUNCATED', async () => {
+  const C = 'PS_iGO_NLG';
+  await call('PUT', '/api/sprint-note', { team: 'titan', sprint: 'S39', component: C, note: 'the good one' });
+  const r = await call('PUT', '/api/sprint-note',
+    { team: 'titan', sprint: 'S39', component: C, note: 'x'.repeat(5000) });
+  assert.strictEqual(r.status, 400, JSON.stringify(r.body));
+  /* AND THE ONE THAT WAS THERE IS UNHARMED. A refusal that had already edited
+     the stored map would take the previous note with it. */
+  assert.strictEqual((await bcRow('S39', C)).sprintNote, 'the good one',
+    'a refused note overwrote the one already stored');
+});
+
+check('AND THE SPRINT NOTE SURVIVES A ROUND TRIP THROUGH THE STORE', async () => {
+  /* The plan is persisted key by key. A new one that is not on that list is
+     written, read back empty, and every note typed that session is gone — with
+     nothing on screen saying so. */
+  const C = 'PS_iGO_NLG';
+  await call('PUT', '/api/sprint-note',
+    { team: 'titan', sprint: 'S39', component: C, note: 'survives a save' });
+  const row = await bcRow('S39', C);
+  assert.ok(!row.__missing, 'fixture check: that component has no row');
+  assert.strictEqual(row.sprintNote, 'survives a save',
+    'the sprint notes did not come back out of the store');
+});
+
 /* ── run ───────────────────────────────────────────────────────────── */
 
 server.listen(0, '127.0.0.1', async () => {
