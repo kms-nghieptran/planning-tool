@@ -31,6 +31,7 @@ process.env.STORE_DIR = SCRATCH;
 const insights = require('../lib/insights');
 const priority = require('../lib/priority');
 const prioritization = require('../lib/prioritization');
+const coverage = require('../lib/coverage');
 
 let passed = 0, failed = 0;
 const checks = [];
@@ -765,17 +766,30 @@ const BC_PLAN = {
   excludedComponents: [],
   coverageTeams: ['Katalon Auto Titan'],
 };
-const bcEpic = (key, components, automationStatus) => ({
+const bcEpic = (key, components, automationStatus, o = {}) => ({
   key, issueType: 'Epic', summary: `Epic ${key}`, components,
-  automationStatus, labels: [], team: 'Katalon Auto Titan', status: 'Open',
+  automationStatus, labels: [], team: 'Katalon Auto Titan', status: 'Open', ...o,
 });
 const BC_SNAP = {
   ...SNAP,
   issues: {
     ...SNAP.issues,
     'E-1': bcEpic('E-1', ['PS_iGO_NLG', 'TrueTest'], 'Maintenance'),
+    /* RETIRED, BUT STILL IN THE MAINTENANCE QUEUE — the case the Maintenance
+       marker exists for, and the only one that can reach that column: an epic
+       whose Automation Status reads Blocked is counted in the Blocked column
+       instead, so on this column only the label can flag anything. Status
+       wins over the label in `bucketOf`, which is exactly why `isObsolete`
+       has to be asked separately. */
+    'E-OBS': bcEpic('E-OBS', ['PS_iGO_NLG', 'TrueTest'], 'Maintenance', { labels: ['Phase1', 'obsolete'] }),
     'E-2': bcEpic('E-2', ['PS_iGO_NLG'], 'Ready for Automation'),
     'E-3': bcEpic('E-3', ['KAT_Common'], 'Blocked'),
+    /* RETIRED IN THE OTHER TWO BUCKETS. The model flags all three; only
+       Maintenance is drawn. Without these the "only Maintenance carries a
+       marker" check passes because nothing is flagged there to draw — it would
+       be agreeing with a page that had quietly started marking three columns. */
+    'E-ROBS': bcEpic('E-ROBS', ['PS_iGO_NLG'], 'Ready for Automation', { labels: ['obsolete'] }),
+    'E-BOBS': bcEpic('E-BOBS', ['PS_iGO_NLG'], 'Blocked', { labels: ['obsoleted'] }),
     /* NO JIRA TEAM — the PS_iGO_Lafayette defect. `coverageTeams` below is
        given a real allow-list so it actually bites; with an empty one every
        epic is in scope anyway and this case cannot be reproduced. */
@@ -1252,6 +1266,109 @@ check('AND A PLANNED CELL SAYS WHICH SPRINT IT CAME FROM', async () => {
     'the planned drawer is explained as if it were the portfolio backlog');
   assert.ok(/Katalon Titan planned/.test(d),
     'the planned drawer does not say whose work it is listing');
+});
+
+check('THE MAINTENANCE NUMBER CARRIES A MARKER when part of it is retired', async () => {
+  /* His request. A Maintenance count reads as "suites waiting to be fixed",
+     and a retired one is not waiting for anything. */
+  const r = await renderByComp();
+  const section = byCompSection(r.html);
+  const rows = r.payload.byComponent.rows;
+  const flagged = rows.find(x => coverage.TOOLS.some(t => ((x[t.key].flagged || {}).maintenance || []).length));
+  assert.ok(flagged, 'fixture check: no component has a retired Maintenance suite');
+  const tool = coverage.TOOLS.find(t => ((flagged[t.key].flagged || {}).maintenance || []).length);
+
+  const row = section.slice(section.indexOf(flagged.component), section.indexOf('</tr>', section.indexOf(flagged.component)));
+  const mark = row.match(/<button[^>]*data-cell="flag-maintenance"[^>]*>/);
+  assert.ok(mark, `no marker beside Maintenance for ${flagged.component}: ${row}`);
+  assert.match(mark[0], /class="stuck-mark"/,
+    'the marker does not use the same shape as the planned columns\' one');
+  assert.ok(mark[0].includes(`data-tool="${tool.key}"`), 'the marker names a different tool');
+  assert.match(mark[0], /aria-label="[^"]+"/, 'the marker says nothing to a screen reader');
+  assert.match(mark[0], /title="[^"]*obsolete[^"]*"/i, 'the tooltip does not say what it means');
+
+  /* ITS OWN COUNT, because its text is "!". The click handler scrapes digits
+     off a control's text when it has no `data-n`, which yields 0 here and
+     silently switches off the "this cell was redrawn while the drawer was
+     opening" check. */
+  const n = ((flagged[tool.key].flagged || {}).maintenance || []).length;
+  assert.ok(mark[0].includes(`data-n="${n}"`),
+    `the marker does not carry its count, so the redraw check is disabled: ${mark[0]}`);
+});
+
+check('AND NO MARKER WHERE NOTHING IS FLAGGED', async () => {
+  /* A marker that is always there is one nobody reads. */
+  const r = await renderByComp();
+  const section = byCompSection(r.html);
+  for (const x of r.payload.byComponent.rows) {
+    const none = coverage.TOOLS.every(t => !((x[t.key].flagged || {}).maintenance || []).length);
+    if (!none) continue;
+    const row = section.slice(section.indexOf(x.component), section.indexOf('</tr>', section.indexOf(x.component)));
+    assert.ok(!/data-cell="flag-maintenance"/.test(row),
+      `${x.component} has nothing retired and grew a marker`);
+  }
+});
+
+check('AND READY AND BLOCKED CARRY IT TOO, because that is where his are', async () => {
+  /* Only Maintenance was asked for, and on his store Maintenance is the one
+     backlog column a retired suite CANNOT reach: an obsolete epic that kept a
+     status has a Blocked one, and one with no status is bucketed "obsoleted"
+     and never enters the backlog. Marking Maintenance alone ships something
+     invisible. The condition is identical in all three columns, so all three
+     ask it. */
+  const r = await renderByComp();
+  const section = byCompSection(r.html);
+  for (const b of ['maintenance', 'ready', 'blocked']) {
+    const any = r.payload.byComponent.rows.some(x =>
+      coverage.TOOLS.some(t => ((x[t.key].flagged || {})[b] || []).length));
+    assert.ok(any, `fixture check: nothing is flagged under ${b}, so this check cannot bite`);
+    assert.ok(section.includes(`data-cell="flag-${b}"`), `the ${b} column carries no marker`);
+  }
+});
+
+check('AND NO COLUMN IS MARKED WHERE NOTHING IS FLAGGED', async () => {
+  /* The other half of the same guarantee, now that all three are eligible: a
+     marker on a column with nothing retired in it opens a drawer listing
+     nothing. Swept per column rather than per row, so a page that drew the
+     marker unconditionally is caught wherever it did it. */
+  const r = await renderByComp();
+  const section = byCompSection(r.html);
+  const marks = [...section.matchAll(/data-row="([^"]*)"[^>]*data-tool="([^"]*)"[^>]*data-cell="flag-([^"]*)"/g)];
+  assert.ok(marks.length, 'fixture check: no markers at all, so this check cannot bite');
+  for (const [, row, tool, bucket] of marks) {
+    const x = r.payload.byComponent.rows.find(y => y.component === row);
+    assert.ok(x, `a marker names a component the payload does not have: ${row}`);
+    assert.ok((((x[tool] || {}).flagged || {})[bucket] || []).length > 0,
+      `${row}/${tool}/${bucket} carries a marker with nothing flagged behind it`);
+  }
+});
+
+check('CLICKING IT OPENS THE RETIRED SUITES, and says it is a subset', async () => {
+  const r = await renderByComp();
+  const rows = r.payload.byComponent.rows;
+  const flagged = rows.find(x => coverage.TOOLS.some(t => ((x[t.key].flagged || {}).maintenance || []).length));
+  const tool = coverage.TOOLS.find(t => ((flagged[t.key].flagged || {}).maintenance || []).length);
+  const keys = flagged[tool.key].flagged.maintenance;
+
+  await r.mount.click({ act: 'bc-epics', row: flagged.component, tool: tool.key, cell: 'flag-maintenance', __text: String(keys.length) });
+  const d = r.mount.drawn;
+  assert.ok(d, 'the marker opened no drawer');
+  for (const k of keys) assert.ok(d.includes(k), `the drawer does not list ${k}`);
+
+  /* IT MUST NOT READ AS THE WHOLE COLUMN. Two rows under a column saying 425
+     is the kind of panel that makes somebody distrust the number beside it.
+     Asserted on the HEADING element, not on the drawer's html: the body
+     explains the same thing in prose, so a loose match would go on passing
+     with a heading that just said "Maintenance". */
+  const head = (d.match(/<div class="eyebrow">(?:<i><\/i>)?([^<]*)</) || [])[1] || '';
+  assert.match(head, /Maintenance/, `the heading does not name the column: ${head}`);
+  assert.match(head, /retired/i, `the heading reads as the whole Maintenance queue: ${head}`);
+  assert.match(d, /nobody intends to work/i, 'the drawer does not explain what it is listing');
+  assert.match(d, /obsolete/i, 'the drawer does not name the reason');
+
+  /* AND THE REASON IS ON THE ROW, drawn from the labels the model now sends. */
+  assert.match(d, /class="drill-blocked"/, 'the reason is not marked on the rows');
+  assert.match(d, /Retired/, 'a retired suite is not said to be retired');
 });
 
 check('A REFUSED CELL SAYS SO RATHER THAN OPENING AN EMPTY DRAWER', async () => {
@@ -3980,8 +4097,12 @@ check('A CLOSED SPRINT WIRES NO SAVE HANDLER, belt as well as braces', async () 
  * a warning that is always there is one nobody reads.
  */
 
-/** Every marker the sheet drew, as {row, tool, cell, n}. */
-const marksIn = (html) => [...html.matchAll(/<button type="button" class="stuck-mark"[^>]*>/g)]
+/** Every PLANNED-column marker the sheet drew, as {row, tool, cell, n}.
+    SCOPED TO `stuck-*`. The backlog columns now draw the same `!` — same
+    class on purpose, so the two read as one idea — and a sweep that matched
+    every `.stuck-mark` started failing here for a marker these checks were
+    never about. The cell name is the honest discriminator. */
+const marksIn = (html) => [...html.matchAll(/<button type="button" class="stuck-mark"[^>]*data-cell="stuck-[^"]*"[^>]*>/g)]
   .map(m => ({
     n: Number((m[0].match(/data-n="(\d+)"/) || [])[1]),
     row: (m[0].match(/data-row="([^"]*)"/) || [])[1],
@@ -4032,7 +4153,7 @@ check('THE MARKER CARRIES ITS OWN COUNT, because its text is "!"', async () => {
      exclamation mark, which scrapes to 0. Without `data-n` every open would
      announce that the sheet had changed since it was clicked. */
   const html = (await renderByComp()).html;
-  const marks = [...html.matchAll(/<button type="button" class="stuck-mark"[^>]*>(.*?)<\/button>/g)];
+  const marks = [...html.matchAll(/<button type="button" class="stuck-mark"[^>]*data-cell="stuck-[^"]*"[^>]*>(.*?)<\/button>/g)];
   assert.ok(marks.length, 'fixture check: the sheet has at least one marker');
   for (const m of marks) {
     assert.strictEqual(m[1], '!', 'the marker is no longer an exclamation mark');
@@ -4045,7 +4166,7 @@ check('IT IS A BUTTON A KEYBOARD CAN REACH, and it says what it opens', async ()
      this opens a list, so it is an action, and an action has to be reachable
      and announced. A styled <span> would be neither. */
   const html = (await renderByComp()).html;
-  const marks = [...html.matchAll(/<button type="button" class="stuck-mark"[^>]*>/g)].map(m => m[0]);
+  const marks = [...html.matchAll(/<button type="button" class="stuck-mark"[^>]*data-cell="stuck-[^"]*"[^>]*>/g)].map(m => m[0]);
   assert.ok(marks.length, 'fixture check');
   for (const m of marks) {
     assert.match(m, /aria-label="[^"]+"/, 'the marker has no accessible name');

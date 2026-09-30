@@ -467,6 +467,55 @@ const CapacityView = (() => {
       aria-label="${UI.esc(`Show the ${n} blocked ${n === 1 ? 'item' : 'items'} planned against ${r.component}`)}">!</button>`;
   }
 
+  /**
+   * PART OF THIS QUEUE IS NOT REALLY QUEUED.
+   *
+   * A Maintenance count is read as "suites waiting to be fixed", and some of
+   * them are not waiting for anything: the epic has been retired with an
+   * `obsolete` label. On his board two of the 425 Maintenance epics are retired
+   * and only the label says so — nothing in the number, and nothing in the
+   * drawer behind it, distinguished them.
+   *
+   * THE OTHER HALF OF THE ASK IS THE BLOCKED COLUMN ITSELF. "Automation Status
+   * = Blocked" is what puts an epic in that column, so it can never be true of
+   * a Maintenance row and is true of every Blocked row — see the note in
+   * `prioritization.js` at the point the flag is decided.
+   *
+   * The same `!` as the Active sprint's In flight marker and the planned
+   * columns' stuck marker, sitting beside its number rather than becoming a
+   * column of its own — it qualifies that count, it is not more work.
+   *
+   * ON ALL THREE BACKLOG COLUMNS, THOUGH ONLY MAINTENANCE WAS ASKED FOR.
+   * Measured against his store before choosing, and on Maintenance this marker
+   * draws NOTHING: an epic labelled obsolete either kept a real Automation
+   * Status — and every one of his reads Blocked — or has no status at all, in
+   * which case `bucketOf` answers "obsoleted" and it is not in the backlog to
+   * begin with. Today that is 0 retired in Maintenance, 0 in Ready, 8 in
+   * Blocked. Maintenance-only would have shipped an indicator nobody could
+   * ever see, on the one column where the thing it looks for cannot land. The
+   * condition is the same in all three, so it is asked in all three;
+   * restricting it back to what was asked for is this one list.
+   *
+   * NOTHING FLAGGED, NOTHING DRAWN — so the empty columns stay clean.
+   */
+  const FLAG_COLS = ['maintenance', 'ready', 'blocked'];
+  function flagMark(r, tool, bucketKey) {
+    if (!FLAG_COLS.includes(bucketKey)) return '';
+    const keys = ((r[tool] || {}).flagged || {})[bucketKey] || [];
+    if (!keys.length) return '';
+    const n = keys.length;
+    const label = (BACKLOG_SHORT[bucketKey] || bucketKey);
+    /* `data-n`, FOR THE SAME REASON THE PLANNED MARKER CARRIES IT. This
+       control's text is "!", and the click handler falls back to scraping
+       digits off a control's own text — which yields 0 here and quietly
+       disables the check that tells him the cell was redrawn while the drawer
+       was opening. */
+    return `<button type="button" class="stuck-mark" data-act="bc-epics" data-n="${n}"
+      data-row="${UI.esc(r.component)}" data-tool="${UI.esc(tool)}" data-cell="flag-${UI.esc(bucketKey)}"
+      title="${UI.esc(`${n} of the ${label} suites here ${n === 1 ? 'has' : 'have'} been retired — labelled obsolete in Jira, so ${n === 1 ? 'it is' : 'they are'} queued but not intended to be worked`)}"
+      aria-label="${UI.esc(`Show the ${n} retired ${label} ${n === 1 ? 'suite' : 'suites'} in ${r.component}`)}">!</button>`;
+  }
+
   function byComponentRow(r, tools, buckets, planned) {
     // Every key the row counted, both halves, for the component name itself.
     // The NAME still goes to Jira: it is the whole suite, which is a search
@@ -491,7 +540,7 @@ const CapacityView = (() => {
           title="${UI.esc(`${r.priorityLabel} — ${r.priorityName}`)}">${UI.esc(r.priorityLabel)}</span></td>
         ${tools.map((t, ti) => `
           ${buckets.map((b, i) => `
-            <td class="${cellCls(b.key, i, ti)}">${drillNum(r[t.key][b.key], r, t.key, b.key)}</td>`).join('')}
+            <td class="${cellCls(b.key, i, ti)}">${drillNum(r[t.key][b.key], r, t.key, b.key)}${flagMark(r, t.key, b.key)}</td>`).join('')}
           ${planned.map((col, i) => `
             <td class="${cellCls(`plan-${col.key}`, i, ti)}">${drillNum(r[t.key][col.key], r, t.key, col.key)}${stuckMark(r, t.key, col.key)}</td>`).join('')}`).join('')}
         ${byComponentNote(r)}
@@ -649,13 +698,20 @@ const CapacityView = (() => {
       /* THE DRAWER SAYS WHICH POPULATION IT IS LISTING. The two halves are
          counted over different scopes, and a drawer that explained them the
          same way would make the backlog's extra rows look like a bug. */
-      const what = r.half === 'backlog'
-        ? `Across ${UI.esc(((r.scopes || {}).backlog || {}).label || 'all teams')}, with no work in an active sprint.`
+      const what = r.flagged
+        /* A SUBSET, AND IT SAYS SO. Two rows under a column reading 425 has to
+           explain itself immediately or it reads as the column being wrong. */
+        ? `Of the ${UI.esc(String(r.label).split('·').pop().replace(/ — retired$/, '').trim())} queue`
+          + ` across ${UI.esc(((r.scopes || {}).backlog || {}).label || 'all teams')}, the suites that have been`
+          + ' retired — labelled obsolete in Jira, so they are sitting in the queue but nobody intends to work'
+          + ' them again. The label is on each row.'
+        : r.half === 'backlog'
+          ? `Across ${UI.esc(((r.scopes || {}).backlog || {}).label || 'all teams')}, with no work in an active sprint.`
           + ' Excluded components and the coverage allow-list are already applied.'
-        : r.stuck
-          ? `Planned in ${UI.esc((r.sprint && r.sprint.label) || 'this sprint')} and not startable —`
+          : r.stuck
+            ? `Planned in ${UI.esc((r.sprint && r.sprint.label) || 'this sprint')} and not startable —`
             + ' each one is in Refinement, or its Automation Status reads Blocked.'
-          : `Reached from the work ${UI.esc(((r.scopes || {}).planned || {}).label || 'this team')}`
+            : `Reached from the work ${UI.esc(((r.scopes || {}).planned || {}).label || 'this team')}`
             + ` planned in ${UI.esc((r.sprint && r.sprint.label) || 'this sprint')}.`;
       UI.drawer(UI.drillDrawer({
         title: `${ds.row} — ${r.label}`,

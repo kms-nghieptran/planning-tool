@@ -877,8 +877,12 @@ check('AN UNKNOWN CELL IS REFUSED, and says what would have worked', () => {
   assert.strictEqual(at({ cell: '' }).ok, false);
   assert.strictEqual(at({ tool: 'katalon' }).ok, false);
   assert.strictEqual(at({ component: 'PS_iGO_Columbus' }).ok, false, 'an unranked component got a drawer');
+  /* The `flag-*` names are the backlog columns' attention markers: the part of
+     each queue that is retired or blocked. They are cells in their own right
+     for the same reason `stuck-*` is — one drawer, one population. */
   assert.deepStrictEqual(at({ cell: 'automated' }).known,
-    ['maintenance', 'ready', 'blocked', 'build', 'maint', 'stuck-build', 'stuck-maint']);
+    ['maintenance', 'ready', 'blocked', 'build', 'maint', 'stuck-build', 'stuck-maint',
+      'flag-maintenance', 'flag-ready', 'flag-blocked']);
   assert.strictEqual(at({ cell: 'automated' }).count, 0, 'a refusal still returned a count');
 
   /* THE WARNING MARKERS ARE CELLS TOO, and refusable the same way. They list
@@ -1094,6 +1098,139 @@ check('THE DRAWER CARRIES WHY EACH ONE IS BLOCKED', () => {
     assert.match(String(e.automationStatus), /blocked/i,
       `${e.key} sits in the Blocked bucket with automationStatus ${JSON.stringify(e.automationStatus)}`);
   }
+});
+
+/* ── PART OF A QUEUE THAT IS NOT REALLY QUEUED ──────────────────────────
+   A Maintenance count reads as "suites waiting to be fixed", and some of them
+   are not waiting for anything: the epic has been retired with an `obsolete`
+   label. On his board two of Titan's 425 Maintenance epics are retired and
+   only the label says so.
+
+   The other half of the ask — "Automation Status = Blocked" — is the Blocked
+   COLUMN, not a flag: `bucketOf` is exclusive, so that test is false for every
+   Maintenance and Ready row by construction and true for every Blocked row.
+   `B-1` and `B-OBS` below are the fixture that holds the model to that. */
+
+const FLAG_BASE = [
+  epic('M-1', { components: ['PS_iGO_NLG', 'Katalon'], automationStatus: 'Maintenance' }),
+  epic('M-OBS', { components: ['PS_iGO_NLG', 'Katalon'], automationStatus: 'Maintenance', labels: ['Phase1', 'obsolete'] }),
+  epic('R-1', { components: ['PS_iGO_NLG', 'Katalon'], automationStatus: 'Ready for Automation' }),
+  epic('R-OBS', { components: ['PS_iGO_NLG', 'Katalon'], automationStatus: 'Ready for Automation', labels: ['obsoleted'] }),
+  epic('B-1', { components: ['PS_iGO_NLG', 'Katalon'], automationStatus: 'Blocked' }),
+  epic('B-OBS', { components: ['PS_iGO_NLG', 'Katalon'], automationStatus: 'Blocked', labels: ['obsolete'] }),
+];
+const flagSnap = () => {
+  const snap = withSprints({});
+  for (const e of FLAG_BASE) snap.issues[e.key] = e;
+  return snap;
+};
+
+check('THE MAINTENANCE QUEUE FLAGS THE SUITES THAT ARE RETIRED', () => {
+  const snap = flagSnap(), plan = PLAN();
+  const v = build(snap, plan);
+  const cell = cellOf(v, 'PS_iGO_NLG', 'kse');
+  assert.ok(cell.keys.maintenance.includes('M-OBS'), 'fixture check: it is in the Maintenance queue');
+  assert.deepStrictEqual(cell.flagged.maintenance, ['M-OBS'],
+    'the retired Maintenance suite is not flagged');
+  assert.ok(!cell.flagged.maintenance.includes('M-1'), 'an ordinary Maintenance suite was flagged');
+});
+
+check('AND THE FLAGGED SET IS A SUBSET OF THE COLUMN IT SITS ON', () => {
+  /* The marker qualifies the number beside it. Flagging something the column
+     does not count would put "2 of 1" on screen. */
+  const snap = flagSnap(), plan = PLAN();
+  const v = build(snap, plan);
+  for (const r of v.rows) {
+    for (const t of v.tools) {
+      for (const b of ['maintenance', 'ready', 'blocked']) {
+        const flagged = (r[t.key].flagged || {})[b] || [];
+        assert.ok(flagged.length <= r[t.key][b], `${r.component}/${t.key}/${b}: ${flagged.length} flagged of ${r[t.key][b]}`);
+        for (const k of flagged) {
+          assert.ok(r[t.key].keys[b].includes(k), `${k} is flagged under ${b} but the column does not count it`);
+        }
+      }
+    }
+  }
+});
+
+check('AND A BLOCKED-BUCKET EPIC CANNOT BE IN THE MAINTENANCE COLUMN', () => {
+  /* WHY "Automation Status = Blocked" IS NOT ONE OF THE FLAG'S TESTS.
+     `bucketOf` is exclusive: an epic whose status reads Blocked is counted in
+     the Blocked column, never in Maintenance. The status IS the column, so
+     asking it again as a flag can only be false here. */
+  const snap = flagSnap(), plan = PLAN();
+  const v = build(snap, plan);
+  const cell = cellOf(v, 'PS_iGO_NLG', 'kse');
+  for (const k of cell.keys.maintenance) {
+    assert.notStrictEqual(coverage.bucketOf(snap.issues[k]), 'blocked',
+      `${k} is in the Maintenance column with a Blocked status — the buckets are meant to be exclusive`);
+  }
+  assert.ok(cell.keys.blocked.includes('B-1'), 'the Blocked-status epic is not in the Blocked column');
+});
+
+check('AND THE BLOCKED COLUMN FLAGS ONLY THE RETIRED ONES, never all of them', () => {
+  /* THE OTHER END OF THE SAME ARGUMENT, and the reason the rule is `isObsolete`
+     alone. Testing `bucket === 'blocked'` as well reads as harmless — it is
+     unreachable on Maintenance and Ready — but on the Blocked column it is
+     true of every single row, so the marker would fire on 193 of 193. A marker
+     that never distinguishes anything is not a marker, and this is the check
+     that refuses it. The flags are carried for all three buckets, so this
+     holds whether or not the view draws the Blocked one today. */
+  const snap = flagSnap(), plan = PLAN();
+  const cell = cellOf(build(snap, plan), 'PS_iGO_NLG', 'kse');
+  assert.ok(cell.keys.blocked.includes('B-OBS'), 'fixture check: the retired blocked suite is not in the column');
+  assert.ok(cell.keys.blocked.includes('B-1'), 'fixture check: the ordinary blocked suite is not in the column');
+  assert.deepStrictEqual(cell.flagged.blocked, ['B-OBS'],
+    'the Blocked column flags every row it counts — the flag is saying nothing');
+  assert.ok(cell.flagged.blocked.length < cell.keys.blocked.length,
+    'the flagged set is the whole column');
+});
+
+check('AND A RETIRED EPIC THAT KEPT A STATUS IS STILL FLAGGED', () => {
+  /* The case `bucketOf` alone cannot see, and the only one that fires on this
+     column: status wins over the label, so `bucketOf` says "maintenance" and
+     never "obsoleted". Asking `isObsolete` as well is what finds it. */
+  const snap = flagSnap(), plan = PLAN();
+  assert.strictEqual(coverage.bucketOf(snap.issues['M-OBS']), 'maintenance',
+    'precondition: the status wins over the label');
+  assert.strictEqual(coverage.isObsolete(snap.issues['M-OBS']), true, 'precondition: it is labelled obsolete');
+  assert.deepStrictEqual(cellOf(build(snap, plan), 'PS_iGO_NLG', 'kse').flagged.maintenance, ['M-OBS']);
+});
+
+check('THE MARKER OPENS ITS OWN SET, with the reason on each row', () => {
+  const snap = flagSnap(), plan = PLAN();
+  const d = pz.sprintComponentCell(snap, plan, {
+    team: RUBY, sprint: sprintOf(plan, 's40'),
+    component: 'PS_iGO_NLG', tool: 'kse', cell: 'flag-maintenance',
+  });
+  assert.ok(d.ok, `the flag cell was refused: ${JSON.stringify(d.known)}`);
+  assert.strictEqual(d.count, 1, 'the drawer lists a different number from the marker');
+  assert.deepStrictEqual(d.epics.map(e => e.key), ['M-OBS']);
+  assert.strictEqual(d.flagged, true, 'the drawer does not know it is listing a subset');
+  assert.match(d.label, /Maintenance/, 'the heading does not name the column it came from');
+  assert.match(d.label, /retired/i, 'the heading reads as the whole Maintenance queue');
+
+  /* THE REASON HAS TO TRAVEL. The drawer's note that explains a retired suite
+     reads the row's own labels — a row without them is listed under "needs
+     attention" with nothing saying why. */
+  assert.ok((d.epics[0].labels || []).includes('obsolete'),
+    'the labels do not travel, so the drawer cannot say the suite is retired');
+  assert.strictEqual(d.epics[0].automationStatus, 'Maintenance', 'the status does not travel either');
+});
+
+check('AND THE FLAG CELLS ARE REFUSED FOR A COLUMN THAT HAS NONE', () => {
+  /* An unrecognised name answering with an empty list is a drawer saying 0
+     under a marker saying 2 — the rule this route already follows. */
+  const snap = flagSnap(), plan = PLAN();
+  const at = (cell) => pz.sprintComponentCell(snap, plan, {
+    team: RUBY, sprint: sprintOf(plan, 's40'), component: 'PS_iGO_NLG', tool: 'kse', cell,
+  });
+  assert.strictEqual(at('flag-automated').ok, false, 'a bucket this table does not draw was answered');
+  assert.strictEqual(at('flag-build').ok, false, 'a planned column was answered as a backlog flag');
+  /* The ones that DO exist answer, even when empty — an empty flagged set is a
+     real answer, not an unknown cell. */
+  assert.strictEqual(at('flag-ready').ok, true);
+  assert.deepStrictEqual(at('flag-ready').epics.map(e => e.key), ['R-OBS']);
 });
 
 check('THE DRAWER LISTS ITEMS, NOT THE EPICS THE COLUMN COUNTS', () => {
