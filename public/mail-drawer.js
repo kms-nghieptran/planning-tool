@@ -22,6 +22,13 @@
  *               `{ sprint: id }` for the sprint. Sent verbatim with every
  *               preview, send and PDF check, so the words and the attachment
  *               cannot end up answering different questions.
+ *   view        OPTIONAL, and a different thing from `scope`: what the page is
+ *               LOOKING at rather than what was counted — the capacity sheet's
+ *               family chip and clear-row fold. It reaches the printed page and
+ *               nothing else, because it changes the picture and not a single
+ *               figure. Scope moves the numbers; view moves the framing. Two
+ *               bags, because one bag would quietly imply the numbers follow
+ *               the chips.
  *   scopeLabel  what that scope reads as, for the chip at the top.
  *   title       the heading, e.g. "Send Active Sprint".
  *
@@ -60,6 +67,12 @@ const MailDrawer = (() => {
     report: ctx.report || 'coverage',
     team: ctx.team || null,
     ...(ctx.scope || {}),
+    /* NESTED, NOT SPREAD. The scope keys are the request's own vocabulary —
+       `team`, `sprint`, `component` — and the lens is not: spreading `family`
+       alongside them would put a word that means "what is drawn" into the set
+       of words that mean "what was counted", and the next reader would have to
+       know which is which. A bag named `view` says so on the label. */
+    view: ctx.view || {},
     ...extra,
   });
 
@@ -153,6 +166,11 @@ const MailDrawer = (() => {
       name: 'Weekly sprint update',
       subject: '{{team}} — {{sprint}} — {{donepct}} complete',
       body: 'Hi,&#10;&#10;{{sprint}} is {{elapsed}} elapsed and {{done}} of {{committed}} points are done ({{donepct}} of the commitment).&#10;&#10;The full report is attached.',
+    },
+    capacity: {
+      name: 'Sprint capacity plan',
+      subject: '{{team}} — {{sprint}} — capacity plan',
+      body: 'Hi,&#10;&#10;{{team}} has {{capacity}} points of capacity across {{headcount}} people for {{sprint}}, and {{committed}} points are committed ({{load}} load).&#10;&#10;The full plan is attached.',
     },
   };
   const hint = (ctx) => HINTS[(ctx && ctx.report) || 'coverage'] || HINTS.coverage;
@@ -481,6 +499,12 @@ const MailDrawer = (() => {
          report that is what he means: Monday's mail is about the sprint
          running on Monday, not the one that was open when he armed it. */
       sprint: pinned.sprint || null,
+      /* THE LENS PINS LIKE THE COMPONENTS DO, and for the same reason: a
+         weekly capacity plan armed on the PS family is a weekly PS capacity
+         plan. Unlike the sprint it does not resolve itself later — there is no
+         "current family" — so a lens left unpinned would quietly widen every
+         Monday's attachment back to all 98 components. */
+      view: (pinned.view && Object.keys(pinned.view).length) ? pinned.view : { ...((ctx || {}).view || {}) },
     };
   }
 
@@ -544,6 +568,13 @@ const MailDrawer = (() => {
       const sc = ctx.scope || {};
       if (sc.sprint) params.set('sprint', sc.sprint);
       for (const c of (sc.components || [])) params.append('component', c);
+      /* THE LENS TOO, or this button checks a document the send will not
+         produce — which is worse than having no button, because it reports
+         the wrong thing confidently. That is the same failure the comment
+         above describes, one field later. */
+      const vw = ctx.view || {};
+      if (vw.family) params.set('family', String(vw.family));
+      if (vw.showAll) params.set('showall', '1');
       UI.toast('Rendering the PDF — this takes a few seconds');
       window.open(`/api/mail/preview-pdf?${params.toString()}`, '_blank');
     });

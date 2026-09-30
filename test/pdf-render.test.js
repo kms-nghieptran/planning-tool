@@ -250,6 +250,40 @@ check('AND IT CARRIES THE COMPONENT SELECTION', async () => {
     ['A', 'B'], 'an empty entry became an empty filter');
 });
 
+check('AND IT CARRIES THE VIEW LENS, which is a different kind of thing', async () => {
+  /* THE SECOND VERSION OF THE SAME BUG, found on Capacity planning: the sheet
+     filtered to the PS family, the attachment showing all 98 components.
+
+     WHY IT SURVIVED THE FIRST FIX. The component selection above changes what
+     was COUNTED, so the figures in the mail move with it and a mismatch is at
+     least visible to anyone comparing the two. The family chip changes only
+     what is DRAWN — every KPI is team-level and identical under any chip — so
+     when the lens failed to travel, nothing anywhere disagreed. The document
+     was simply the wrong document, quietly, with no number out of place.
+
+     Which is why it travels even though no figure depends on it: the
+     attachment is a picture of a screen, and whatever decides the picture has
+     to travel with the request for it. */
+  const u = pdf.reportUrl('http://127.0.0.1:4322', {
+    route: 'sprints/capacity', team: 'titan', sprint: 'S40',
+    view: { family: 'ps', showAll: true },
+  });
+  const q = new URLSearchParams(u.slice(u.indexOf('?') + 1, u.indexOf('#')));
+  assert.strictEqual(q.get('family'), 'ps', `the family lens did not survive into the URL: ${u}`);
+  assert.strictEqual(q.get('showall'), '1', 'the clear-row fold did not travel');
+  assert.match(u, /#sprints\/capacity$/, 'the lens displaced the route');
+
+  /* NOTHING FOR "ALL", rather than `family=`. An empty parameter and a missing
+     one both have to mean all, and the page treats them alike — but writing
+     one of them makes a sent-unfiltered report look filtered in the log and in
+     any URL somebody pastes into a ticket. */
+  for (const view of [undefined, {}, { family: null }, { family: '' }]) {
+    const plain = pdf.reportUrl('http://127.0.0.1:4322', { view });
+    assert.ok(!/family=/.test(plain), `an unfiltered sheet wrote a family: ${plain}`);
+    assert.ok(!/showall=/.test(plain), `an unexpanded sheet wrote showall: ${plain}`);
+  }
+});
+
 check('AND THE PAGE READS IT BACK', async () => {
   /* The other half of the contract, in a different file: `reportUrl` writes
      `component=` and the coverage view has to seed its picker from it. Either

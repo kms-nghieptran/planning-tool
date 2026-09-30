@@ -730,6 +730,69 @@ check('AND A SPRINT WITH NOTHING IN IT DOES NOT PRODUCE NaN', () => {
   assert.ok(!/NaN|undefined|null|\[object/.test(out), `an empty sprint rendered as "${out}"`);
 });
 
+check('THE CAPACITY FIGURES ARE THE SCREEN\'S OWN NUMBERS', () => {
+  const f = rmail.capacityFiguresFrom({
+    teamName: 'Katalon RDA',
+    totals: {
+      predicted: 80, capacityHours: 320, headcount: 5,
+      planned: 92, overBy: 12, workloadPct: 115, actual: 40, goalPct: 43.5, availableDays: 40,
+    },
+    rows: [
+      { flags: [{ code: 'overloaded' }] },
+      { flags: [{ code: 'overloaded' }] },
+      { flags: [{ code: 'underloaded' }] },
+      { flags: [{ code: 'unplanned' }] },
+      { flags: [] },
+    ],
+    unassigned: { points: 7, count: 3 },
+  }, { sprintLabel: 'RDA Sprint 41' });
+
+  assert.strictEqual(rmail.fill('{{capacity}} pts, {{headcount}} people', f, 'capacity').text, '80 pts, 5 people');
+  assert.strictEqual(rmail.fill('{{committed}}', f, 'capacity').text, '92');
+  assert.strictEqual(rmail.fill('{{load}}', f, 'capacity').text, '115%');
+  assert.strictEqual(rmail.fill('{{overloaded}} over, {{underloaded}} with slack', f, 'capacity').text,
+    '2 over, 2 with slack');
+  assert.strictEqual(rmail.fill('{{unassigned}}', f, 'capacity').text, '7');
+  assert.strictEqual(rmail.fill('{{sprint}}', f, 'capacity').text, 'RDA Sprint 41');
+});
+
+check('AND HEADROOM IS NEGATIVE WHEN THE TEAM IS OVER', () => {
+  /* THE SIGN TRAP. `overBy` is POSITIVE when the team is over capacity, which
+     is the opposite sense of the word on screen — the KPI reads "12 pts of
+     headroom" or "12 pts over capacity" depending on which way it goes.
+     Carrying `overBy` through as `headroom` would put "12 pts of headroom" in
+     front of a client about a team that is twelve points underwater, and
+     every other figure in the mail would be right. */
+  const over = rmail.capacityFiguresFrom({ totals: { overBy: 12 } }, {});
+  assert.strictEqual(rmail.fill('{{headroom}}', over, 'capacity').text, '-12',
+    'a team over capacity was reported as having headroom');
+
+  const spare = rmail.capacityFiguresFrom({ totals: { overBy: -8 } }, {});
+  assert.strictEqual(rmail.fill('{{headroom}}', spare, 'capacity').text, '8',
+    'a team with room to spare was reported as over');
+});
+
+check('AND THE THREE REPORTS DO NOT SHARE A PLACEHOLDER LIST', () => {
+  /* Each report answers a different question, so each offers only the fields
+     that mean something in it. `sprint` asks how the sprint is GOING and has
+     `{{done}}`; `capacity` asks whether the team can take it on and has
+     `{{load}}`. Overlapping them would let a template drift between reports
+     with nothing looking wrong. */
+  const keys = (k) => new Set(rmail.fieldsFor(k).map(f => f.key));
+  const cov = keys('coverage'), spr = keys('sprint'), cap = keys('capacity');
+  assert.ok(cap.has('load') && cap.has('headcount'), 'capacity is missing its own fields');
+  assert.ok(!cap.has('done') && !cap.has('projected'),
+    'capacity offers sprint-progress fields it cannot answer');
+  assert.ok(!spr.has('load') && !spr.has('headcount'),
+    'the sprint report offers capacity fields');
+  assert.ok(!cov.has('load') && !cov.has('committed'), 'coverage offers planning fields');
+  /* Every report keeps the common three, or a template that says "{{team}}"
+     stops working the moment it is written for a different report. */
+  for (const set of [cov, spr, cap]) {
+    for (const k of ['team', 'date', 'sender']) assert.ok(set.has(k), `${k} is missing from a report`);
+  }
+});
+
 check('THE SPRINT ATTACHMENT IS NOT NAMED AFTER THE COVERAGE REPORT', () => {
   const f = rmail.sprintFiguresFrom({ sprint: { name: 'PSA Sprint 41' } }, { today: Date.parse('2026-09-29') });
   const n = rmail.pdfName(f, { report: 'sprint' });

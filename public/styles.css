@@ -1092,6 +1092,14 @@ body.print-mode { background: #fff !important; }
   padding: 9px 12px; background: var(--app-bg-2);
   border-bottom: 1px solid var(--app-line);
 }
+/* THE WHOLE BAR FOLDS THE SECTION, so the whole bar says so. Without the
+   cursor and the hover the head looks inert and nobody discovers it — a hit
+   area you cannot see is one that may as well not be there. The controls
+   sitting in the head keep their own cursor, because they do their own
+   thing. */
+.bl-sec-head { cursor: pointer; }
+.bl-sec-head:hover { background: color-mix(in srgb, var(--app-fg) 5%, var(--app-bg-2)); }
+.bl-sec-head :is(input, select, textarea, label) { cursor: auto; }
 .bl-sec.shut .bl-sec-head { border-bottom: none; }
 .bl-sec-head h3 { margin: 0; font-size: 13px; }
 .bl-sec-head .bl-meta { font-size: 12px; color: var(--app-fg-3); font-variant-numeric: tabular-nums; }
@@ -1711,6 +1719,20 @@ svg text { font-family: var(--font-family-sans, Poppins, system-ui, sans-serif);
   .sidebar, .topbar, .drawer, .toast, .menu-btn, #staleBanner,
   .btn, .scenario-bar, .print-hide { display: none !important; }
 
+  /* ── NOTES, WHOLE ──────────────────────────────────────────────────
+     A `<textarea rows="1">` prints one line and silently drops the rest —
+     the PDF looks complete and is not. `UI.exportPdf` copies each note's
+     live text into a `.print-note` beside it just before printing and takes
+     it away again afterwards, so here the control goes and the text stays.
+     `pre-wrap` because a note may hold newlines, and `break-inside` so a
+     long one is not cut across two sheets. */
+  textarea { display: none !important; }
+  .print-note {
+    display: block !important;
+    white-space: pre-wrap; overflow-wrap: anywhere;
+    font-size: 11.5px; line-height: 1.45; break-inside: avoid;
+  }
+
   .shell, .main-col { display: block; }
   main { padding: 0 !important; max-width: none !important; }
 
@@ -1934,3 +1956,7 @@ svg text { font-family: var(--font-family-sans, Poppins, system-ui, sans-serif);
 
 /* Off-screen until the page is printed. */
 .print-only { display: none; }
+/* Built only for the duration of a print — see `UI.exportPdf`. Hidden on
+   screen so a stray one left behind by an interrupted print cannot show a
+   note twice. */
+.print-note { display: none; }

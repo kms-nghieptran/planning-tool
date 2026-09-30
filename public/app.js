@@ -27,7 +27,13 @@ const App = (() => {
     { id: 'prioritization', label: 'Prioritization', view: () => PrioritizationView },
     { id: 'backlog', label: 'Backlog', view: () => BacklogView, count: s => (s.teamIndex[s.teamId] || {}).backlog },
 
-    { group: 'Sprints' },
+    /* "PLANNING", NOT "SPRINTS". The group holds Capacity planning and
+       Forecast as well as the three sprint screens, and those two are about
+       what the team can take on rather than about any one sprint. THE ROUTE
+       IDS ARE UNCHANGED — they are in saved links, in the print URLs the mail
+       renderer builds, and in localStorage; renaming a heading is a label
+       change and must not become a broken bookmark. */
+    { group: 'Planning' },
     { id: 'sprints/active', label: 'Active sprint', view: () => SprintView, dot: 'active', sprintScoped: true },
     { id: 'sprints/future', label: 'Future sprints', view: () => SprintsView, dot: 'future' },
     { id: 'sprints/closed', label: 'Closed sprints', view: () => SprintsView, dot: 'closed' },
@@ -116,7 +122,11 @@ const App = (() => {
     const q = (() => {
       try { return new URLSearchParams((location && location.search) || ''); } catch { return null; }
     })();
-    const printing = !!(q && q.get('print') === '1');
+    /* MODULE-LEVEL, because `refresh` needs it and lives outside `boot`.
+       A `const` here would be a ReferenceError on the first render in print
+       mode — and only in print mode, which is the one path nobody watches. */
+    printMode = !!(q && q.get('print') === '1');
+    const printing = printMode;
     const asked = {
       team: printing ? (q.get('team') || null) : null,
       sprint: printing ? (q.get('sprint') || null) : null,
@@ -532,6 +542,10 @@ const App = (() => {
    * THE FIRST PAINT IS THE EXCEPTION: there is nothing to keep, so it still
    * shows the loading state rather than an empty frame.
    */
+  /* Whether this page was asked for with `?print=1`. Set at boot, read by
+     `refresh` when it decides whether to copy the notes out for the PDF. */
+  let printMode = false;
+
   async function refresh() {
     renderCrumbs();
     const host = UI.$('#main');
@@ -586,6 +600,25 @@ const App = (() => {
       console.error(err);
     } finally {
       if (hasContent) UI.busy(false);
+
+      /* ── NOTES, FOR THE PDF A CLIENT ACTUALLY RECEIVES ────────────────
+         A `<textarea rows="1">` prints one line and drops the rest, so every
+         note has to be copied out into a plain node before the page is
+         printed. `UI.exportPdf` does that for the on-screen button — and
+         THERE ARE TWO PRINT PATHS. The emailed PDF never goes near that
+         function: headless Chrome loads this same page with `?print=1` and
+         prints it. So the fix that made Export PDF carry whole notes did
+         nothing at all for the attachment, which is the copy that matters
+         most and the one nobody proofreads.
+
+         HERE, AND NOT EARLIER, because the notes only exist once a view has
+         rendered — and before the `ptRendered` marker below, which is the
+         signal the renderer waits on before it prints. Between those two
+         points is the only correct moment.
+
+         NOT UNDONE: this page exists for one print and is thrown away. */
+      if (printMode) { try { UI.printNotes(); } catch { /* the report still prints */ } }
+
       /* Wrapped: this is a diagnostic aid, and a host that dislikes `dataset`
          must not be able to turn a rendered screen into a blank one. */
       try {

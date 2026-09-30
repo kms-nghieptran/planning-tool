@@ -1681,6 +1681,69 @@ const UI = (() => {
      apart: one `done` flag, one listener, one backstop timeout. */
   const PRINT_ONLY = 'print-only';
 
+  /**
+   * ── NOTES PRINT IN FULL ────────────────────────────────────────────────
+   *
+   * A note is edited in a `<textarea rows="1">`, and a textarea prints
+   * exactly what fits in its visible rows. Everything past the first line is
+   * scrolled out of view and never reaches the paper — so a note reading
+   * "blocked on the Lafayette migration, waiting on the new environment"
+   * came out as "blocked on the Lafayette m…". Silently: the PDF looks
+   * complete, and the only way to know it is not is to have read the note on
+   * screen first.
+   *
+   * CSS CANNOT FIX IT. A textarea does not size to its content at any height,
+   * so there is no rule that makes the rest appear. The text has to be copied
+   * out into a plain node beside the control, and `@media print` then hides
+   * the control and shows the copy.
+   *
+   * ── WHY THIS IS A FUNCTION AND NOT A FEW LINES INSIDE `exportPdf` ──────
+   *
+   * THERE ARE TWO PRINT PATHS AND IT WAS ONLY IN ONE. `exportPdf` is the
+   * on-screen button: it marks the document, calls `window.print()`, and puts
+   * everything back on `afterprint`. The EMAILED PDF never touches it —
+   * headless Chrome loads the same page with `?print=1` and prints it, so the
+   * fix that made Export PDF carry whole notes did nothing whatsoever for the
+   * attachment a client receives, which is the copy that matters most.
+   *
+   * So both callers use this: `exportPdf` around its print, and `app.js` once
+   * a view has rendered in print mode.
+   *
+   * READ FROM THE LIVE TEXTAREA, not rendered alongside it by each view — a
+   * note saved without a redraw would leave a twin still saying what it said
+   * this morning, and a stale note in a client PDF is worse than a truncated
+   * one. BLANK ONES ARE SKIPPED, so an empty note cell stays empty rather
+   * than gaining a stray box.
+   *
+   * @returns {Array} the nodes added, for `unprintNotes`
+   */
+  function printNotes() {
+    const added = [];
+    try {
+      for (const ta of (document.querySelectorAll('textarea') || [])) {
+        const text = String(ta.value == null ? '' : ta.value);
+        if (!text.trim() || !ta.parentNode) continue;
+        /* ALREADY DONE, SKIP. In print mode this runs after every render, and
+           a view that redraws itself would otherwise stack a second copy
+           beside the first. */
+        const next = ta.nextSibling;
+        if (next && next.className === 'print-note') continue;
+        const shown = document.createElement('div');
+        shown.className = 'print-note';
+        shown.textContent = text;
+        ta.parentNode.insertBefore(shown, next);
+        added.push(shown);
+      }
+    } catch { /* a host without querySelectorAll still gets the rest of the print */ }
+    return added;
+  }
+
+  /** Take them away again. The on-screen path does; the print-mode page does not — it is thrown away. */
+  function unprintNotes(added) {
+    for (const n of (added || [])) { if (n.parentNode) n.parentNode.removeChild(n); }
+    if (added) added.length = 0;
+  }
+
   function exportPdf(title, opts = {}) {
     const was = document.title;
     const slug = (v) => String(v == null ? '' : v).trim().replace(/[\\/:*?"<>|]+/g, '-');
@@ -1723,6 +1786,9 @@ const UI = (() => {
       document.head.appendChild(page);
     }
 
+    const notes = printNotes();
+
+
     let done = false;
     const restore = () => {
       if (done) return;
@@ -1733,6 +1799,7 @@ const UI = (() => {
         body.classList.remove(`${PRINT_ONLY}-on`);
       }
       if (page && page.parentNode) page.parentNode.removeChild(page);
+      unprintNotes(notes);
       window.removeEventListener('afterprint', restore);
     };
     window.addEventListener('afterprint', restore);
@@ -1854,5 +1921,5 @@ const UI = (() => {
     itemsTable, wireItemEdits, filterItems, wireItemsFilter, ITEM_UNASSIGNED: UNASSIGNED, componentLink, dueState,
     epicCell, byStatusThenPoints, statusText, statusStage, drillNumber, drillDrawer, dueCell, dueSort,
     inRefinement, epicBlockerIcon, epicBlockersDrawer, testCasesDrawer,
-    tagList, wireTagList, splitKeywords, exportPdf, priorityTag, prioritySort, PRIORITY_UNSET_SORT, busy };
+    tagList, wireTagList, splitKeywords, exportPdf, printNotes, unprintNotes, priorityTag, prioritySort, PRIORITY_UNSET_SORT, busy };
 })();

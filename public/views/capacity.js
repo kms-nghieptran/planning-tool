@@ -23,6 +23,9 @@ const CapacityView = (() => {
   let busy = false;
 
   async function render(state, mount) {
+    // Before the first draw, so the By component grid is built through the
+    // lens the sender was looking at rather than redrawn into it afterwards.
+    seedPrintLens();
     data = await UI.api(`/api/capacity?team=${encodeURIComponent(state.teamId)}&sprint=${encodeURIComponent(state.sprintId)}`);
     // Recorded from the SAME state the payload was fetched with — see bcState.
     bcState = { teamId: state.teamId, sprintId: state.sprintId };
@@ -56,6 +59,28 @@ const CapacityView = (() => {
       </section>` : ''}
 
       ${scenarioBar(scenarioInfo)}
+
+      <section class="section print-hide">
+        <div class="section-head">
+          <div class="spacer"></div>
+          ${/* THE WHOLE PAGE, not one table. The By component sheet below keeps
+                its own Export because that sheet is often the only thing he
+                wants to send; this is the capacity conversation entire — the
+                KPIs, what is out of balance, and who is carrying what — which
+                is what goes into a planning meeting.
+
+                Placed at the top beside nothing, the way Active Sprint and
+                Overall Coverage place theirs, so the control is in the same
+                corner on every screen that has one. */''}
+          <button class="btn ghost sm" data-act="cap-export-pdf"
+            title="Opens your browser's print dialogue — choose &quot;Save as PDF&quot;">Export PDF</button>
+          ${/* TWO ENDINGS FOR THE SAME PAGE: one saves it, the other sends
+                it — the same pair, in the same order, as Active Sprint and
+                Overall Coverage. */''}
+          <button class="btn sm" data-act="email-report"
+            title="Render this capacity plan to a PDF and email it with a template you choose">Email the report</button>
+        </div>
+      </section>
 
       <section class="section">
         <div class="kpis">
@@ -280,6 +305,42 @@ const CapacityView = (() => {
      a reader downloads is the table they are looking at. */
   let bcState = { teamId: '', sprintId: '' };
 
+  /**
+   * THE LENS TRAVELS INTO THE PRINTED PAGE.
+   *
+   * The two exports beside this table are deliberately opposite: the CSV
+   * carries every row and lets the reader filter in the spreadsheet, and the
+   * PDF is a picture of the table AS IT STANDS — chips, fold and all — because
+   * that is what "print what I am looking at" means.
+   *
+   * The on-screen Export PDF honoured that, because it prints the live page.
+   * THE EMAILED PDF NEVER COULD: headless Chrome opens this route in a fresh
+   * browser where `bcFamily` is null and `bcShowAll` is false, so a plan
+   * filtered to the PS family arrived showing all 98 components. The reader
+   * gets a document that is not the one that was sent — and, as with the
+   * coverage selection before it, the only person placed to notice is the
+   * client.
+   *
+   * SEEDED ONLY IN PRINT MODE, and only once. A `?family=` left in the address
+   * bar of the normal app would otherwise re-win on every redraw and fight the
+   * chips, which reads as the page refusing to change.
+   */
+  let bcSeeded = false;
+  function seedPrintLens() {
+    if (bcSeeded) return;
+    bcSeeded = true;
+    try {
+      const q = new URLSearchParams(location.search || '');
+      if (q.get('print') !== '1') return;
+      /* AN ABSENT PARAMETER IS NOT "ALL". `family=` empty means the sender was
+         on All and the picture should show all; no `family` key at all means
+         the same. Both land on null, which is what null means here. */
+      const fam = (q.get('family') || '').trim();
+      bcFamily = fam || null;
+      bcShowAll = q.get('showall') === '1';
+    } catch { /* the sheet still prints, just unfiltered */ }
+  }
+
   function byComponentSection(d, sprint) {
     if (!d) return '';
     const name = (d.sprint && d.sprint.label) || sprint.name || '';
@@ -316,7 +377,16 @@ const CapacityView = (() => {
                 <tr>
                   ${tools.map((t, ti) => `
                     <th class="num tool-start sub band-${ti % 2 ? 'b' : 'a'}" colspan="${buckets.length}"
-                        title="${UI.esc(backlogTitle(d))}">Backlog <span class="muted">· all teams</span></th>
+                    ${/* JUST "BACKLOG". The "· all teams" qualifier was there
+                          because this column counts across every team while
+                          the rest of the screen is about one — but it is the
+                          third place that is said on this grid: the footnote
+                          under the table says it in a sentence, and the
+                          column's own tooltip says it in full. Three
+                          statements of one caveat read as three different
+                          caveats, and the header is the one with no room to
+                          explain itself. The tooltip stays. */''}
+                        title="${UI.esc(backlogTitle(d))}">Backlog</th>
                     <th class="num tool-start sub band-${ti % 2 ? 'b' : 'a'}" colspan="${planned.length}"
                         title="Suites this sprint has work against">${UI.esc(name || 'Sprint')} Planned</th>`).join('')}
                 </tr>
@@ -1078,6 +1148,61 @@ const CapacityView = (() => {
          section, prints, and unmarks it on `afterprint` — a redraw in between
          would replace the marked node with an unmarked one and leave the page
          hidden with nothing to put back. */
+      /* THE WHOLE PAGE. Handled beside the By component export for the same
+         reason that one is handled early: `UI.exportPdf` marks the document,
+         prints, and unmarks it on `afterprint`, so anything that redraws in
+         between would swap the marked node for an unmarked one.
+
+         NO `only`, deliberately — this export IS the page, and the print
+         stylesheet already takes the buttons, chips and scenario bar out.
+         LANDSCAPE, for the same reason the By component sheet is: Member
+         capacity is thirteen columns wide, and on portrait A4 the right-hand
+         end of it — Load, the load bar, Goal, the numbers the meeting is
+         actually about — either shrinks to unreadable or falls onto a second
+         sheet that has lost its names. */
+      if (kind === 'email-report') {
+        e.preventDefault();
+        /* THE SPRINT THIS SCREEN IS SHOWING, pinned — resolved here rather
+           than closed over, for the same reason the export beside it does:
+           this handler lives in `wire` and the sprint is a local of
+           `render`. */
+        const raw = (state.sprints || []).find(x => x.id === state.sprintId) || {};
+        const sp = { ...raw, ...((raw.byTeam || {})[state.teamId] || {}) };
+        MailDrawer.open({
+          report: 'capacity',
+          title: 'Send Capacity planning',
+          team: state.teamId,
+          scope: { sprint: sp.id || state.sprintId || null },
+          /* THE LENS THE SHEET IS UNDER, so the attachment is the table he is
+             looking at. Kept apart from `scope`: the scope decides what was
+             COUNTED and so changes the figures quoted in the mail, while the
+             family chip and the clear-row fold only decide what is DRAWN. The
+             KPI strip is team-level and identical either way — treating these
+             as scope would imply the numbers move with them, which they do
+             not. */
+          view: { family: bcFamily, showAll: bcShowAll },
+          scopeNarrow: true,
+          scopeLabel: `${data.teamName || state.teamId} · ${sp.name || state.sprintId || 'current sprint'}`
+            + (bcFamily ? ` · ${bcFamily} family` : ''),
+        });
+        return;
+      }
+      if (kind === 'cap-export-pdf') {
+        e.preventDefault();
+        /* THE SPRINT IS LOOKED UP HERE, not closed over. `data` is module
+           state and reachable; `sprint` is a local of `render` and this
+           handler lives in `wire`, so referring to it would be a
+           ReferenceError the moment somebody clicked — and only then, because
+           nothing but a click reaches this line. The By component export
+           beside it reads `bc.sprint` off the payload for the same reason. */
+        const raw = (state.sprints || []).find(x => x.id === state.sprintId) || {};
+        const sp = { ...raw, ...((raw.byTeam || {})[state.teamId] || {}) };
+        UI.exportPdf(
+          [data.teamName || state.teamId, sp.name || state.sprintId, 'capacity planning'],
+          { landscape: true },
+        );
+        return;
+      }
       if (kind === 'bc-export-pdf') {
         e.preventDefault();
         const bc = data.byComponent || {};

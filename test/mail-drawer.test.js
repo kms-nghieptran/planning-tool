@@ -124,7 +124,12 @@ function boot({ templates = [], cfg = null, api = null } = {}) {
   ctx.UI.toast = (m, bad) => { toasts.push({ m, bad }); };
   ctx.UI.$ = (sel) => (inDrawer(sel)[0] || null);
   ctx.UI.$$ = (sel) => inDrawer(sel);
-  ctx.UI.api = api || (async (p) => {
+  /* WHAT THE PANEL ACTUALLY ASKED FOR. The stub answered by path and threw
+     the request body away — enough for "did it preview", useless for the
+     failure this feature keeps having, which is a field the screen is holding
+     never reaching the request at all. */
+  const sent = [];
+  const answer = (async (p) => {
     /* MATCHED ON THE PATH, NOT THE WHOLE STRING. The drawer asks
        `/api/mail/config?report=sprint` so the placeholder list belongs to the
        report it is on, and an exact-match stub answered nothing — which the
@@ -155,11 +160,19 @@ function boot({ templates = [], cfg = null, api = null } = {}) {
     }
     return { ok: true, templates };
   });
+  ctx.UI.api = api || (async (p, init = {}) => {
+    let body = null;
+    try { body = init.body ? JSON.parse(init.body) : null; } catch { body = null; }
+    sent.push({ path: String(p).split('?')[0], query: String(p).slice(String(p).indexOf('?') + 1), body });
+    return answer(p);
+  });
 
   vm.runInContext(`${fs.readFileSync(path.join(PUBLIC, 'mail-drawer.js'), 'utf8')}\n;globalThis.__v = MailDrawer;`, ctx);
 
   return {
-    ctx, drawn, toasts, el, opened,
+    ctx, drawn, toasts, el, opened, sent,
+    /** The last request sent to one route — what the panel asked for, not what it showed. */
+    lastTo: (route) => [...sent].reverse().find(x => x.path === route) || null,
     html: () => drawn[drawn.length - 1] || '',
     /** Open the panel the way an Email the report button does. */
     async open(over = {}) {
@@ -440,6 +453,99 @@ check('AND THE PIN IS VISIBLE, with a warning when it is not this screen', async
   const h = b.html();
   assert.match(h, /Pinned to Katalon PSA/, 'the schedule does not say what it is pinned to');
   assert.match(h, /not the team on screen/i, 'nor warn that it disagrees with the screen');
+});
+
+const AS_CAPACITY = {
+  report: 'capacity', title: 'Send Capacity planning', team: 'titan',
+  scope: { sprint: 'S40' }, scopeLabel: 'Katalon PSA · Sprint 40',
+};
+
+check('THE VIEW LENS LEAVES THE BROWSER WITH EVERY REQUEST', async () => {
+  /* The screen holds the family chip and the PDF is rendered elsewhere, so
+     every request that ends in a document has to carry it. The panel is the
+     only place that knows what the chip is set to — if it does not put it in
+     the body, nothing downstream can recover it. */
+  const b = boot({});
+  await b.open({ ...AS_CAPACITY, view: { family: 'ps', showAll: true } });
+  await b.click('preview');
+  const req = b.lastTo('/api/mail/preview');
+  assert.ok(req, 'the panel never previewed');
+  assert.deepStrictEqual(req.body.view, { family: 'ps', showAll: true },
+    `the lens did not travel with the request: ${JSON.stringify(req.body)}`);
+  /* AND THE SCOPE IS STILL THERE. Two bags, and adding one must not displace
+     the other — which is what a spread would have risked. */
+  assert.strictEqual(req.body.sprint, 'S40', 'the lens displaced the scope');
+  assert.strictEqual(req.body.report, 'capacity');
+});
+
+check('AND A SCREEN WITH NO LENS SENDS AN EMPTY ONE, not undefined', async () => {
+  /* Coverage and the sprint report pass no `view` at all. The key has to be
+     present and empty rather than missing, or the server's `body.view || {}`
+     is doing work that this side should have done — and the next reader
+     cannot tell whether "no lens" means unfiltered or unsupported. */
+  const b = boot({});
+  await b.open({ report: 'coverage', title: 'Send Overall Coverage', team: 'ruby', scope: { components: [] } });
+  await b.click('preview');
+  assert.deepStrictEqual(b.lastTo('/api/mail/preview').body.view, {},
+    'a report with no lens sent something other than an empty one');
+});
+
+check('AND "CHECK THE PDF" OPENS THE DOCUMENT THE SEND WOULD PRODUCE', async () => {
+  /* This button is the last look before a client gets the file. It once read
+     a stale pin and rendered Titan's sprint while he sat on Ruby's — the
+     exact failure it exists to catch, produced by the button. Same shape one
+     field on: a check that drops the lens confirms a document nobody is
+     about to send. */
+  const b = boot({});
+  await b.open({ ...AS_CAPACITY, view: { family: 'ps', showAll: true } });
+  await b.click('pdf');
+  const url = b.opened[b.opened.length - 1] || '';
+  assert.ok(url, 'the button opened nothing');
+  const q = new URLSearchParams(url.slice(url.indexOf('?') + 1));
+  assert.strictEqual(q.get('family'), 'ps', `the check dropped the lens: ${url}`);
+  assert.strictEqual(q.get('showall'), '1', 'the check dropped the fold');
+  assert.strictEqual(q.get('sprint'), 'S40', 'the lens displaced the sprint');
+});
+
+check('AND AN ARMED SCHEDULE PINS THE LENS IT WAS ARMED ON', async () => {
+  /* A weekly capacity plan has no "current family" to fall back on the way it
+     has a current sprint, so an unpinned lens widens every Monday's
+     attachment back to the whole portfolio — without moving a figure, so
+     nothing in the mail looks wrong. */
+  /* A SAVED TEMPLATE, because the schedule form only renders for one — an
+     unsaved draft is told to save first, so a harness without an id arms
+     nothing and the pin check would pass against an absent control. */
+  const CAP_TPL = {
+    id: 'mt8', name: 'Weekly capacity', report: 'capacity',
+    to: 'client@example.com', cc: '', subject: 's', body: 'b', attachPdf: true,
+  };
+  const b = boot({ templates: [CAP_TPL] });
+  await b.open({ ...AS_CAPACITY, view: { family: 'ps', showAll: true } });
+  b.el('mtSchedOn').checked = true;
+  await b.el('mtSchedOn').fire('change');
+  const pinned = b.ctx.__v.__readSchedule({ ...AS_CAPACITY, view: { family: 'ps', showAll: true } });
+  assert.strictEqual(pinned.enabled, true, 'fixture check: the schedule is armed');
+  /* SPREAD INTO A HOST OBJECT FIRST. `__readSchedule` returns an object built
+     inside the vm, so its prototype is that realm's — `deepStrictEqual`
+     compares prototypes and rejects a value that is correct in every field. */
+  assert.deepStrictEqual({ ...pinned.view }, { family: 'ps', showAll: true },
+    `the armed schedule pinned no lens: ${JSON.stringify(pinned)}`);
+});
+
+check('and a pin made while armed is not moved by the screen', async () => {
+  /* The same rule the team pin already follows. He arms a PS plan, later
+     opens the sheet on All to read it, saves an unrelated wording change —
+     and the weekly report must still be the PS one. */
+  const ARMED = {
+    id: 'mt9', name: 'Weekly capacity', report: 'capacity',
+    to: 'client@example.com', cc: '', subject: 's', body: 'b', attachPdf: true,
+    schedule: { enabled: true, day: 1, hour: 8, minute: 0, team: 'titan', components: [], view: { family: 'ps' } },
+  };
+  const b = boot({ templates: [ARMED] });
+  await b.open({ ...AS_CAPACITY, view: { family: null, showAll: false } });
+  const pinned = b.ctx.__v.__readSchedule({ ...AS_CAPACITY, view: { family: null, showAll: false } });
+  assert.deepStrictEqual({ ...pinned.view }, { family: 'ps' },
+    'looking at the sheet unfiltered moved a schedule that was armed on PS');
 });
 
 (async () => {

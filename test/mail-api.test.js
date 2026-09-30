@@ -81,6 +81,32 @@ fs.writeFileSync(path.join(SCRATCH, 'store', 'snapshot.json'), JSON.stringify({
   boards: [], boardSprintsByTeam: {}, boardSprintErrors: [], people: [], byTeam: {},
 }));
 
+/* THE RENDERER, STUBBED AT THE MODULE — so a send that attaches a PDF can be
+   driven end to end on a machine with no Chrome, and the URL the server hands
+   the renderer can be READ rather than inferred from the source.
+
+   The two checks below this used to slice `server.js` and match strings,
+   because the PDF path could not be reached without a browser. That catches a
+   field nobody passed and nothing else: it cannot tell whether the value
+   arriving is the one the caller sent, which is the failure that actually
+   happened twice. `require` is cached, so replacing the function here
+   replaces the one `server.js` already holds.
+
+   `reportUrl` IS LEFT REAL. What is under test is what the server passes into
+   it; stubbing that too would leave the join between them unexercised — which
+   is exactly where both scope bugs lived. */
+const pdfRender = require('../lib/pdf-render.js');
+const rendered = [];
+pdfRender.render = async (url, opts) => {
+  rendered.push({ url, opts });
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pt-fakepdf-'));
+  const file = path.join(dir, 'report.pdf');
+  /* A REAL PDF HEADER, because `verify` reads one. A stub that skipped it
+     would prove the send works only against a renderer that cannot fail. */
+  fs.writeFileSync(file, Buffer.from('%PDF-1.4\n% fake\n%%EOF\n'));
+  return { file, bytes: fs.statSync(file).size, chrome: 'stub', ms: 1 };
+};
+
 const { server } = require('../server.js');
 
 let base = '';
@@ -465,6 +491,65 @@ check('A SPRINT REPORT WITH NO SPRINT REFUSES IN WORDS', async () => {
     'the preview lets a failed report escape as a 500 rather than a sentence');
 });
 
+check('A CAPACITY TEMPLATE PREVIEWS AGAINST CAPACITY FIGURES', async () => {
+  const r = await post('/api/mail/preview', {
+    template: TPL({
+      report: 'capacity', name: 'Capacity plan',
+      subject: '{{team}} — {{sprint}} — capacity plan',
+      body: '{{capacity}} pts across {{headcount}} people; {{committed}} committed ({{load}}).',
+    }),
+    report: 'capacity', team: 'ruby',
+  });
+  assert.strictEqual(r.status, 200, JSON.stringify(r.body));
+  assert.deepStrictEqual(r.body.unknown, [],
+    `capacity placeholders did not resolve: ${JSON.stringify(r.body.unknown)}`);
+  assert.ok(!/\{\{/.test(r.body.subject), `the subject kept a placeholder: ${r.body.subject}`);
+  assert.match(r.body.attachmentName, /^Capacity Plan - /,
+    `the capacity preview named the attachment ${r.body.attachmentName}`);
+});
+
+check('AND IT RENDERS THE CAPACITY PAGE, not the sprint one', async () => {
+  /* Every report names its own page, and the send builds the URL from that
+     name. A third report is where a hardcoded route would finally show —
+     the first two share nothing but the mechanism. */
+  const rmail = require('../lib/report-mail');
+  assert.strictEqual(rmail.REPORTS.capacity.route, 'sprints/capacity');
+  assert.notStrictEqual(rmail.REPORTS.capacity.route, rmail.REPORTS.sprint.route,
+    'capacity and the sprint report would attach the same page');
+
+  /* AND THE ROUTE IS REAL. A typo here renders the app's fallback screen and
+     attaches it with confidence. */
+  const app = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
+  for (const rep of Object.values(rmail.REPORTS)) {
+    assert.ok(app.includes(`'${rep.route}'`), `${rep.key} renders '${rep.route}', which is not a route in app.js`);
+  }
+});
+
+check('AND "CHECK THE PDF" RENDERS THE SAME DOCUMENT A SEND WOULD', async () => {
+  /* That button exists to be the last look before a client gets this. A
+     preview that drops the lens reports on a document the send will not
+     produce — worse than no button, because it is confident. The same failure
+     already happened once here with the team parameter. */
+  rendered.length = 0;
+  const r = await get('/api/mail/preview-pdf?report=capacity&team=ruby&family=ps&showall=1');
+  assert.strictEqual(r.status, 200, `the preview did not render: ${JSON.stringify(r.body).slice(0, 200)}`);
+  assert.strictEqual(rendered.length, 1);
+  const q = new URL(rendered[0].url).searchParams;
+  assert.strictEqual(q.get('family'), 'ps', `the check button dropped the lens: ${rendered[0].url}`);
+  assert.strictEqual(q.get('showall'), '1', 'the check button dropped the fold');
+});
+
+check('AND A SPRINT TEMPLATE CANNOT BE SENT AS THE CAPACITY REPORT', async () => {
+  /* Three reports now share one drawer and one template store, so the guard
+     has to hold for every pair rather than the one it was written against. */
+  const r = await post('/api/mail/send', {
+    template: TPL({ report: 'sprint' }), report: 'capacity', team: 'ruby',
+  });
+  assert.strictEqual(r.body.ok, false, 'a sprint template was sent as a capacity report');
+  assert.match(r.body.error, /Active Sprint/, `the refusal does not name the template's report: ${r.body.error}`);
+  assert.match(r.body.error, /Capacity planning/, 'nor the one it was asked to be');
+});
+
 /* ── sending ──────────────────────────────────────────────────────────── */
 
 check('WITH NO MAIL SET UP, A SEND FAILS AND SAYS WHAT TO ADD', async () => {
@@ -576,6 +661,58 @@ check('THE TEST MESSAGE GOES TO HIM AND ONLY HIM', async () => {
     `the test was delivered to ${JSON.stringify(got.rcpt)} — a recipient in the request body was honoured`);
   assert.ok(got.data.join(' ').length, 'nothing was actually sent');
   fake.close();
+});
+
+check('AND THE FAMILY LENS REACHES THE PAGE THE PDF IS RENDERED FROM', async () => {
+  /* HIS REPORT: the By component grid filtered to the PS family, the emailed
+     PDF showing all of them.
+
+     WHY NOTHING CAUGHT IT. The component selection on the coverage report
+     changes what was COUNTED, so when that failed to travel the mail's
+     figures and its attachment disagreed — two numbers, visibly different.
+     The family chip changes only what is DRAWN. Every capacity figure is
+     team-level and identical under any chip, so a lens that fell on the floor
+     produced a mail where nothing was inconsistent and the document was
+     simply the wrong one.
+
+     DRIVEN THROUGH A REAL SEND rather than matched in the source. What went
+     wrong both times was a value reaching one consumer and not another, and
+     only executing the path shows which value arrived. */
+  rendered.length = 0;
+  const r = await post('/api/mail/send', {
+    template: TPL({ report: 'capacity', attachPdf: true }),
+    report: 'capacity', team: 'ruby', sprint: null,
+    view: { family: 'ps', showAll: true },
+  });
+  /* THE SEND FAILS AT THE LAST STEP, and is meant to: the check above closed
+     its fake SMTP, so mail is configured but nothing is listening. The PDF is
+     built before the connection is opened, which is the part under test —
+     and a send that failed EARLIER would render nothing and make the real
+     assertion below vacuous, so it is pinned here rather than assumed. */
+  assert.ok(!r.body.ok, 'fixture check: the send is expected to fail at the SMTP step');
+  assert.strictEqual(rendered.length, 1, `the send rendered ${rendered.length} PDFs`);
+
+  const u = new URL(rendered[0].url);
+  const q = u.searchParams;
+  assert.strictEqual(q.get('print'), '1', 'the PDF was rendered from the on-screen page');
+  assert.strictEqual(q.get('family'), 'ps',
+    `the family lens never reached the rendered page: ${rendered[0].url}`);
+  assert.strictEqual(q.get('showall'), '1', 'the clear-row fold did not travel');
+  assert.ok(u.hash.endsWith('sprints/capacity'), `the lens displaced the route: ${u.hash}`);
+});
+
+check('and a send with no lens renders the whole sheet', async () => {
+  /* The other half: an unfiltered send must not acquire a filter from a
+     leftover, which is the failure the stale schedule pin produced once
+     already on the sprint report. */
+  rendered.length = 0;
+  await post('/api/mail/send', {
+    template: TPL({ report: 'capacity', attachPdf: true }), report: 'capacity', team: 'ruby',
+  });
+  assert.strictEqual(rendered.length, 1);
+  const q = new URL(rendered[0].url).searchParams;
+  assert.strictEqual(q.get('family'), null, `an unfiltered send carried a family: ${rendered[0].url}`);
+  assert.strictEqual(q.get('showall'), null, 'an unexpanded send carried showall');
 });
 
 check('AND THE TEST IS RECORDED like any other send', async () => {

@@ -331,6 +331,45 @@ async function renderCapacity(snap = SNAP, plan = PLAN, sprint = SPRINT, opts = 
   };
   const body = mkNode();
   const printOnly = mkNode();          // the node `[data-bycomp]` resolves to
+
+  /* A cell holding a note box, with enough DOM for something to be inserted
+     beside it and taken away again — which is the whole of what the print
+     path does to it. */
+  const mkDiv = () => ({
+    tag: 'div', className: '', textContent: '', parentNode: null,
+    kids: [], style: {},
+    classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+    addEventListener() {}, appendChild() {}, setAttribute() {},
+    querySelector: () => null, querySelectorAll: () => [],
+  });
+  const noteCell = () => {
+    const cell = mkDiv();
+    cell.insertBefore = (node, ref) => {
+      node.parentNode = cell;
+      const at = ref ? cell.kids.indexOf(ref) : cell.kids.length;
+      cell.kids.splice(at < 0 ? cell.kids.length : at, 0, node);
+      return node;
+    };
+    cell.removeChild = (node) => {
+      const at = cell.kids.indexOf(node);
+      if (at >= 0) cell.kids.splice(at, 1);
+      node.parentNode = null;
+      return node;
+    };
+    return cell;
+  };
+  const mkArea = (value) => {
+    const cell = noteCell();
+    const ta = { tag: 'textarea', value, parentNode: cell, nextSibling: null, cell };
+    cell.kids.push(ta);
+    return ta;
+  };
+  /* One long note, one blank. The blank is not filler: an empty note must
+     leave an empty cell rather than gain a stray box. */
+  const areas = opts.notes === false ? [] : [
+    mkArea('Blocked on the Lafayette migration, waiting on the new environment before the suite can run end to end.'),
+    mkArea('   '),
+  ];
   /* A REAL <head> THAT KEEPS WHAT IS APPENDED. Paper orientation cannot be a
      class — `@page` is a document-level at-rule and no selector reaches it —
      so it is injected as a style element for the duration of one print and
@@ -344,6 +383,18 @@ async function renderCapacity(snap = SNAP, plan = PLAN, sprint = SPRINT, opts = 
   };
   const ctx = {
     console, Promise, setTimeout, clearTimeout, encodeURIComponent, CSS: { escape: String },
+    /* THE ADDRESS THIS PAGE WAS OPENED AT. The emailed PDF is this same view
+       fetched by headless Chrome with `?print=1&family=…`, and the sheet seeds
+       its family chip from that — so a harness with no `location` renders the
+       one case the send never produces.
+
+       `URLSearchParams` belongs here for a sharper reason: the seed reads the
+       query inside a try/catch, so without the constructor it would throw,
+       be swallowed, and every check on the lens would pass against a page
+       that had quietly skipped it. A missing global does not fail here, it
+       agrees with you. */
+    URLSearchParams,
+    location: { search: opts.search || '', hash: '#sprints/capacity', pathname: '/' },
     App: { refresh() {} },
     Charts: new Proxy({}, { get: () => () => '' }),
     document: {
@@ -352,9 +403,15 @@ async function renderCapacity(snap = SNAP, plan = PLAN, sprint = SPRINT, opts = 
       head,
       createElement: (tag) => (tag === 'style'
         ? { tag, textContent: '', attrs: {}, setAttribute(k, v) { this.attrs[k] = v; }, parentNode: null }
-        : el()),
+        : mkDiv()),
       querySelector: (sel) => (sel === '[data-bycomp]' ? printOnly : el()),
-      querySelectorAll: () => [],
+      /* THE NOTE BOXES ARE REAL ENOUGH TO BE READ AND WRITTEN NEXT TO.
+         A textarea prints only its visible rows, so `UI.exportPdf` copies
+         each note's live text into a plain node beside it for the duration of
+         the print. A harness whose `querySelectorAll` answered `[]` would
+         find no notes, do nothing, and pass — which is a check that quietly
+         tests the absence of the feature. */
+      querySelectorAll: (sel) => (sel === 'textarea' ? areas : []),
     },
     window: {
       _on: {},
@@ -367,6 +424,9 @@ async function renderCapacity(snap = SNAP, plan = PLAN, sprint = SPRINT, opts = 
           section: classesOf(printOnly),
           // What the page rule says AT PRINT TIME — the only moment it matters.
           page: head.kids.filter(n => n.tag === 'style').map(n => n.textContent),
+          /* And the notes, for the same reason: they exist only between the
+             copy and the `afterprint` that removes them. */
+          notes: areas.flatMap(a => a.cell.kids.filter(k => k.tag === 'div').map(k => k.textContent)),
         });
       },
     },
@@ -494,7 +554,7 @@ async function renderCapacity(snap = SNAP, plan = PLAN, sprint = SPRINT, opts = 
   }, mount);
   // `html` is read through a getter so a check that clicks and then reads
   // sees the redrawn page, not the one captured at render time.
-  return { get html() { return html; }, payload, mount, printed, puts, head, ctx };
+  return { get html() { return html; }, payload, mount, printed, puts, head, ctx, areas };
 }
 
 /**
@@ -816,13 +876,24 @@ check('THE PLANNED COLUMNS ARE NAMED AFTER THE SPRINT THE NUMBERS CAME FROM', as
     'fixture check: the team has its own name for this sprint');
   assert.ok(body.includes('Katalon Titan Sprint 40 Planned'),
     'the planned group is not named after the selected sprint');
-  assert.ok(/>Backlog <span class="muted">· all teams<\/span></.test(body),
-    'the backlog group does not name its own scope, so it reads as this team\'s');
-  /* THE TOOLTIP STATES THE RULE, and the rule is "no work in an ACTIVE
-     sprint". A heading that still described the old open-sprint cut would
-     explain a number the page no longer produces — the kind of wrong that
-     survives every arithmetic check in this file. */
-  const head = (body.match(/<th[^>]*title="([^"]*)"[^>]*>Backlog /) || [])[1] || '';
+  /* THE BACKLOG HEADER IS JUST "BACKLOG" NOW.
+     It used to carry "· all teams", because this column counts across every
+     team while the rest of the screen is about one. That caveat is real and
+     it has NOT gone — it is in the column's own tooltip, asserted just below,
+     and in the footnote under the table. It was being said three times, and
+     three statements of one caveat read as three different caveats. The
+     header is the one of the three with no room to explain itself.
+     Pinned BOTH ways round: the qualifier is gone from the heading AND the
+     rule is still reachable, because dropping the tooltip with it would take
+     the explanation out of the page entirely. */
+  assert.ok(/>Backlog<\/th>/.test(body),
+    'the backlog heading is not a plain "Backlog"');
+  assert.ok(!/all teams<\/span>/.test(body),
+    'the "· all teams" qualifier is back in the heading');
+  const head = (body.match(/<th[^>]*title="([^"]*)"[^>]*>Backlog</) || [])[1] || '';
+  assert.ok(head, 'the backlog heading lost its tooltip, so the scope is now stated nowhere on it');
+  assert.ok(/across all teams/.test(head),
+    `the tooltip no longer says the backlog spans teams: ${head}`);
   assert.ok(/ACTIVE sprint/.test(head), `the backlog tooltip describes the wrong rule: ${head}`);
   assert.ok(!/any open sprint/.test(head), 'the backlog tooltip still says "any open sprint"');
   assert.ok(/plan, not progress/.test(head), 'it does not say why a future sprint stays in');
@@ -1041,6 +1112,63 @@ check('CLICKING A FAMILY CHIP NARROWS THE TABLE TO THAT FAMILY', async () => {
   'the active family is not marked, so the table looks unfiltered');
 });
 
+check('THE PRINTED PAGE OPENS UNDER THE SENDER\'S FAMILY LENS', async () => {
+  /* HIS REPORT, exactly: filter the sheet to the PS family, email the report,
+     and the attachment shows all 98 components.
+
+     There are two ways this page becomes a PDF. The button on screen prints
+     the live document, so it has always honoured the chips. THE EMAILED ONE
+     CANNOT: headless Chrome opens this route in a fresh browser where the
+     lens is null. The filter has to travel in the URL and be seeded before
+     the first draw, which is what this asks.
+
+     A LENS, NOT A SCOPE — and that is why it is testable only here. The
+     family chip changes no figure, so nothing in the mail's wording moves
+     with it and no server-side check would notice the picture was wrong. The
+     only witness is the table itself. */
+  const r = await renderCapacity(BC_SNAP, BC_PLAN, BC_SPRINT, { search: '?print=1&family=kat' });
+  const b = byCompSection(r.html);
+  const rows = b.slice(b.indexOf('<tbody>'), b.indexOf('</tbody>'));
+  assert.ok(rows.includes('KAT_Common'), 'the printed sheet dropped the family that was asked for');
+  assert.ok(!rows.includes('PS_iGO_NLG'),
+    'the printed sheet shows every family — the emailed PDF is not the table he sent');
+});
+
+check('and an ordinary page load ignores the same parameter', async () => {
+  /* Without `print=1` the query is somebody's address bar, not a render
+     instruction. A lens that applied anyway would keep re-winning after every
+     chip click and read as the page refusing to change. */
+  const r = await renderCapacity(BC_SNAP, BC_PLAN, BC_SPRINT, { search: '?family=kat' });
+  const b = byCompSection(r.html);
+  const rows = b.slice(b.indexOf('<tbody>'), b.indexOf('</tbody>'));
+  assert.ok(rows.includes('PS_iGO_NLG') && rows.includes('KAT_Common'),
+    'a family in the URL filtered a normal page load');
+});
+
+check('and no family in the URL still prints everything', async () => {
+  /* The sender was on "All". An absent parameter and an empty one both mean
+     that, and neither may be mistaken for a family named "". */
+  for (const search of ['?print=1', '?print=1&family=']) {
+    const r = await renderCapacity(BC_SNAP, BC_PLAN, BC_SPRINT, { search });
+    const b = byCompSection(r.html);
+    const rows = b.slice(b.indexOf('<tbody>'), b.indexOf('</tbody>'));
+    assert.ok(rows.includes('PS_iGO_NLG') && rows.includes('KAT_Common'),
+      `printing with "${search}" narrowed a sheet that was sent unfiltered`);
+  }
+});
+
+check('AND THE CLEAR-ROW FOLD TRAVELS WITH IT', async () => {
+  /* The other half of "a picture of this table as it stands". A reader who
+     expanded the clear rows before sending meant the attachment to have
+     them. */
+  const shut = await renderCapacity(BC_SNAP, BC_PLAN, BC_SPRINT, { search: '?print=1' });
+  const open = await renderCapacity(BC_SNAP, BC_PLAN, BC_SPRINT, { search: '?print=1&showall=1' });
+  const bodyOf = (h) => { const b = byCompSection(h); return b.slice(b.indexOf('<tbody>'), b.indexOf('</tbody>')); };
+  const count = (h) => (bodyOf(h).match(/<tr/g) || []).length;
+  assert.ok(count(open.html) > count(shut.html),
+    'showall=1 printed the same rows as the folded sheet, so the fold does not travel');
+});
+
 check('CLICKING THE CHIP YOU ARE ON CLEARS IT', async () => {
   const r = await renderByComp();
   const rows = () => {
@@ -1237,6 +1365,193 @@ check('AND THE ORIENTATION RULE DOES NOT OUTLIVE THE PRINT', async () => {
   r.ctx.window._on.afterprint();
   assert.deepStrictEqual(r.head.kids.filter(n => n.tag === 'style'), [],
     'the landscape rule is still in the document, so every later export is rotated too');
+});
+
+check('THE CAPACITY PAGE EXPORTS ITSELF, whole and landscape', async () => {
+  /* The page-level export, beside the By component one that already existed.
+     Two buttons on one screen that both say "Export PDF" have to mean
+     different things, and what separates them is scope: this one is the
+     capacity CONVERSATION — the KPIs, what is out of balance, and who is
+     carrying what — which is what goes into a planning meeting, while the
+     other is the one sheet he often wants to send on its own.
+
+     DRIVEN BY A CLICK, not asserted against the source. The handler lives in
+     `wire()` and the render locals it wants — the sprint, the team name —
+     live in `render()`; referring to one from the other is a ReferenceError
+     that happens ONLY on click, because nothing else reaches that line. A
+     source check would have read fine. */
+  const r = await renderCapacity();
+
+  /* THE BUTTON IS ON THE PAGE. Asserted before the click, because the harness
+     SYNTHESISES a click target from the data it is given — it does not go
+     looking for the element. So the checks below drive the HANDLER, and
+     removing the button from the markup left every one of them green while
+     the feature was unreachable. Mutation caught that; this line is the fix. */
+  assert.match(r.html, /data-act="cap-export-pdf"/,
+    'there is no Export PDF button on the capacity page, only a handler nobody can reach');
+
+  await r.mount.click({ act: 'cap-export-pdf' });
+
+  assert.strictEqual(r.printed.length, 1, 'the Export PDF button printed nothing');
+  const at = r.printed[0];
+
+  /* NOT SCOPED. This export IS the page, so neither mark should be on the
+     document — `print-only-on` would hide every section except one, and the
+     one it kept would be whichever the other button had meant. */
+  assert.ok(!at.body.includes('print-only-on'),
+    'the page export was scoped to a single section');
+  assert.deepStrictEqual(at.section, [],
+    'a section was marked as the only one to print');
+
+  /* LANDSCAPE, because Member capacity is thirteen columns and the right-hand
+     end of it — Load, the load bar, Goal — is what the meeting is about.
+     READ AT PRINT TIME: the rule is injected for this print and removed
+     again, so asserting afterwards would find nothing and prove nothing. */
+  assert.ok(at.page.some(css => /@page[^}]*landscape/.test(css)),
+    `the capacity export came out portrait: ${JSON.stringify(at.page)}`);
+});
+
+check('AND IT SAYS WHOSE CAPACITY, FOR WHICH SPRINT', async () => {
+  /* The filename is the whole of what a reader gets before opening it, and
+     these go into planning meetings beside other teams' sheets. */
+  const r = await renderCapacity();
+  await r.mount.click({ act: 'cap-export-pdf' });
+  const at = r.printed[0];
+  assert.match(at.title, /Katalon Titan/, `it does not say whose page it is: "${at.title}"`);
+  assert.match(at.title, /Sprint 40/, `nor which sprint: "${at.title}"`);
+  assert.match(at.title, /capacity planning/i, `nor which page: "${at.title}"`);
+  assert.ok(!/[\\/:*?"<>|]/.test(at.title), 'a filename cannot carry path characters');
+  assert.ok(!/undefined|\[object/.test(at.title), `the title has a hole in it: "${at.title}"`);
+});
+
+check('AND THE TWO EXPORTS ON THIS SCREEN DO DIFFERENT THINGS', async () => {
+  /* Stated directly, because the failure is a quiet one: if the page button
+     were wired to the same options as the sheet button, both would print the
+     By component section and the second control would be a lie that looks
+     like it works. */
+  const r = await renderByComp();
+  await r.mount.click({ act: 'cap-export-pdf' });
+  await r.mount.click({ act: 'bc-export-pdf' });
+  assert.strictEqual(r.printed.length, 2, 'fixture check: both printed');
+  const [page, sheet] = r.printed;
+  assert.ok(!page.body.includes('print-only-on'), 'the page export scoped itself to a section');
+  assert.ok(sheet.body.includes('print-only-on'), 'the sheet export printed the whole page');
+  assert.notStrictEqual(page.title, sheet.title,
+    'both exports save under the same name, so one overwrites the other');
+});
+
+check('A NOTE PRINTS IN FULL, not the one line the box shows', async () => {
+  /* THE BUG THIS EXISTS FOR. Notes are edited in a `<textarea rows="1">`, and
+     a textarea prints exactly what fits in its visible rows — everything
+     past the first line is scrolled out of view and never reaches the paper.
+     The PDF looks complete, and the only way to know it is not is to have
+     read the note on screen first.
+
+     READ AT PRINT TIME, because that is the only moment the text exists
+     outside the control: `UI.exportPdf` copies it out just before printing
+     and removes it again on `afterprint`. Asserting afterwards would find
+     nothing and say nothing. */
+  const r = await renderCapacity();
+  await r.mount.click({ act: 'cap-export-pdf' });
+
+  const at = r.printed[0];
+  assert.strictEqual(at.notes.length, 1,
+    `expected one note on the page, got ${at.notes.length} — a blank note should not print a box`);
+  assert.strictEqual(at.notes[0],
+    'Blocked on the Lafayette migration, waiting on the new environment before the suite can run end to end.',
+    'the note was truncated, or something other than its text was printed');
+});
+
+check('AND THE PRINT RULES SWAP THE BOX FOR THE TEXT', async () => {
+  /* THE OTHER HALF, and it lives in CSS where no click can reach it.
+     Copying the text out is only half the fix: without the rule that hides
+     the control, the sheet prints the truncated box AND the full text
+     underneath it — every note twice, one of them cut off. Mutating that rule
+     away left every check above green, which is exactly the kind of gap a
+     driven test cannot close on its own. */
+  const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'styles.css'), 'utf8');
+  const at = css.indexOf('@media print');
+  assert.ok(at > -1, 'there is no print stylesheet at all');
+  /* The print block runs to the end of the file's media queries; taking a
+     generous slice and searching inside it is enough to tell whether the two
+     rules are in there, without parsing CSS. */
+  const printBlock = css.slice(at);
+  assert.match(printBlock, /textarea\s*\{[^}]*display:\s*none/,
+    'the note box still prints, so each note appears twice — once truncated');
+  assert.match(printBlock, /\.print-note\s*\{[^}]*display:\s*block/,
+    'the copied-out note is not shown in print, so notes print blank');
+  assert.match(printBlock, /\.print-note\s*\{[^}]*white-space:\s*pre-wrap/,
+    'a note with newlines would print as one run-on line');
+
+  /* AND HIDDEN ON SCREEN. A print interrupted before `afterprint` leaves a
+     copy behind; without this rule it shows the note twice in the app. */
+  assert.match(css, /\.print-note\s*\{\s*display:\s*none;?\s*\}/,
+    'a leftover copy would be visible on screen');
+});
+
+check('AND THE PAGE IS PUT BACK AFTERWARDS', async () => {
+  /* The copies are scaffolding. Left behind they show every note twice on
+     screen — and the next export would copy them again, so the duplication
+     compounds with each print. */
+  const r = await renderCapacity();
+  await r.mount.click({ act: 'cap-export-pdf' });
+  assert.ok(r.areas.some(a => a.cell.kids.some(k => k.tag === 'div')),
+    'fixture check: something was inserted to print');
+
+  r.ctx.window._on.afterprint();
+  for (const a of r.areas) {
+    assert.deepStrictEqual(a.cell.kids.filter(k => k.tag === 'div'), [],
+      'a printed note is still in the document, so the screen now shows it twice');
+  }
+});
+
+check('AND PRINTING TWICE DOES NOT DOUBLE THEM', async () => {
+  /* The compounding case, stated on its own because the cleanup above could
+     pass while a second print still stacked a second copy — `restore` runs
+     once per export and the list it empties has to be this export's. */
+  const r = await renderCapacity();
+  await r.mount.click({ act: 'cap-export-pdf' });
+  r.ctx.window._on.afterprint();
+  await r.mount.click({ act: 'cap-export-pdf' });
+  assert.strictEqual(r.printed[1].notes.length, 1,
+    `the second export printed ${r.printed[1].notes.length} copies of one note`);
+});
+
+check('AND A NOTE THAT IS ONLY WHITESPACE LEAVES AN EMPTY CELL', async () => {
+  /* Not pedantry: the By component sheet has a note column on every row and
+     most rows have none. A stray empty box on each would turn a readable
+     sheet into a grid of boxes. */
+  const r = await renderCapacity();
+  await r.mount.click({ act: 'cap-export-pdf' });
+  const blank = r.areas.find(a => !a.value.trim());
+  assert.ok(blank, 'fixture check: there is a blank note');
+  assert.deepStrictEqual(blank.cell.kids.filter(k => k.tag === 'div'), [],
+    'a blank note printed a box');
+});
+
+check('THE CAPACITY PAGE OFFERS EMAIL THE REPORT TOO', async () => {
+  /* The pair — Export saves it, Email sends it — in the same corner as the
+     other two screens that have both. Driven, because the handler resolves
+     the sprint from `state` and lives in `wire` while the render locals live
+     in `render`; a source check reads fine either way. */
+  const r = await renderCapacity();
+  assert.match(r.html, /data-act="email-report"/,
+    'there is no Email the report button on the capacity page');
+
+  /* THE DRAWER IS OPENED WITH THIS SCREEN'S REPORT AND SCOPE. `MailDrawer` is
+     not loaded in this harness, so the call is captured — what is being
+     checked is what the page ASKS FOR, which is the thing that was wrong
+     twice before: the wrong team, and the wrong report's page. */
+  const opened = [];
+  r.ctx.MailDrawer = { open: (c) => opened.push(c) };
+  await r.mount.click({ act: 'email-report' });
+
+  assert.strictEqual(opened.length, 1, 'the button opened no drawer');
+  const c = opened[0];
+  assert.strictEqual(c.report, 'capacity', `it opened the ${c.report} report`);
+  assert.strictEqual(c.team, TEAM.id, `it opened for team ${c.team}`);
+  assert.ok(c.scope && c.scope.sprint, 'the sprint was not pinned, so the PDF would render whichever is active');
+  assert.ok(c.scopeLabel, 'the drawer would not say what this mail is about');
 });
 
 check('AND ONLY THE EXPORT THAT ASKED FOR IT IS ROTATED', async () => {

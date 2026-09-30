@@ -62,6 +62,22 @@ fs.writeFileSync(path.join(SCRATCH, 'store', 'snapshot.json'), JSON.stringify({
     .map(i => [i.key, i])),
 }));
 
+/* THE RENDERER, STUBBED — which is what lets this file reach the attachment
+   path at all. Almost every check here arms a template with `attachPdf: false`
+   for the reasons `armed` gives: Chrome costs fifteen seconds a send and
+   would make the suite depend on a browser being installed. Neither reason
+   applies to a stub, and ONE thing about the attachment can only be seen from
+   here — what the unattended send puts in the URL. */
+const pdfRender = require('../lib/pdf-render.js');
+const rendered = [];
+pdfRender.render = async (url, opts) => {
+  rendered.push({ url, opts });
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pt-sched-pdf-'));
+  const file = path.join(dir, 'report.pdf');
+  fs.writeFileSync(file, Buffer.from('%PDF-1.4\n% fake\n%%EOF\n'));
+  return { file, bytes: fs.statSync(file).size, chrome: 'stub', ms: 1 };
+};
+
 const app = require('../server.js');
 const dbLib = require('../lib/db');
 const store = require('../lib/store');
@@ -113,14 +129,18 @@ const runsFor = (id) => dbLib.all('SELECT slot, status, detail FROM mail_schedul
 const clearRuns = () => dbLib.run('DELETE FROM mail_schedule_run');
 
 /** A Monday-08:00 template, saved through the real route so it is validated. */
-async function armed(name, sched = { enabled: true, day: 1, hour: 8, minute: 0, team: 'ruby' }) {
+async function armed(name, sched = { enabled: true, day: 1, hour: 8, minute: 0, team: 'ruby' }, extra = {}) {
   const r = await call('PUT', '/api/mail/template', {
     name, to: 'client@example.com', cc: '',
     subject: 'Coverage — {{team}}', body: 'Coverage is {{coverage}}.',
-    /* NO PDF. Chrome is not started anywhere in this file: the attachment
-       path has its own checks, it costs fifteen seconds a send, and it would
-       make this suite depend on a browser being installed. */
-    attachPdf: false,
+    /* NO PDF BY DEFAULT. A real Chrome is never started in this file: the
+       attachment path has its own checks, it costs fifteen seconds a send,
+       and it would make this suite depend on a browser being installed. The
+       renderer is stubbed at the top, so a check that needs to see the URL an
+       unattended send builds can pass `attachPdf: true` and still cost
+       nothing. */
+    attachPdf: !!extra.attachPdf,
+    report: extra.report || undefined,
     schedule: sched,
   });
   assert.strictEqual(r.status, 200, `could not save the template: ${JSON.stringify(r.body)}`);
@@ -331,6 +351,55 @@ check('A TEMPLATE WITH A BAD ADDRESS CANNOT BE ARMED AT ALL', async () => {
   });
   assert.strictEqual(r.status, 400, 'a template with an invalid recipient was stored and armed');
   assert.match(JSON.stringify(r.body), /email address/i);
+});
+
+check('AN UNATTENDED SEND RENDERS THE PAGE IT WAS ARMED ON', async () => {
+  /* THE LAST LINK, and the one that survived every other check. The view lens
+     reached the URL from the drawer, from the preview button and from an
+     on-demand send — and the SCHEDULER could still drop it, because nothing
+     in this file had ever looked at an attachment.
+
+     It is also the link where dropping it costs most. A weekly report has no
+     "current family" the way it has a current sprint, so an unpinned lens
+     does not fail: it quietly widens Monday's attachment back to everything.
+     No figure moves, because none of them depend on the chip. The mail is
+     internally consistent and simply the wrong document, sent at 8am with
+     nobody watching, to a client.
+
+     ARMED AS THE COVERAGE REPORT, because this fixture has no sprints and the
+     capacity report rightly refuses to invent one. What is under test is the
+     scheduler handing the pinned lens to the renderer, and that is the same
+     line of code whichever report is on the template. */
+  const { server: fake } = fakeSmtp();
+  await new Promise(r => fake.listen(0, '127.0.0.1', r));
+  await call('PUT', '/api/mail/config', {
+    host: '127.0.0.1', port: fake.address().port, user: '',
+    from: 'me@kms-technology.com', fromName: 'Nghiep Tran',
+  });
+
+  rendered.length = 0;
+  const t = await armed('Weekly lens report', {
+    enabled: true, day: 1, hour: 8, minute: 0, team: 'ruby',
+    view: { family: 'ps', showAll: true },
+  }, { attachPdf: true });
+
+  /* SCOPED TO THIS TEMPLATE. Earlier checks leave their own schedules in the
+     store, so a tick here settles more than one slot — and asserting on the
+     whole batch would make this check fail whenever a check above it is
+     added or reordered, which is a check that breaks for reasons unrelated
+     to what it is guarding. */
+  const out = await app.runDueSchedules(MON_0800);
+  const mine = out.find(x => x.template === t.id);
+  assert.ok(mine, `this template did not fire: ${JSON.stringify(out)}`);
+  assert.strictEqual(mine.status, 'sent', `the unattended send failed: ${mine.error}`);
+  assert.strictEqual(rendered.length, 1, 'the unattended send rendered no PDF at all');
+
+  const q = new URL(rendered[0].url).searchParams;
+  assert.strictEqual(q.get('family'), 'ps',
+    `the weekly send dropped the pinned lens: ${rendered[0].url}`);
+  assert.strictEqual(q.get('showall'), '1', 'the weekly send dropped the pinned fold');
+  assert.strictEqual(q.get('team'), 'ruby', 'the lens displaced the pinned team');
+  fake.close();
 });
 
 (async () => {

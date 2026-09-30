@@ -363,10 +363,48 @@ function sprintFigures(cfg, plan, body = {}) {
  * would, because each of them already had its own call to `coverageFigures`
  * when there was only one report to get wrong.
  */
+/**
+ * The same, for Capacity planning.
+ *
+ * `insights.capacityView` IS THE SCREEN'S OWN CALL, resolved with the same
+ * team and sprint the page resolves — the third report to be built this way,
+ * and the reason it keeps being worth writing out: a mail quoting a number
+ * the attachment does not show is the failure that cannot be caught from
+ * inside the tool, because both halves look right on their own.
+ */
+function capacityFigures(cfg, plan, body = {}) {
+  const snap = store.getSnapshot();
+  const team = findTeam(plan, body.team || null);
+  const sprint = findSprint(plan, body.sprint || null, team.id);
+  if (!sprint) {
+    throw new Error(`there is no sprint to plan for ${team.name || 'this team'}. `
+      + 'Sync Jira, or pick a sprint on the Capacity planning screen first.');
+  }
+  const view = insights.capacityView(plan, snap, team, sprint);
+  return reportMail.capacityFiguresFrom(view, {
+    teamName: team ? team.name : '',
+    sprintLabel: (sprint && (sprint.name || sprint.id)) || '',
+    senderName: (cfg.mail || {}).fromName || '',
+    today: Date.now(),
+  });
+}
+
+/* ONE MAP FROM A REPORT KIND TO ITS FIGURES. Keyed off `REPORTS` rather than
+   an if-chain, so adding a fourth report is an entry in the registry and a
+   function here — and a kind with no builder fails loudly at the seam instead
+   of silently falling through to coverage's numbers, which is what an
+   `else` would have done. */
+const FIGURES = {
+  coverage: coverageFigures,
+  sprint: sprintFigures,
+  capacity: capacityFigures,
+};
+
 function figuresFor(kind, cfg, plan, body = {}) {
-  return reportMail.reportOf(kind).key === 'sprint'
-    ? sprintFigures(cfg, plan, body)
-    : coverageFigures(cfg, plan, body);
+  const report = reportMail.reportOf(kind);
+  const build = FIGURES[report.key];
+  if (!build) throw new Error(`no figures are defined for the ${report.label} report`);
+  return build(cfg, plan, body);
 }
 
 /**
@@ -464,6 +502,12 @@ async function sendReport(cfg, body = {}, { trigger = 'manual' } = {}) {
         sprint: kind.scope === 'sprint' ? (body.sprint || null) : null,
         components: kind.scope === 'components' && Array.isArray(body.components)
           ? body.components.filter(Boolean) : [],
+        /* THE LENS IS NOT PART OF THE SCOPE, and travels anyway. Nothing
+           above was computed from it — the capacity figures are team-level
+           and identical under any chip — so this is not "the same scope read
+           twice". It is the framing of the picture, and the picture is what
+           the attachment is. */
+        view: body.view || {},
       });
       const out = await pdfRender.render(url, { landscape: tpl.landscape !== false });
       attachment = {
@@ -662,6 +706,12 @@ async function runDueSchedules(now = new Date(), o = {}) {
            `findSprint` resolves a null to the current sprint for that team,
            which is exactly the screen's own behaviour. */
         sprint: (tpl.schedule || {}).sprint || null,
+        /* THE LENS PINS, unlike the sprint, because there is no "current
+           family" for the server to resolve a null into. A weekly capacity
+           plan armed on the PS family is a weekly PS capacity plan, and
+           dropping it here would widen every Monday's attachment back to the
+           whole portfolio — silently, since the figures would not move. */
+        view: (tpl.schedule || {}).view || {},
         sprintLabel: '',
       }, { trigger: 'schedule' });
     } catch (err) {
@@ -2061,6 +2111,8 @@ async function handleApi(req, res, url) {
          the one a send produces — which is worse than not having the button,
          because it would report the wrong thing confidently. */
       components: kind.scope === 'components' ? q.getAll('component').filter(Boolean) : [],
+      // The lens travels for the same reason, one field on.
+      view: { family: q.get('family') || null, showAll: q.get('showall') === '1' },
     });
     try {
       const outFile = await pdfRender.render(url, { landscape });

@@ -223,5 +223,27 @@ check('LATENESS IS SAID IN WORDS, because it is the only sign his Mac was shut',
   assert.strictEqual(s.lateness(-5000), 'on time', 'a clock that moved backwards is not negative-late');
 });
 
+check('THE VIEW LENS PINS, because there is no "current family" to fall back on', () => {
+  /* The sprint is deliberately left null on a schedule: a weekly report means
+     whichever sprint is running on Monday, and the server resolves it. THE
+     LENS HAS NO SUCH FALLBACK. A capacity plan armed on the PS family is a
+     weekly PS capacity plan, and a lens dropped here would widen every
+     Monday's attachment back to the whole portfolio — without moving a single
+     figure, so nothing in the mail would look wrong. */
+  const kept = s.normalise({ enabled: true, view: { family: 'ps', showAll: true } });
+  assert.deepStrictEqual(kept.view, { family: 'ps', showAll: true }, 'the armed lens was dropped on save');
+
+  /* NAMED KEYS, NOT WHATEVER THE BROWSER SENT. This lands in stored JSON read
+     back months later; copying the payload wholesale is how a settings row
+     fills with fields nothing reads and nobody dares remove. */
+  const junk = s.normalise({ enabled: true, view: { family: 'ps', showAll: false, note: 'hi' } });
+  assert.deepStrictEqual(Object.keys(junk.view), ['family'], 'the lens stored a key nothing reads');
+
+  for (const view of [undefined, null, {}, 'ps', 42]) {
+    assert.deepStrictEqual(s.normalise({ enabled: true, view }).view, {},
+      `a lens given as ${JSON.stringify(view)} did not come back as "no lens"`);
+  }
+});
+
 console.log(`\n${passed} passed, ${failed} failed\n`);
 process.exit(failed ? 1 : 0);

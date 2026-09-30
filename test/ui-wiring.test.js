@@ -155,6 +155,18 @@ async function bootWith({ search = '', stored = {}, teams, sprints, currentByTea
     removeItem(k) { delete stored[k]; },
   };
   ctx.window = { matchMedia: () => ({ matches: false }), scrollY: 0, scrollTo() {}, addEventListener() {} };
+  /* THE RENDER IS EXPECTED TO FAIL HERE, loudly and by design: this harness
+     loads `app.js` alone, so `routeFor(...).view()` names a view module that
+     was never loaded and `refresh` catches it, marks the page `error` and
+     carries on — which is the path the notes check below rides. `app.js`
+     logs that, seven times, and seven expected stack traces in the output
+     are how an UNexpected one goes unnoticed. Kept under DBG rather than
+     thrown away. */
+  ctx.console = {
+    log: console.log,
+    warn: () => {},
+    error: (...a) => { if (process.env.DBG) console.log('DURING RENDER:', ...a); },
+  };
   /* A DOCUMENT WITH THE THREE NODES BOOT ACTUALLY TOUCHES. `documentElement`
      carries the theme and is read before the first await, so a harness
      without it never reaches the line under test — which is how the first
@@ -163,6 +175,23 @@ async function bootWith({ search = '', stored = {}, teams, sprints, currentByTea
   const node = () => ({
     dataset: {}, classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
     appendChild() {}, addEventListener() {}, removeEventListener() {}, style: {},
+    /* ATTRIBUTES, BECAUSE BOOT SETS THEM BEFORE IT RENDERS ANYTHING. The rail
+       button gets `aria-expanded` in `wireShell`, which runs BEFORE
+       `await refresh()` — so a node without `setAttribute` stopped boot short
+       of the refresh entirely. That looked exactly like a product defect: the
+       print-mode check below went red saying the page never copied its notes
+       out, when the code under it had simply never been reached. A stub that
+       stops boot early does not fail honestly; it fails somebody else's
+       check. */
+    setAttribute() {}, getAttribute: () => null, removeAttribute() {},
+    focus() {}, blur() {}, closest: () => null, insertBefore() {},
+    /* AND `replaceChildren`, which `refresh` calls on `#main` BEFORE its own
+       try/finally. A throw there skips the finally — and the notes are copied
+       out in that finally — so a missing method here silently answered "the
+       page never copied its notes out" for a page that never got as far as
+       rendering one. `childElementCount` decides which of the two swap paths
+       is taken; zero is the honest answer for a first paint. */
+    replaceChildren() {}, childElementCount: 0,
     /* A NODE HAS TO BE SEARCHABLE. `UI.$(sel, root)` calls
        `root.querySelector`, so a stub without it throws from deep inside the
        first render — after every check has passed, as an unhandled rejection
@@ -174,6 +203,7 @@ async function bootWith({ search = '', stored = {}, teams, sprints, currentByTea
   ctx.document = {
     documentElement: node(), body: node(), head: node(),
     createElement: () => node(), querySelector: () => node(), querySelectorAll: () => [],
+    addEventListener() {}, removeEventListener() {},
   };
   ctx.UI.api = async (p) => {
     if (String(p).startsWith('/api/state')) {
@@ -186,6 +216,8 @@ async function bootWith({ search = '', stored = {}, teams, sprints, currentByTea
     return {};
   };
   ctx.UI.toast = () => {};
+  const noteCalls = [];
+  ctx.UI.printNotes = () => { noteCalls.push(1); return []; };
   ctx.UI.$ = () => node();
   ctx.UI.$$ = () => [];
   /* THE MODULE'S OWN `App.boot()` IS STRIPPED, and this is not tidiness.
@@ -206,7 +238,7 @@ async function bootWith({ search = '', stored = {}, teams, sprints, currentByTea
      stopped, which is what turned "teamId is null" from a mystery into a
      missing `document.documentElement` stub. */
   try { await ctx.__app.boot(); } catch (e) { if (process.env.DBG) console.log('BOOT STOPPED AT:', e.message); }
-  return { state: ctx.__app.state, stored };
+  return { state: ctx.__app.state, stored, noteCalls };
 }
 
 const TEAMS = [{ id: 'ruby', name: 'Katalon RDA' }, { id: 'titan', name: 'Katalon PSA' }];
@@ -424,6 +456,54 @@ function navOf({ quiet = true } = {}) {
   vm.runInContext(`${appSrc}\n;globalThis.__app = App;`, ctx);
   return { routes: ctx.__app.ROUTES, ctx };
 }
+
+check('THE PRINTED PAGE COPIES ITS NOTES OUT, for the emailed PDF', async () => {
+  /* THERE ARE TWO PRINT PATHS AND THE FIX WAS ONLY IN ONE.
+     A `<textarea rows="1">` prints one line and silently drops the rest, so
+     notes have to be copied into plain nodes before printing. `UI.exportPdf`
+     does that for the on-screen button — and the EMAILED PDF never touches
+     that function: headless Chrome loads this same page with `?print=1` and
+     prints it. So Export PDF carried whole notes while the attachment a
+     client receives still cut them off, which is the copy nobody proofreads.
+
+     Driven, because the call sits in `refresh` and reads a flag set in
+     `boot`: a `const` in `boot` would be a ReferenceError here and nowhere
+     else — in print mode only, on the one path with no human watching. */
+  const r = await bootWith({
+    search: '?print=1&team=titan&sprint=S41',
+    teams: TEAMS, sprints: SPRINTS, currentSprintId: 'S42',
+  });
+  assert.ok(r.noteCalls.length > 0,
+    'the print page never copied its notes out, so the emailed PDF truncates every one');
+});
+
+check('AND AN ORDINARY PAGE LOAD DOES NOT', async () => {
+  /* On screen the textarea IS the control — he types in it. Copying the text
+     out beside it would show every note twice in the app. */
+  const r = await bootWith({
+    search: '', teams: TEAMS, sprints: SPRINTS, currentSprintId: 'S42',
+  });
+  assert.strictEqual(r.noteCalls.length, 0,
+    'a normal page load duplicated every note on screen');
+});
+
+check('THE PLANNING GROUP IS CALLED "PLANNING", and the routes did not move', () => {
+  /* The heading holds Capacity planning and Forecast as well as the three
+     sprint screens, and those two are about what the team can take on rather
+     than about any one sprint.
+
+     THE ROUTE IDS ARE THE POINT OF THIS CHECK, not the word. `sprints/...`
+     appears in saved links, in the print URLs the mail renderer builds from
+     `REPORTS[*].route`, and in localStorage. Renaming a heading is a label
+     change; renaming the ids alongside it would be a silent 404 for every
+     bookmark and a PDF of the fallback screen for every scheduled send. */
+  const app = fs.readFileSync(path.join(VIEWS, '..', 'app.js'), 'utf8');
+  assert.match(app, /\{ group: 'Planning' \}/, 'the group is not called Planning');
+  assert.ok(!/\{ group: 'Sprints' \}/.test(app), 'the old heading is still there');
+  for (const id of ['sprints/active', 'sprints/future', 'sprints/closed', 'sprints/capacity', 'sprints/forecast']) {
+    assert.ok(app.includes(`id: '${id}'`), `${id} was renamed with the heading, breaking every saved link to it`);
+  }
+});
 
 check('THE COVERAGE PAGE IS CALLED "OVERALL COVERAGE"', () => {
   const { routes } = navOf();
@@ -787,6 +867,112 @@ check('NOTHING RELOADS THE BROWSER', () => {
       .split('\n').find(l => /location\.reload\s*\(/.test(l));
     assert.ok(!hit, `${f} reloads the whole page: ${String(hit).trim()}`);
   }
+});
+
+/**
+ * A PAGE WITH NOTES ON IT, and nothing else.
+ *
+ * `printNotes` is stubbed in every boot check above — which is right, those
+ * ask whether it is CALLED — and that left the function itself unchecked: it
+ * could have returned an empty array and the whole suite would have stayed
+ * green while every emailed PDF truncated every note. So this builds a small
+ * real DOM and asks what the function actually puts on the page.
+ *
+ * `nextSibling` is a getter over the children array rather than a stored
+ * field, because `printNotes` inserts BEFORE it and a stale sibling would let
+ * a broken insertion look correct.
+ */
+function pageWith(values) {
+  const parent = { children: [] };
+  parent.insertBefore = (n, ref) => {
+    const at = ref ? parent.children.indexOf(ref) : -1;
+    parent.children.splice(at < 0 ? parent.children.length : at, 0, n);
+    n.parentNode = parent;
+  };
+  parent.removeChild = (n) => {
+    const at = parent.children.indexOf(n);
+    if (at >= 0) parent.children.splice(at, 1);
+    n.parentNode = null;
+  };
+  for (const value of values) {
+    const ta = { tagName: 'TEXTAREA', value, parentNode: parent, className: '' };
+    Object.defineProperty(ta, 'nextSibling', {
+      get: () => parent.children[parent.children.indexOf(ta) + 1] || null,
+    });
+    parent.children.push(ta);
+  }
+  return parent;
+}
+
+/** The real `UI`, pointed at that page. */
+function notesPage(values) {
+  const ctx = sandbox([]);
+  const page = pageWith(values);
+  ctx.document = {
+    createElement: () => ({ className: '', textContent: '', parentNode: null }),
+    querySelectorAll: (sel) => (sel === 'textarea'
+      ? page.children.filter(n => n.tagName === 'TEXTAREA') : []),
+    querySelector: () => null,
+  };
+  const notes = () => page.children.filter(n => n.className === 'print-note');
+  return { UI: ctx.UI, page, notes };
+}
+
+check('A NOTE IS COPIED OUT IN FULL, every line of it', () => {
+  /* WHAT HE ACTUALLY SAW. The notes live in `<textarea rows="1">`, which
+     prints exactly one line and silently drops the rest — so a three-line
+     note reached the client as its first sentence. The copy has to carry the
+     whole string, newlines and all, or this is not fixed. */
+  const long = 'Blocked on the Evolve migration.\nOwner: Duy\n\nRe-check after the 14 Sep cut.';
+  const { UI, notes } = notesPage([long]);
+  const added = UI.printNotes();
+  assert.strictEqual(notes().length, 1, 'the note was never copied out of its textarea');
+  assert.strictEqual(notes()[0].textContent, long,
+    'the copy is not the whole note — the PDF would truncate it exactly as before');
+  assert.strictEqual(added.length, 1, 'printNotes did not report what it added, so nothing can undo it');
+});
+
+check('and it lands NEXT TO the note it came from, in order', () => {
+  /* Three notes, three copies, each beside its own source. An insertion that
+     appended everything to the end would pass a count check and put the
+     wrong note under the wrong heading. */
+  const { UI, page } = notesPage(['first', 'second', 'third']);
+  UI.printNotes();
+  const seen = page.children.map(n => (n.className === 'print-note' ? `copy:${n.textContent}` : `ta:${n.value}`));
+  assert.deepStrictEqual(seen,
+    ['ta:first', 'copy:first', 'ta:second', 'copy:second', 'ta:third', 'copy:third'],
+    'the copies are not beside the notes they came from');
+});
+
+check('AN EMPTY NOTE ADDS NOTHING', () => {
+  /* Most textareas on a sprint page are blank. A copy of each would push real
+     content down the page and add blank blocks to the PDF. */
+  const { UI, notes } = notesPage(['', '   \n ', 'kept']);
+  UI.printNotes();
+  assert.strictEqual(notes().length, 1, 'a blank note was copied out as an empty block');
+  assert.strictEqual(notes()[0].textContent, 'kept', 'the wrong note survived');
+});
+
+check('AND A SECOND RENDER DOES NOT STACK A SECOND COPY', () => {
+  /* In print mode this runs at the end of EVERY render, and a view that
+     redraws itself would otherwise print each note twice, then three times. */
+  const { UI, notes } = notesPage(['once']);
+  UI.printNotes();
+  UI.printNotes();
+  UI.printNotes();
+  assert.strictEqual(notes().length, 1, 'the note was copied out once per render, so the PDF repeats it');
+});
+
+check('and the on-screen path puts the page back afterwards', () => {
+  /* `exportPdf` prints the live page the user is looking at, so its copies
+     have to go again. Only the throwaway `?print=1` page keeps them. */
+  const { UI, page, notes } = notesPage(['a', 'b']);
+  const added = UI.printNotes();
+  assert.strictEqual(notes().length, 2, 'nothing to undo — the copies were never made');
+  UI.unprintNotes(added);
+  assert.strictEqual(notes().length, 0, 'the copies stayed on screen after the print');
+  assert.deepStrictEqual(page.children.map(n => n.value), ['a', 'b'], 'undoing it disturbed the notes themselves');
+  assert.strictEqual(added.length, 0, 'the list was not emptied, so a second undo would remove live nodes');
 });
 
 (async () => {

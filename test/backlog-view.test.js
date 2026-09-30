@@ -122,6 +122,58 @@ function fakeEl(id) {
   };
 }
 
+/**
+ * ONE SECTION'S HEAD, AS A TREE THAT CAN BE WALKED.
+ *
+ * The fold handler no longer asks "was a twisty clicked". It asks what was
+ * under the pointer and walks UP from there — is it inside a head, is it a
+ * control in its own right, which section does it belong to. None of that can
+ * be answered by an object that returns itself for one selector, so this
+ * builds the real shape: section → head → the four things in it, plus a body
+ * with a row in it, with parents that link and a `closest` that climbs them.
+ *
+ * `matches` covers the three selector forms the view actually uses — a class,
+ * a `[data-x]` attribute, a tag name, and comma-separated lists of those. It
+ * is deliberately small: a matcher that quietly accepts a selector it does not
+ * understand would answer `null` and look exactly like a handler that decided
+ * not to act.
+ */
+function headTree(id, { kind = 'sprint' } = {}) {
+  const camel = (attr) => attr.replace(/^data-/, '').replace(/-(\w)/g, (_, c) => c.toUpperCase());
+  const mk = (tag, cls, data, parent) => {
+    const n = {
+      tagName: tag.toUpperCase(), className: cls || '', dataset: data || {},
+      parentNode: parent || null,
+    };
+    n.matches = (sel) => String(sel).split(',').map(s => s.trim()).filter(Boolean).some((s) => {
+      if (s.startsWith('.')) return ` ${n.className} `.includes(` ${s.slice(1)} `);
+      if (s.startsWith('[') && s.endsWith(']')) return camel(s.slice(1, -1)) in n.dataset;
+      if (/^[a-z][\w-]*$/i.test(s)) return n.tagName === s.toUpperCase();
+      throw new Error(`headTree cannot match the selector ${s} — teach it that form rather than letting it answer "no"`);
+    });
+    n.closest = (sel) => { let c = n; while (c) { if (c.matches(sel)) return c; c = c.parentNode; } return null; };
+    return n;
+  };
+  const section = mk('section', 'bl-sec', { sec: String(id), kind }, null);
+  const head = mk('div', 'bl-sec-head', {}, section);
+  const body = mk('div', 'bl-sec-body', {}, section);
+  return {
+    section, head, body,
+    fold: mk('button', 'bl-fold', { fold: String(id) }, head),
+    title: mk('h3', '', {}, head),
+    meta: mk('span', 'bl-meta', {}, head),
+    /* THE WAY OUT TO JIRA, which sits in the head and is not a fold. */
+    jira: mk('a', 'btn ghost sm', {}, head),
+    /* NO HEAD CARRIES A BUTTON TODAY — `openInJira` renders an anchor — so
+       this one is here for the next control that lands in the bar. The rule
+       being pinned is "a control in the head is still itself", and a rule
+       that only holds for the controls that happen to exist now is not a
+       rule. */
+    action: mk('button', 'btn ghost sm', { act: 'bl-something' }, head),
+    row: mk('tr', '', { rowKey: `${id}-1` }, body),
+  };
+}
+
 /* THE PAGER LIVES INSIDE `#blTable`, which `renderTable` replaces on every
    draw — so its buttons are NEW nodes each time and the view rewires them.
    A harness that cached them by selector would hand the same objects back
@@ -275,15 +327,24 @@ async function renderBacklog(payload = PAYLOAD, app = null, st = STATE) {
       for (const fn of mountOn.change || []) await fn({ target: node, preventDefault() {} });
       return node;
     },
-    /* FOLD ONE SECTION, as a click on its twisty would. Delegated on the
-       mount, so the handler is fed a target whose `closest` answers — the
-       same shape the sprint picker uses, and for the same reason: the button
-       that was clicked is gone by the time the redraw finishes. */
-    fold(id) {
-      const node = { dataset: { fold: String(id) } };
-      node.closest = (sel) => (sel === '[data-fold]' ? node : null);
-      for (const fn of mountOn.click || []) fn({ target: node, preventDefault() {} });
-      return node;
+    /* CLICK SOMEWHERE IN ONE SECTION'S HEAD. Delegated on the mount, so the
+       handler is fed the element under the pointer and walks up from it.
+
+       IT IS GIVEN A REAL LITTLE TREE (see `headTree`) rather than a lone
+       object answering one selector. The old stand-in answered `[data-fold]`
+       and nothing else, which is a shape only this harness could produce; the
+       moment the whole bar became the target it stopped resembling the page,
+       and three fold checks went red for a reason that had nothing to do with
+       folding.
+
+       `part` picks what the pointer was actually over — the twisty, the
+       title, the meta, or the link out to Jira. The default is the twisty, so
+       every check written before the bar was clickable still asks exactly
+       what it asked then. */
+    fold(id, part = 'fold') {
+      const tree = headTree(id);
+      for (const fn of mountOn.click || []) fn({ target: tree[part], preventDefault() {} });
+      return tree;
     },
     /** Drag one row onto a section, start to drop, as the browser fires it. */
     async drag(key, toSection) {
@@ -1138,6 +1199,98 @@ check('A SECTION FOLDS — and the head STAYS, because it is a drop target', asy
   b.fold('S40');
   assert.strictEqual(rowsIn(b.sec('S40')).length, 2, 'it would not open again');
   assert.match(b.sec('S40'), /aria-expanded="true"/);
+});
+
+check('THE WHOLE HEAD FOLDS IT — the title, the counts, the bar', async () => {
+  /* HIS REQUEST, and the reason for it: the twisty is 11px of arrow at the
+     far left of a bar that runs the width of the page. Everything beside it
+     reads as part of the same control and did nothing when clicked, so
+     shutting a 594-row queue meant hitting a target the size of a full stop,
+     dozens of times an afternoon. */
+  const b = await renderBacklog(BOARD);
+
+  b.fold('S40', 'title');
+  assert.strictEqual(rowsIn(b.sec('S40')).length, 0, 'clicking the sprint name did nothing');
+  b.fold('S40', 'title');
+  assert.strictEqual(rowsIn(b.sec('S40')).length, 2, 'and it would not open again from the name');
+
+  b.fold('S40', 'meta');
+  assert.strictEqual(rowsIn(b.sec('S40')).length, 0, 'clicking "2 items · 8 pts" did nothing');
+
+  /* THE BAR, not just the words on it. A head is mostly empty space and that
+     space is the easiest thing to hit. */
+  b.fold('S40', 'head');
+  assert.strictEqual(rowsIn(b.sec('S40')).length, 2, 'the empty part of the bar is dead');
+});
+
+check('and the twisty still folds it, being the keyboard path', async () => {
+  /* Widening where a mouse may land must not cost the one control that is in
+     the tab order and announces `aria-expanded`. */
+  const b = await renderBacklog(BOARD);
+  b.fold('S40', 'fold');
+  assert.strictEqual(rowsIn(b.sec('S40')).length, 0, 'the twisty stopped working');
+  assert.match(b.sec('S40'), /<button class="bl-fold"[^>]*aria-expanded="false"/,
+    'the twisty is gone, or no longer says which way it is');
+});
+
+check('BUT A CONTROL IN THE HEAD IS STILL ITSELF', async () => {
+  /* "Open in Jira" sits in the head. Folding the section underneath it as
+     well would be one click doing two things — and the fold is the one you
+     did not ask for, discovered only when you come back from Jira to a page
+     that has rearranged itself. */
+  const b = await renderBacklog(BOARD);
+  b.fold('S40', 'jira');
+  assert.strictEqual(rowsIn(b.sec('S40')).length, 2,
+    'the link out to Jira also folded the section it was sitting in');
+
+  /* A BUTTON IN THE HEAD, for the next one that lands there. The twisty is
+     the only one today, and it is the exception — it IS the fold. */
+  b.fold('S40', 'action');
+  assert.strictEqual(rowsIn(b.sec('S40')).length, 2,
+    'a button in the head folded the section as well as doing its own job');
+});
+
+check('AND A CLICK IN THE BODY IS NOT A CLICK ON THE HEAD', async () => {
+  /* Every row lives inside `[data-sec]` too. A handler that read the section
+     off the click without first checking it was in the HEAD would fold the
+     section on any click on any of its 594 rows — including the one that
+     opens an issue. */
+  const b = await renderBacklog(BOARD);
+  b.fold('S40', 'row');
+  assert.strictEqual(rowsIn(b.sec('S40')).length, 2, 'clicking a row folded the section around it');
+  b.fold('S40', 'body');
+  assert.strictEqual(rowsIn(b.sec('S40')).length, 2, 'clicking the body folded the section around it');
+});
+
+check('AND HIGHLIGHTING THE TITLE DOES NOT FOLD IT AWAY', async () => {
+  /* Releasing the mouse after dragging across "Ruby Sprint 40" fires a click
+     on the head. Folding at that moment takes the text you just selected off
+     the screen, which is the most annoying possible answer to "I wanted to
+     copy this". */
+  const b = await renderBacklog(BOARD);
+  b.ctx.getSelection = () => ({ isCollapsed: false, toString: () => 'Ruby Sprint 40' });
+  b.fold('S40', 'title');
+  assert.strictEqual(rowsIn(b.sec('S40')).length, 2, 'selecting the sprint name folded the section');
+
+  /* AN EMPTY SELECTION IS NOT A SELECTION. A collapsed caret sits in the
+     document after any ordinary click, so treating "a selection exists" as
+     "do nothing" would make the whole bar dead again. */
+  b.ctx.getSelection = () => ({ isCollapsed: true, toString: () => '' });
+  b.fold('S40', 'title');
+  assert.strictEqual(rowsIn(b.sec('S40')).length, 0, 'an ordinary click stopped folding');
+});
+
+check('THE HEAD LOOKS CLICKABLE, or nobody finds out that it is', async () => {
+  /* A hit area with no cursor and no hover is one you never discover. The
+     controls inside it keep their own cursor, because they do their own
+     thing. */
+  const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'styles.css'), 'utf8');
+  assert.match(css, /\.bl-sec-head\s*\{\s*cursor:\s*pointer/,
+    'the head does not say it can be clicked');
+  assert.match(css, /\.bl-sec-head:hover\s*\{[^}]*background/,
+    'the head gives no sign it is under the pointer');
+  assert.match(css, /\.bl-sec-head\s+:is\([^)]*input[^)]*\)\s*\{\s*cursor:\s*auto/,
+    'a field in the head shows the folding cursor');
 });
 
 check('THE QUEUE FOLDS TOO — it is a section like any other', async () => {

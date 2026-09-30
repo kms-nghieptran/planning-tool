@@ -864,9 +864,38 @@ const BacklogView = (() => {
          next box you meant to tick would close the thing you are ticking. */
       if (whoOpen && !near('[data-who-panel]')) { whoOpen = false; redrawWho(mount); }
 
-      const btn = near('[data-fold]');
-      if (!btn) return;
-      const id = String(btn.dataset.fold);
+      /* ── THE WHOLE HEAD FOLDS, not just the twisty ────────────────
+         The caret is 11px of arrow at the far left of a bar that runs the
+         width of the page, and everything to its right — the sprint name,
+         "18 items · 34 pts · 6 done" — reads as part of the same control
+         and did nothing when clicked. Hitting an 11px target to shut a
+         594-row queue is a chore you do dozens of times an afternoon.
+
+         THE CARET STAYS. It is the keyboard path and the thing that
+         announces `aria-expanded`; this only widens where a mouse may
+         land. */
+      const head = near('.bl-sec-head');
+      if (!head) return;
+
+      /* A CONTROL IN THE HEAD IS STILL ITSELF. "Open in Jira" sits up here
+         and opens Jira — folding the section underneath it as well would
+         be the head quietly doing two things to one click. The twisty is
+         the exception: it is the fold. */
+      if (near('a, input, select, textarea, label')) return;
+      if (near('button') && !near('.bl-fold')) return;
+
+      /* A DRAG ACROSS THE TITLE IS A SELECTION, not a click. Releasing the
+         mouse after highlighting "Sprint 41" fires a click on the head,
+         and folding the section away at that moment takes the text with
+         it. */
+      try {
+        const sel = typeof getSelection === 'function' ? getSelection() : null;
+        if (sel && !sel.isCollapsed && String(sel).trim()) return;
+      } catch { /* a host without a selection API just folds */ }
+
+      const sec = head.closest('[data-sec]');
+      if (!sec) return;
+      const id = String(sec.dataset.sec);
       if (folded.has(id)) folded.delete(id); else folded.add(id);
       saveFold(state.teamId);
       renderTable(state, mount);
