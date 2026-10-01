@@ -39,6 +39,14 @@ const basePlan = () => ({
 });
 
 const snapshot = (over = {}) => ({
+  /* WHEN THIS SNAPSHOT WAS TAKEN. Reconcile will not retract a claim stamped
+     later than the snapshot it is judged against, and a claim written DURING a
+     check is stamped with the real clock — so a fixed date here silently
+     disabled every retraction the moment real time passed it, and a check that
+     reconciled twice stopped testing anything at all. A minute ahead of now is
+     "current" in the only sense that matters: newer than anything this run can
+     write. The checks that are ABOUT staleness pass their own older date. */
+  syncedAt: new Date(Date.now() + 60_000).toISOString(),
   boards: [
     { id: '10', name: 'AUTOKAT Ruby board', type: 'scrum' },
     { id: '11', name: 'AUTOKAT Titan board', type: 'scrum' },
@@ -755,6 +763,256 @@ check('and activeSprint STAYS SINGULAR — the FIRST, which other screens depend
   assert.strictEqual(r.activeSprint(plan, 'titan'), r.activeSprints(plan, 'titan')[0],
     'the singular answer has to be the head of the plural one');
   assert.strictEqual(r.activeSprint({ sprints: [] }, 'titan'), null, 'and null when nothing is running');
+});
+
+/* ── RETRACTING A CLAIM A BOARD NO LONGER MAKES ───────────────────────────
+ *
+ * `byTeam[teamId]` asserts "this Jira sprint is that team's sprint". That is a
+ * fact about a board, and boards change. Reconcile used to only ever ADD one,
+ * so a mapping outlived the board that justified it — Katalon PS Squad went on
+ * showing "Katalon PSA Sprint 42", a Titan sprint, for a week after PS Squad's
+ * board stopped returning it, with nothing on screen to say the claim was stale
+ * while every claim beside it was current.
+ *
+ * The retraction is the dangerous direction, so most of what follows is about
+ * the cases where it must NOT happen.
+ */
+
+/**
+ * A plan carrying a claim no snapshot in this file returns.
+ *
+ * ON ITS OWN ROW, DELIBERATELY. The first version of this put the stale claim
+ * on S40 — which every snapshot here fills — so the claim was OVERWRITTEN on
+ * the way past and the check passed without a single retraction happening.
+ * S38 is a row no board in this file mentions, so the only thing that can
+ * remove the claim is the retraction under test.
+ */
+const planWithStaleClaim = (teamId = 'ruby', over = {}) => {
+  const plan = basePlan();
+  plan.sprints.push({
+    id: 'S38', number: 38, name: 'Sprint 38', start: '2026-08-20', end: '2026-09-02',
+    byTeam: {
+      [teamId]: {
+        jiraId: '999', name: 'Someone Else Sprint 38', state: 'future',
+        start: '2026-08-20', end: '2026-09-02',
+        // A WEEK OLD, which is the whole signal.
+        syncedAt: '2026-09-24T13:39:22.894Z', ...over,
+      },
+    },
+  });
+  return plan;
+};
+
+check('A CLAIM THE BOARD NO LONGER RETURNS IS RETRACTED', () => {
+  const plan = planWithStaleClaim();
+  const rep = r.reconcileSprints(plan, snapshot());
+  const s38 = plan.sprints.find(s => s.id === 'S38');
+  assert.ok(!s38.byTeam.ruby,
+    'the stale claim survived and is still masquerading as this team\'s sprint');
+  const s40 = plan.sprints.find(s => s.id === 'S40');
+  assert.strictEqual(s40.byTeam.ruby.jiraId, '502',
+    'fixture check: the rows the board DOES return must still be filled');
+  const gone = rep.pruned.find(p => p.jiraId === '999');
+  assert.ok(gone, 'the retraction was not reported, so it happened silently');
+  assert.strictEqual(gone.teamId, 'ruby');
+  assert.strictEqual(gone.lastSeen, '2026-09-24T13:39:22.894Z',
+    'the report does not say how long the claim had been stale');
+});
+
+check('AND THE SPRINTS THE BOARD STILL RETURNS ARE LEFT ALONE', () => {
+  /* The retraction has to be surgical. A pass that cleared a team's claims and
+     rewrote them would look identical here and be catastrophic on any row the
+     current snapshot does not mention. */
+  const plan = basePlan();
+  r.reconcileSprints(plan, snapshot());
+  const before = JSON.stringify(plan.sprints.find(s => s.id === 'S39').byTeam.ruby);
+  const rep = r.reconcileSprints(plan, snapshot());
+  assert.deepStrictEqual(rep.pruned, [], 'a second identical sync retracted something');
+  const after = plan.sprints.find(s => s.id === 'S39').byTeam.ruby;
+  assert.ok(after, 'a CLOSED sprint the board still lists lost its claim — that is velocity history');
+  assert.strictEqual(after.jiraId, JSON.parse(before).jiraId);
+});
+
+check('ONE SYNC STAMPS EVERY CLAIM WITH ONE TIME', () => {
+  /* `syncedAt` is how old a claim is, and a sync is one event. Stamping each
+     sprint as it was written made claims from the same pass differ by a
+     millisecond or two, so "last synced" was a range rather than a time and two
+     claims from one sync looked like they came from different ones.
+
+     A SMOKE CHECK, not a proof. Four sprints are written well inside one
+     millisecond, so a per-sprint `new Date()` would usually pass this too —
+     it catches a gross regression (a stamp per team, a stamp per row) and not
+     a subtle one. Nothing depends on the property for correctness, and a test
+     that leant on timing to prove it would fail on a slow machine for reasons
+     having nothing to do with the code. */
+  const plan = basePlan();
+  r.reconcileSprints(plan, snapshot());
+  const stamps = new Set();
+  for (const s of plan.sprints) for (const t of Object.values(s.byTeam || {})) if (t.syncedAt) stamps.add(t.syncedAt);
+  assert.ok(stamps.size, 'fixture check: nothing was stamped at all');
+  assert.strictEqual(stamps.size, 1, `one sync wrote ${stamps.size} different timestamps: ${[...stamps].join(', ')}`);
+});
+
+check('A BOARD THAT RETURNED NOTHING RETRACTS NOTHING', () => {
+  /* The case that would wipe a whole team's calendar in one pass: a board that
+     failed, was reconfigured, or lost its permission comes back empty, and an
+     empty list is not the same statement as "this team has no sprints". */
+  const plan = planWithStaleClaim('titan');
+  const rep = r.reconcileSprints(plan, snapshot({ boardSprintsByTeam: { ruby: [], titan: [] } }));
+  const s38 = plan.sprints.find(s => s.id === 'S38');
+  assert.ok(s38.byTeam.titan, 'an empty board erased a team\'s sprint');
+  assert.strictEqual(s38.byTeam.titan.jiraId, '999');
+  assert.deepStrictEqual(rep.pruned, []);
+  assert.ok(rep.prunedSkipped.some(x => x.teamId === 'titan'),
+    'skipping the retraction was not reported, so an empty board reads as a clean sync');
+});
+
+check('A SNAPSHOT OLDER THAN THE CLAIM RETRACTS NOTHING', () => {
+  /* THE HAZARD THIS CHANGE INTRODUCED, caught on a dry run against his real
+     data. `/api/reconcile` re-runs this against whatever snapshot is on disk,
+     with no network — and his snapshot.json was 17 days old while the sprint
+     table beside it had been synced that morning. Pressing Reconcile would
+     have retracted Ruby's Sprint 43 and PS Squad's Sprint 4: sprints synced
+     hours earlier and plainly on their boards, judged against a file that
+     predated them.
+
+     A claim stamped after the snapshot was taken was written by a more recent
+     sync than the one being consulted, so this snapshot cannot speak to it. */
+  const plan = planWithStaleClaim('ruby', { syncedAt: '2026-10-01T09:00:00.000Z' });
+  const old = snapshot({ syncedAt: '2026-09-14T15:52:30.566Z' });
+  const rep = r.reconcileSprints(plan, old);
+  assert.deepStrictEqual(rep.pruned, [], 'a stale snapshot retracted a claim newer than itself');
+  assert.ok(plan.sprints.find(s => s.id === 'S38').byTeam.ruby, 'the claim is gone');
+  assert.ok(rep.prunedSkipped.some(x => /after this snapshot/.test(x.reason)),
+    'the skip was not explained, so it looks like there was nothing to retract');
+});
+
+check('AND A SNAPSHOT THAT DOES NOT SAY WHEN IT WAS TAKEN RETRACTS NOTHING', () => {
+  /* Its age cannot be checked, so it does not get to overrule anything. */
+  const plan = planWithStaleClaim();
+  const undated = snapshot();
+  delete undated.syncedAt;
+  const rep = r.reconcileSprints(plan, undated);
+  assert.deepStrictEqual(rep.pruned, []);
+  assert.ok(rep.prunedSkipped.some(x => /when it was taken/.test(x.reason)));
+});
+
+check('AND A LIST AT THE PAGINATION CAP RETRACTS NOTHING', () => {
+  /* jira.boardSprints stops at 500 whether or not it reached the end, so a
+     board past that returns a TRUNCATED list — and everything past the cut
+     looks exactly like a sprint that left the board. Retracting from one would
+     delete the oldest half of a team's calendar. */
+  const many = Array.from({ length: r.BOARD_SPRINT_CAP }, (_, i) => ({
+    id: `9${i}`, name: `Katalon Ruby Sprint ${i + 1}`, state: 'closed',
+    start: '2026-01-01', end: '2026-01-14',
+  }));
+  const plan = planWithStaleClaim();
+  const rep = r.reconcileSprints(plan, snapshot({ boardSprintsByTeam: { ruby: many } }));
+  assert.deepStrictEqual(rep.pruned, [], 'a truncated board list was treated as complete');
+  assert.ok(rep.prunedSkipped.some(x => x.teamId === 'ruby' && /truncat/i.test(x.reason)));
+});
+
+check('THE CAP HERE AGREES WITH THE ONE IN jira.js', () => {
+  /* Two numbers that must match and live in different files. Raised in jira.js
+     alone, the guard above starts trusting a list that is still truncated —
+     and that failure is both silent and destructive. */
+  const src = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'lib', 'jira.js'), 'utf8');
+  const m = /for \(let start = 0; start < (\d+); start \+= (\d+)\)/.exec(src);
+  assert.ok(m, 'the paging loop in jira.boardSprints changed shape — recheck the cap by hand');
+  assert.strictEqual(Number(m[1]), r.BOARD_SPRINT_CAP,
+    `jira.js pages to ${m && m[1]} but reconcile guards at ${r.BOARD_SPRINT_CAP}`);
+});
+
+check('A NUMERIC SPRINT ID STILL MATCHES THE STRING ONE STORED', () => {
+  /* Jira's REST API returns sprint ids as NUMBERS. `jira.boardSprints` casts
+     them on the way in, but an imported or restored snapshot can carry the raw
+     numbers — and `new Set([123]).has('123')` is false, so every claim would
+     look absent and every one of a team's sprints would be retracted in a
+     single pass. The cast is one word and this is the only thing standing on
+     it. */
+  const plan = basePlan();
+  r.reconcileSprints(plan, snapshot());
+  const numeric = snapshot();
+  numeric.boardSprintsByTeam.ruby = numeric.boardSprintsByTeam.ruby.map(x => ({ ...x, id: Number(x.id) }));
+  const rep = r.reconcileSprints(plan, numeric);
+  assert.deepStrictEqual(rep.pruned, [],
+    'a snapshot with numeric sprint ids retracted claims that are plainly on the board');
+  assert.ok(plan.sprints.find(s => s.id === 'S40').byTeam.ruby, 'ruby lost Sprint 40 to a type mismatch');
+});
+
+check('A HAND-MADE CALENDAR ROW IS NOT JIRA\'S TO RETRACT', () => {
+  /* Generated sprints carry no jiraId. Jira never asserted them, so Jira's
+     silence about them says nothing — and a calendar generated ahead of the
+     board has to survive the next sync or the planning runway vanishes. */
+  const plan = planWithStaleClaim('ruby', { jiraId: undefined });
+  const rep = r.reconcileSprints(plan, snapshot());
+  assert.deepStrictEqual(rep.pruned, [], 'a row Jira never asserted was retracted anyway');
+});
+
+check('THE ROW SURVIVES EVEN WHEN THE LAST TEAM LETS GO OF IT', () => {
+  /* Its dates, notes, overrides and capacity are all keyed on this id. A sprint
+     that drops off every board is far more likely to be a board reorganised
+     than a quarter of planning that never happened — so it is reported, not
+     removed, and a person decides. */
+  const plan = planWithStaleClaim();
+  const rep = r.reconcileSprints(plan, snapshot());
+  const row = plan.sprints.find(s => s.id === 'S38');
+  assert.ok(row, 'the sprint row itself was deleted');
+  assert.strictEqual(row.name, 'Sprint 38', 'the row survived but lost what was on it');
+  assert.strictEqual(row.start, '2026-08-20', 'and its dates went with the claim');
+  assert.deepStrictEqual(row.byTeam, {}, 'the retracted claim is still there');
+  assert.ok(rep.orphaned.some(o => o.id === 'S38'),
+    'a row that lost its last team was not reported, so it simply goes quiet');
+});
+
+check('ONE TEAM LETTING GO DOES NOT TOUCH ANOTHER TEAM\'S CLAIM ON THE SAME ROW', () => {
+  /* The shared calendar is the point: S40 is Ruby's sprint AND Titan's. A
+     retraction that worked on the row rather than on the claim would take both. */
+  const plan = planWithStaleClaim('ruby');
+  const s38 = plan.sprints.find(s => s.id === 'S38');
+  s38.byTeam.titan = { jiraId: '638', name: 'Katalon Titan Sprint 38', state: 'closed', syncedAt: '2026-09-24T13:39:22.894Z' };
+  /* Titan's board still returns Sprint 38; Ruby's does not. One row, one claim
+     retracted, one kept — which a retraction working on the row could not do. */
+  const snap = snapshot();
+  snap.boardSprintsByTeam.titan.push({ id: '638', name: 'Katalon Titan Sprint 38', state: 'closed', start: '2026-08-20', end: '2026-09-02' });
+  r.reconcileSprints(plan, snap);
+  assert.ok(!s38.byTeam.ruby, 'ruby kept a claim its board dropped');
+  assert.ok(s38.byTeam.titan, 'retracting ruby\'s claim took titan\'s with it');
+  assert.strictEqual(s38.byTeam.titan.jiraId, '638');
+});
+
+check('THE REAL ONE: PS SQUAD STOPS HOLDING A TITAN SPRINT', () => {
+  /* Reproduced from the live plan. "Katalon PSA Sprint 42" (18307) sits on the
+     Titan and Katalon Automation boards and on neither of PS Squad's. PS
+     Squad's own board offers "Katalon Squad Sprint 4" for exactly that
+     fortnight. Before this change the squad's future-sprint list showed Titan's
+     work, a week after its own board last mentioned it. */
+  const plan = basePlan();
+  plan.teams.push(team('psquad', 'Katalon Squad', 'squad'));
+  plan.sprints.push({
+    id: 'S42', number: 42, name: 'Sprint 42', start: '2026-10-14', end: '2026-10-28',
+    byTeam: {
+      titan: { jiraId: '18307', name: 'Katalon PSA Sprint 42', state: 'future', syncedAt: '2026-09-24T13:39:22.894Z' },
+      psquad: { jiraId: '18307', name: 'Katalon PSA Sprint 42', state: 'future', syncedAt: '2026-09-24T13:39:22.894Z' },
+    },
+  });
+  const snap = snapshot({
+    boardSprintsByTeam: {
+      titan: [{ id: '18307', name: 'Katalon PSA Sprint 42', state: 'future', start: '2026-10-15', end: '2026-10-28' }],
+      psquad: [
+        { id: '18482', name: 'Katalon Squad Sprint 2', state: 'active', start: '2026-09-17', end: '2026-09-30' },
+        { id: '18665', name: 'Katalon Squad Sprint 4', state: 'future', start: '2026-10-15', end: '2026-10-28' },
+      ],
+    },
+  });
+  r.reconcileSprints(plan, snap);
+  const s42 = plan.sprints.find(s => s.id === 'S42');
+  assert.ok(!s42.byTeam.psquad, 'PS Squad is still showing a Titan sprint as its own');
+  assert.ok(s42.byTeam.titan && s42.byTeam.titan.jiraId === '18307',
+    'the sprint stopped belonging to the team it actually belongs to');
+  // And the squad's own sprints landed somewhere.
+  assert.ok(plan.sprints.some(s => s.byTeam && s.byTeam.psquad && s.byTeam.psquad.jiraId === '18665'),
+    'PS Squad lost its own Sprint 4 as well');
 });
 
 console.log(`\n${passed} passed, ${failed} failed\n`);

@@ -512,6 +512,22 @@ const App = (() => {
     if (rec) {
       if (rec.teams && rec.teams.created) bits.push(`${rec.teams.created} new team${rec.teams.created > 1 ? 's' : ''}`);
       if (rec.sprints.added) bits.push(`${rec.sprints.added} new sprint${rec.sprints.added > 1 ? 's' : ''}`);
+      /* A SPRINT LEAVING A TEAM'S CALENDAR IS SAID OUT LOUD.
+         Every other item in this line is an addition, so a sync that quietly
+         took a sprint off a team would read exactly like a sync that did
+         nothing at all. Named rather than counted when it is one or two,
+         because the first question is always "which one". */
+      if (rec.sprints.pruned) {
+        const d = rec.sprints.prunedDetail || [];
+        bits.push(d.length && d.length <= 2
+          ? d.map(x => `${x.name || x.jiraId} left ${x.teamId}`).join(', ')
+          : `${rec.sprints.pruned} sprints left their team`);
+      }
+      /* AND A TEAM THAT COULD NOT BE CHECKED SAYS SO. Silence here would read
+         as "nothing stale", which is the opposite of what it means. */
+      if (rec.sprints.prunedSkipped && rec.sprints.prunedSkipped.length) {
+        bits.push(`⚠ ${rec.sprints.prunedSkipped.map(x => x.teamId).join(', ')} not checked for stale sprints`);
+      }
       if (rec.members.added) bits.push(`${rec.members.added} member${rec.members.added > 1 ? 's' : ''} joined — check availability`);
       if (rec.members.linked) bits.push(`${rec.members.linked} linked to Jira`);
     }

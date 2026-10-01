@@ -822,7 +822,11 @@ const SettingsView = (() => {
           UI.toast(`Imported ${r.added} issues`); App.refresh();
         } else if (act === 'reconcile') {
           const r = await UI.jsonPost('/api/reconcile', {});
-          UI.toast(`${r.sprints.added} sprints added, ${r.sprints.updated} updated, ${r.members.linked} members linked to Jira`);
+          /* The retraction count belongs here too, and only when there is one:
+             a standing "0 retracted" trains you to stop reading the line. */
+          UI.toast(`${r.sprints.added} sprints added, ${r.sprints.updated} updated`
+            + (r.sprints.pruned ? `, ${r.sprints.pruned} left their team` : '')
+            + `, ${r.members.linked} members linked to Jira`);
           App.refresh();
         } else if (act === 'restore') {
           const input = UI.$('#restoreFile', mount);

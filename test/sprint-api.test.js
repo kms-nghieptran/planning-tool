@@ -101,7 +101,25 @@ fs.writeFileSync(path.join(SCRATCH, 'store', 'snapshot.json'), JSON.stringify({
   issues: Object.fromEntries(ISSUES.map(i => [i.key, i])),
   sprints: [], components: [], testops: {}, github: {}, verification: [], fields: {},
   boards: [{ id: '2092', name: 'Katalon Auto Titan', type: 'scrum' }],
-  boardSprintsByTeam: { titan: [{ id: '938', name: 'Katalon Titan S38', state: 'closed' }] },
+  /* TITAN'S BOARD LISTS EVERY SPRINT THE PLAN CREDITS TO TITAN.
+     It used to list only S38, while the plan above claimed S39, S40 and the
+     adopted "Hardening week" for the same team — a snapshot that contradicted
+     the plan it was paired with. Nothing read the contradiction, so the stub
+     was harmless until reconcile started RETRACTING claims a board no longer
+     makes: three of titan's sprints then vanished mid-suite and the sprint
+     notes fell back to plan-row keys.
+
+     Malphite is still deliberately absent from this map — a team whose board
+     returned nothing is never pruned, which is what keeps "a team is not shown
+     other teams' sprints" an honest check rather than an artefact. */
+  boardSprintsByTeam: {
+    titan: [
+      { id: '938', name: 'Katalon Titan S38', state: 'closed', start: '2026-08-20', end: '2026-09-02' },
+      { id: '939', name: 'Katalon Titan S39', state: 'active', start: '2026-09-03', end: '2026-09-16' },
+      { id: '940', name: 'Katalon Titan S40', state: 'future', start: '2026-09-17', end: '2026-09-30' },
+      { id: '9500', name: 'Hardening week', state: 'future', start: '2026-09-21', end: '2026-09-25' },
+    ],
+  },
   boardSprintErrors: [],
   people: [
     { name: 'Hien Phan', accountId: 'acc-hien' },
