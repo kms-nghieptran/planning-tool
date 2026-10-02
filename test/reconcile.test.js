@@ -1015,5 +1015,74 @@ check('THE REAL ONE: PS SQUAD STOPS HOLDING A TITAN SPRINT', () => {
     'PS Squad lost its own Sprint 4 as well');
 });
 
+/* ── A TEAM'S OWN CHRONOLOGY ──────────────────────────────────────────────
+ *
+ * The calendar row carries one pair of dates for every team on it. That is
+ * right for teams sharing a cadence and wrong for a team whose sprint numbers
+ * collide with somebody else's — and Katalon Squad, numbering from 0 while Ruby
+ * is at 42, collides with Ruby's 2025 history on every row it touches.
+ */
+
+/** Squad's five sprints, each landing on a row dated from Ruby's old history. */
+const COLLIDED = () => ({
+  sprints: [
+    { id: 'S0', number: 0, name: 'Sprint 0', start: '2026-08-25', end: '2026-09-02',
+      byTeam: { squad: { jiraId: '18480', name: 'Katalon Squad Sprint 0', state: 'closed', start: '2026-08-25', end: '2026-08-31' } } },
+    { id: 'S1', number: 1, name: 'Sprint 1', start: '2025-03-20', end: '2025-04-02',
+      byTeam: { squad: { jiraId: '18481', name: 'Katalon Squad Sprint 1', state: 'closed', start: '2026-09-03', end: '2026-09-16' } } },
+    { id: 'S2', number: 2, name: 'Sprint 2', start: '2025-03-06', end: '2025-03-20',
+      byTeam: { squad: { jiraId: '18482', name: 'Katalon Squad Sprint 2', state: 'closed', start: '2026-09-17', end: '2026-09-30' } } },
+    { id: 'S3', number: 3, name: 'Sprint 3', start: '2025-04-18', end: '2025-04-25',
+      byTeam: { squad: { jiraId: '18612', name: 'Katalon Squad Sprint 3', state: 'active', start: '2026-10-01', end: '2026-10-14' } } },
+    { id: 'S4', number: 4, name: 'Sprint 4', start: '2025-05-02', end: '2025-05-16',
+      byTeam: { squad: { jiraId: '18665', name: 'Katalon Squad Sprint 4', state: 'future', start: '2026-10-15', end: '2026-10-28' } } },
+  ],
+});
+
+check('A TEAM\'S SPRINTS ORDER BY ITS OWN DATES, not the shared row\'s', () => {
+  /* Taken from the live plan. By row date these come out 2, 1, 3, 0, 4 —
+     which is how Katalon Squad's velocity table came to read "Sprint 2,
+     Sprint 1, Sprint 3" with Sprint 0 missing. */
+  const rows = COLLIDED().sprints.slice();
+  const byRow = rows.slice().sort(r.compareSprints).map(s => s.number);
+  assert.deepStrictEqual(byRow, [2, 1, 3, 4, 0], 'fixture check: the row dates really are scrambled');
+
+  const byTeam = rows.slice().sort(r.compareForTeam('squad')).map(s => s.number);
+  assert.deepStrictEqual(byTeam, [0, 1, 2, 3, 4], 'the team\'s own dates did not order its sprints');
+});
+
+check('AND A TEAM WITH NO DATES OF ITS OWN FALLS BACK TO THE ROW', () => {
+  /* Most teams are this: one cadence, one set of dates, nothing to correct.
+     The fix must not reorder them. */
+  const rows = [
+    { id: 'S1', number: 1, start: '2026-01-01', byTeam: {} },
+    { id: 'S2', number: 2, start: '2026-01-15', byTeam: {} },
+  ];
+  assert.deepStrictEqual(rows.slice().reverse().sort(r.compareForTeam('nobody')).map(s => s.number), [1, 2]);
+  assert.deepStrictEqual(rows.slice().reverse().sort(r.compareSprints).map(s => s.number), [1, 2]);
+});
+
+check('AND WITH NO TEAM AT ALL IT IS THE OLD SHARED ORDERING, unchanged', () => {
+  /* Screens that show every team at once still want the calendar's own order —
+     the shared row IS the thing being listed there. */
+  const rows = COLLIDED().sprints.slice();
+  assert.deepStrictEqual(
+    rows.slice().sort(r.compareForTeam(null)).map(s => s.number),
+    rows.slice().sort(r.compareSprints).map(s => s.number),
+    'passing no team changed the ordering it has always had',
+  );
+});
+
+check('THE ACTIVE SPRINT IS FOUND BY THE TEAM\'S CHRONOLOGY TOO', () => {
+  /* The window is "closed sprints BEFORE the active one". With the row
+     ordering, Squad Sprint 0 sorted after the active sprint and dropped out of
+     the window entirely — the table simply had no Sprint 0 column. */
+  const plan = COLLIDED();
+  const w = require('../lib/metrics').windowSprints(plan, { id: 'squad' }, 12);
+  assert.strictEqual(w.active, 'S3', 'the active sprint is not the one the board says is active');
+  assert.deepStrictEqual(w.ids, ['S0', 'S1', 'S2', 'S3'],
+    'the window has to run from Sprint 0 through the active one, in order');
+});
+
 console.log(`\n${passed} passed, ${failed} failed\n`);
 process.exit(failed ? 1 : 0);

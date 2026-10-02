@@ -20,6 +20,7 @@ const sync = require('./lib/sync');
 const insights = require('./lib/insights');
 const capacity = require('./lib/capacity');
 const classify = require('./lib/classify');
+const holidaysLib = require('./lib/holidays');
 const csv = require('./lib/csv');
 const { Jira } = require('./lib/jira');
 const reconcile = require('./lib/reconcile');
@@ -373,6 +374,34 @@ function sprintFigures(cfg, plan, body = {}) {
  * the attachment does not show is the failure that cannot be caught from
  * inside the tool, because both halves look right on their own.
  */
+/**
+ * The same, for Delivery metrics.
+ *
+ * Scoped by WINDOW rather than by sprint — `body.sprints` is the selector the
+ * screen is showing, and it has to reach both the figures and the attachment
+ * or the mail quotes a twelve-sprint average over a six-sprint chart. The
+ * carrying-on into the print URL happens at the send route, from this one
+ * value, so the two cannot drift. Defaulted to the same 12 the page defaults
+ * to, so a send with no window behaves like opening the page.
+ */
+function deliveryFigures(cfg, plan, body = {}) {
+  const snap = store.getSnapshot();
+  const team = findTeam(plan, body.team || null);
+  const window = Number(body.sprints) || 12;
+  const report = {
+    teamName: team.jiraName || team.name,
+    window,
+    windowSprints: metrics.windowSprints(plan, team, window).ids,
+    velocity: metrics.velocity(plan, snap, team, { sprints: window }),
+    quality: metrics.quality(plan, snap, team, { sprints: window }),
+  };
+  return reportMail.deliveryFiguresFrom(report, {
+    teamName: team ? team.name : '',
+    senderName: (cfg.mail || {}).fromName || '',
+    today: Date.now(),
+  });
+}
+
 function capacityFigures(cfg, plan, body = {}) {
   const snap = store.getSnapshot();
   const team = findTeam(plan, body.team || null);
@@ -397,6 +426,7 @@ function capacityFigures(cfg, plan, body = {}) {
    `else` would have done. */
 const FIGURES = {
   coverage: coverageFigures,
+  delivery: deliveryFigures,
   sprint: sprintFigures,
   capacity: capacityFigures,
 };
@@ -517,7 +547,14 @@ async function sendReport(cfg, body = {}, { trigger = 'manual' } = {}) {
            and identical under any chip — so this is not "the same scope read
            twice". It is the framing of the picture, and the picture is what
            the attachment is. */
-        view: body.view || {},
+        /* THE WINDOW FOLDED IN FROM THE SCOPE, for the report whose scope is
+           one. `view` is the bag the renderer reads, and the window has to
+           reach it — but it is carried here from `body.sprints`, the single
+           value the figures were computed from, rather than sent twice from
+           the screen and left to drift. */
+        view: kind.scope === 'window'
+          ? { ...(body.view || {}), sprints: Number(body.sprints) || null }
+          : (body.view || {}),
       });
       /* ONE CHROME, BOTH PICTURES. The chart is photographed from the same page
          load that is printed, so the body and the attachment cannot disagree
@@ -1365,6 +1402,7 @@ async function handleApi(req, res, url) {
       windowSprints: named,
       activeSprint: named.find(x => x.active) || null,
       velocity: metrics.velocity(plan, snap, team, { sprints: window }),
+      perPerson: metrics.perPerson(plan, snap, team, { sprints: window }),
       productivity: metrics.productivity(plan, snap, team, { sprints: window }),
       quality: metrics.quality(plan, snap, team, { sprints: window }),
       settings: capacity.teamSettings(team),
@@ -2257,6 +2295,52 @@ async function handleApi(req, res, url) {
   }
 
   /* ---- plan edits ---- */
+  /* ── PUBLIC HOLIDAYS ──────────────────────────────────────────────────
+     Its own route rather than riding on `PUT /api/plan`, which merges whatever
+     it is handed without looking at it. That was survivable while this was a
+     line of text somebody typed twice a year; it is not survivable now that a
+     click on a calendar is a write, because an unparseable date reaches no
+     error anywhere — it simply never matches a day, and the holiday the plan
+     is supposed to hold is quietly not there.
+
+     TWO SHAPES, ONE WRITE PATH. `toggle` is the calendar: one date, flipped.
+     `dates` is the paste box and the bulk edit: the whole list, replaced. Both
+     land in `holidays.normalise`, so neither can store something the other
+     would have refused. */
+  if (p === '/api/holidays' && req.method === 'PUT') {
+    const body = await readJsonBody(req);
+    const plan = store.getPlan();
+    const before = plan.holidays || [];
+
+    let next, errors = [], toggled = null;
+    if (body.toggle !== undefined) {
+      const r = holidaysLib.toggle(before, body.toggle);
+      if (!r.changed) return json(res, 400, { error: r.error || 'That is not a date this tool can store.' });
+      next = r.dates;
+      toggled = { date: r.date, on: r.on };
+    } else if (Array.isArray(body.dates) || typeof body.dates === 'string') {
+      const r = holidaysLib.normalise(body.dates);
+      next = r.dates;
+      errors = r.errors;
+    } else {
+      return json(res, 400, { error: 'Send either a `toggle` date or a `dates` list.' });
+    }
+
+    plan.holidays = next;
+    store.savePlan(plan);
+    /* WHAT CHANGED, not just that something did. A holiday list is edited
+       rarely and consulted by every availability grid; "holidays.saved" with
+       no detail is an audit line nobody can answer a question from. */
+    store.audit('holidays.saved', {
+      count: next.length, before: before.length, toggled,
+      rejected: errors.map(e => e.value),
+    });
+    /* THE WHOLE LIST BACK, always — the screen renders from this rather than
+       from its own copy, so a save that half-worked cannot leave a day
+       coloured that the plan does not have. */
+    return json(res, 200, { ok: true, holidays: next, errors, toggled });
+  }
+
   if (p === '/api/plan' && req.method === 'PUT') {
     const body = await readJsonBody(req);
     const plan = store.getPlan();
@@ -3518,7 +3602,10 @@ async function handleApi(req, res, url) {
  * parser drift — so the browser is served the same lib/query.js the server
  * requires, rather than a copy that will disagree with it one day.
  */
-const SHARED_TO_BROWSER = { '/shared/query.js': path.join(__dirname, 'lib', 'query.js') };
+const SHARED_TO_BROWSER = {
+  '/shared/query.js': path.join(__dirname, 'lib', 'query.js'),
+  '/shared/holidays.js': path.join(__dirname, 'lib', 'holidays.js'),
+};
 
 function serveStatic(req, res, url) {
   const shared = SHARED_TO_BROWSER[url.pathname];

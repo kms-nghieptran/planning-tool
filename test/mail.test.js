@@ -1023,6 +1023,82 @@ check('AND THE MARKER NEVER SURVIVES INTO ANYTHING A CLIENT READS', () => {
   assert.ok(inline.html.includes(' for the trend.'), 'the rest of the sentence was lost');
 });
 
+/* ── DELIVERY METRICS, THE FOURTH REPORT ──────────────────────────────────
+ *
+ * The registry promises that adding a report is one entry plus one figures
+ * builder. These check the promise held — and, more to the point, that what
+ * makes this report different (its scope is a WINDOW rather than a sprint or a
+ * component set) reaches both halves of the email.
+ */
+
+check('DELIVERY IS A REPORT KIND OF ITS OWN, scoped by window', () => {
+  const k = rmail.reportOf('delivery');
+  assert.strictEqual(k.key, 'delivery');
+  assert.strictEqual(k.route, 'reports/delivery', 'the attachment has to be the Delivery metrics page');
+  assert.strictEqual(k.scope, 'window', 'its scope is the sprint window, not a sprint or a component set');
+});
+
+check('AND ITS FIELDS ARE ITS OWN, not borrowed from another report', () => {
+  /* The registry exists so a template cannot quote a figure its report does
+     not have: a delivery template offering {{committed}} resolves to an
+     em-dash in front of a client. */
+  const keys = rmail.fieldsFor('delivery').map(f => f.key);
+  for (const k of ['velocity', 'attainment', 'window', 'predictability']) {
+    assert.ok(keys.includes(k), `delivery should offer {{${k}}}`);
+  }
+  for (const k of ['committed', 'done', 'projected', 'coverage']) {
+    assert.ok(!keys.includes(k), `delivery must not offer {{${k}}} — that belongs to another report`);
+  }
+});
+
+check('ITS FIGURES COME FROM THE SCREEN\'S OWN BLOCKS', () => {
+  const r = rmail.deliveryFiguresFrom({
+    teamName: 'Katalon Ruby',
+    window: 6,
+    windowSprints: ['S36', 'S37', 'S38', 'S39', 'S40', 'S41'],
+    velocity: { average: 78, safeCommitment: 64, best: 83, worst: 61, predictability: { mean: 0.87, stdev: 0.1 } },
+    quality: {
+      attainment: 94, missedSprints: 2, avgCarryoverPct: 11, reworkShare: 32,
+      estimation: { pct: 8 }, defects: { open: 3 }, suite: { passRate: 91 },
+    },
+  }, { senderName: 'Nghiep', today: Date.UTC(2026, 9, 1) });
+
+  assert.strictEqual(r.windowSprints, 6, 'the window is how many sprints it actually resolved to');
+  assert.strictEqual(r.velocity, 78);
+  assert.strictEqual(r.attainment, 94);
+  assert.strictEqual(r.openDefects, 3);
+  /* A RATIO ON SCREEN, A PERCENTAGE IN THE MAIL. Shipping 0.87 beside twelve
+     other 0-100 figures reads as 0.87%. */
+  assert.strictEqual(r.predictabilityPct, 87);
+});
+
+check('AND A MISSING BLOCK IS A BLANK, not a crash', () => {
+  /* A team with no completed sprints has no velocity, and no TestOps means no
+     pass rate. Each has to come back empty rather than throw inside a send the
+     user has already confirmed. */
+  const r = rmail.deliveryFiguresFrom({}, {});
+  assert.strictEqual(r.predictabilityPct, null);
+  const filled = rmail.fill('Velocity {{velocity}}, pass {{passrate}}', r, 'delivery');
+  assert.strictEqual(filled.text, 'Velocity —, pass —', 'an absent figure has to read as an em-dash');
+});
+
+check('THE WINDOW REACHES THE PRINTED PAGE', () => {
+  /* The failure this prevents: the mail quotes a six-sprint average and the
+     PDF attached to it shows twelve. Both look right alone; only the client
+     sees them together. */
+  const url = pdfr.reportUrl('http://127.0.0.1:4322', {
+    route: 'reports/delivery', team: 'ruby', view: { sprints: 6 },
+  });
+  assert.match(url, /[?&]sprints=6(&|$|#)/, 'the window did not travel with the print URL');
+  assert.match(url, /#reports\/delivery$/);
+  assert.match(url, /[?&]print=1/);
+});
+
+check('AND A REPORT WITH NO WINDOW DOES NOT GROW ONE', () => {
+  const url = pdfr.reportUrl('http://127.0.0.1:4322', { route: 'reports/coverage', team: 'ruby' });
+  assert.ok(!/sprints=/.test(url), 'a sprints parameter appeared on a report that has no window');
+});
+
 check('THE CID IS ONE STRING, agreed between the html and the MIME part', () => {
   /* Two spellings of it is the classic broken-image bug, and it cannot be seen
      from this end — the send returns 250 OK either way. */

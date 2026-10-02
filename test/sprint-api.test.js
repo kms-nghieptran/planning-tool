@@ -1053,6 +1053,64 @@ check('THE BROWSER CANNOT NAME ITS OWN KEY', async () => {
   assert.strictEqual(r.body.sprintNoteKey, 'jira:939', 'a key from the request body was honoured');
 });
 
+/* ── PUBLIC HOLIDAYS, OVER HTTP ───────────────────────────────────────────
+ *
+ * The list used to be saved through `PUT /api/plan`, which merges whatever it
+ * is handed without looking at it. That was survivable while a person typed it
+ * twice a year. It is not survivable now that a click on a calendar is a
+ * write: an unparseable date reaches no error anywhere, it simply never
+ * matches a day, and the holiday the plan is supposed to hold is not there.
+ */
+
+check('A CLICK MARKS A DAY, and the whole list comes back', async () => {
+  const r = await call('PUT', '/api/holidays', { toggle: '2026-09-02' });
+  assert.strictEqual(r.status, 200, JSON.stringify(r.body));
+  assert.ok(r.body.holidays.includes('2026-09-02'));
+  assert.deepStrictEqual(r.body.toggled, { date: '2026-09-02', on: true });
+  /* THE WHOLE LIST, not just the change — the screen renders from this rather
+     than from its own copy, so a half-done save cannot leave a day coloured
+     that the plan does not have. */
+  assert.ok(Array.isArray(r.body.holidays));
+});
+
+check('AND CLICKING IT AGAIN CLEARS IT', async () => {
+  await call('PUT', '/api/holidays', { toggle: '2026-12-25' });
+  const off = await call('PUT', '/api/holidays', { toggle: '2026-12-25' });
+  assert.strictEqual(off.status, 200);
+  assert.ok(!off.body.holidays.includes('2026-12-25'));
+  assert.strictEqual(off.body.toggled.on, false);
+});
+
+check('A DATE THAT DOES NOT EXIST IS REFUSED, not rolled into another day', async () => {
+  /* 30 February becomes 2 March if anything parses it loosely, and the wrong
+     day then reads as a holiday on every availability grid in the tool. */
+  const r = await call('PUT', '/api/holidays', { toggle: '2026-02-30' });
+  assert.strictEqual(r.status, 400, JSON.stringify(r.body));
+  const state = await call('GET', '/api/state');
+  assert.ok(!(state.body.plan.holidays || []).includes('2026-03-02'), 'it was stored as 2 March');
+});
+
+check('THE PASTE BOX REPLACES THE WHOLE LIST, and says what it could not read', async () => {
+  const r = await call('PUT', '/api/holidays', { dates: '2027-01-01, Tet, 2027-02-17' });
+  assert.strictEqual(r.status, 200);
+  assert.deepStrictEqual(r.body.holidays, ['2027-01-01', '2027-02-17']);
+  assert.strictEqual(r.body.errors.length, 1);
+  assert.match(r.body.errors[0].message, /Tet is not a date/);
+});
+
+check('AND IT SURVIVES A ROUND TRIP THROUGH THE STORE', async () => {
+  await call('PUT', '/api/holidays', { dates: ['2027-04-30', '2027-04-30', '2027-01-01'] });
+  const state = await call('GET', '/api/state');
+  assert.deepStrictEqual(state.body.plan.holidays, ['2027-01-01', '2027-04-30'],
+    'the stored list has to be deduped and sorted, not whatever arrived');
+});
+
+check('A REQUEST THAT ASKS FOR NEITHER IS REFUSED', async () => {
+  const r = await call('PUT', '/api/holidays', { nope: true });
+  assert.strictEqual(r.status, 400);
+  assert.match(r.body.error, /toggle|dates/);
+});
+
 check('AN UNKNOWN TEAM OR SPRINT IS REFUSED, not filed somewhere odd', async () => {
   const noTeam = await call('PUT', '/api/sprint-note',
     { team: 'nope', sprint: 'S39', component: 'PS_A', note: 'x' });

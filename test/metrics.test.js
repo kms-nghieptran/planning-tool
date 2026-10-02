@@ -199,15 +199,27 @@ check('attainment is delivered ÷ committed, and short sprints are counted', () 
   assert.strictEqual(q.missedSprints, 1);
 });
 
-check('carryover is reported per sprint and never negative', () => {
+check('carryover separates what was HANDED ON from what merely was not delivered', () => {
+  /* These used to be one number, and the one number was the proxy: committed
+     minus delivered, which assumes every undelivered point moved to the next
+     sprint. In this fixture nothing moves — sprint 1 simply fails to finish 6
+     points and they leave the plan. The proxy calls that 6 points of
+     carryover; it is 6 points of shortfall and zero points of carryover, and
+     the gap between the two is work that disappeared without being delivered.
+
+     Both are reported. `shortfall` is what every report written from this
+     number has meant until now; `carried` is what it claimed to mean. */
   const { plan, snap } = delivery([
     { number: 1, committed: 10, delivered: 4 },
     { number: 2, committed: 10, delivered: 10 },
   ]);
   const q = m.quality(plan, snap, TEAM);
-  assert.strictEqual(q.carryover.find(c => c.number === 1).carried, 6);
+  const one = q.carryover.find(c => c.number === 1);
+  assert.strictEqual(one.shortfall, 6, 'the undelivered points are still reported');
+  assert.strictEqual(one.carried, 0, 'nothing moved to a later sprint, so nothing was carried');
+  assert.strictEqual(one.measured, true, 'a dated sprint must say its carryover was measured');
   assert.strictEqual(q.carryover.find(c => c.number === 2).carried, 0);
-  assert.ok(q.carryover.every(c => c.carried >= 0));
+  assert.ok(q.carryover.every(c => c.carried >= 0 && c.shortfall >= 0));
 });
 
 check('rework share is the maintenance slice of delivered work', () => {
@@ -643,6 +655,241 @@ check("QUALITY'S DEFECT AND REWORK COUNTS RESPECT THE WINDOW TOO", () => {
   const narrow = m.quality(plan, snap, TEAM, { sprints: 2 });
   assert.ok(narrow.defects.total < wide.defects.total,
     `narrowing the window must drop defects: ${narrow.defects.total} vs ${wide.defects.total}`);
+});
+
+/* ── PER-PERSON VELOCITY ──────────────────────────────────────────────────
+ *
+ * A row per person, a column per sprint, delivered points in the cells. The
+ * two things worth protecting: a blank must not read as a zero, and the column
+ * total must be the sprint's own delivered figure rather than the sum of the
+ * rows — they differ by work nobody is holding, and a table that disagreed
+ * with the velocity chart above it would be the first thing anyone noticed.
+ */
+
+/** `spec` = [{ number, state?, work: [{ acc, name?, pts, done }] }]. */
+function peopleFixture(spec, members = TEAM.members) {
+  const team = { ...TEAM, members };
+  const plan = {
+    teams: [team], sprints: [], availability: {}, support: {}, ceremony: {},
+    overrides: {}, notes: {}, holidays: [], risks: [],
+  };
+  const snap = { issues: {}, boardSprintsByTeam: { t1: [] } };
+  let k = 0;
+  for (const s of spec) {
+    const start = new Date(Date.UTC(2026, 0, 1)); start.setUTCDate(start.getUTCDate() + (s.number - 1) * 14);
+    const end = new Date(start.getTime() + 13 * 864e5);
+    const jiraId = String(500 + s.number);
+    snap.boardSprintsByTeam.t1.push({
+      id: jiraId, name: `Team One Sprint ${s.number}`, state: s.state || 'closed',
+      start: start.toISOString().slice(0, 10), end: end.toISOString().slice(0, 10),
+    });
+    plan.sprints.push({
+      id: `S${s.number}`, number: s.number, name: `Sprint ${s.number}`,
+      start: start.toISOString().slice(0, 10), end: end.toISOString().slice(0, 10),
+    });
+    for (const mem of members) plan.availability[`t1|S${s.number}|${mem.id}`] = full;
+    for (const w of s.work || []) {
+      const key = `P-${k++}`;
+      snap.issues[key] = {
+        key, summary: 'work', issueType: 'Story',
+        status: w.done ? 'Done' : 'Open', statusCategory: w.done ? 'done' : 'new',
+        assignee: w.name || null, assigneeId: w.acc || null,
+        labels: [], components: ['C1'], points: w.pts,
+        sprints: [{ id: jiraId, name: `Team One Sprint ${s.number}` }],
+        sprintNames: [`Team One Sprint ${s.number}`], blockedBy: [],
+        created: start.toISOString(), updated: end.toISOString(),
+        resolved: w.done ? end.toISOString() : null, priority: 'Medium',
+      };
+    }
+  }
+  /* RECONCILED, like the other fixture and like the app. `windowSprints` reads
+     each sprint's state out of `byTeam[teamId]`, which only reconcile fills —
+     without this every sprint has no state, nothing counts as closed, and the
+     window comes back empty while the fixture looks complete. */
+  r.reconcileSprints(plan, snap);
+  snap.byTeam = r.buildTeamIndex(plan, snap);
+  return { plan, snap, team };
+}
+
+const A = { acc: 'acc-a', name: 'A' };
+const B = { acc: 'acc-b', name: 'B' };
+
+check('PER-PERSON VELOCITY IS A ROW PER PERSON AND A COLUMN PER SPRINT', () => {
+  const { plan, snap, team } = peopleFixture([
+    { number: 1, work: [{ ...A, pts: 8, done: true }, { ...B, pts: 3, done: true }] },
+    { number: 2, work: [{ ...A, pts: 5, done: true }, { ...B, pts: 9, done: true }] },
+  ]);
+  const pp = m.perPerson(plan, snap, team, { sprints: 12 });
+  assert.strictEqual(pp.columns.length, 2, 'one column per sprint in the window');
+  assert.strictEqual(pp.people.length, 2);
+  const a = pp.people.find(x => x.name === 'A');
+  assert.strictEqual(a.bySprint.S1.delivered, 8);
+  assert.strictEqual(a.bySprint.S2.delivered, 5);
+  assert.strictEqual(a.delivered, 13, 'the row total is the row');
+  assert.strictEqual(pp.grandTotal, 25);
+});
+
+check('AND IT IS SORTED BY WHAT WAS DELIVERED, most first', () => {
+  const { plan, snap, team } = peopleFixture([
+    { number: 1, work: [{ ...A, pts: 2, done: true }, { ...B, pts: 11, done: true }] },
+  ]);
+  const pp = m.perPerson(plan, snap, team, { sprints: 12 });
+  assert.deepStrictEqual(pp.people.map(x => x.name), ['B', 'A']);
+});
+
+check('DELIVERED, NOT COMMITTED — and the commitment rides along for the tooltip', () => {
+  /* The distinction the whole section rests on. A grid of commitments would
+     repeat the capacity sheet while looking like it said something new. */
+  const { plan, snap, team } = peopleFixture([
+    { number: 1, work: [{ ...A, pts: 8, done: true }, { ...A, pts: 6, done: false }] },
+  ]);
+  const a = m.perPerson(plan, snap, team, { sprints: 12 }).people[0];
+  assert.strictEqual(a.bySprint.S1.delivered, 8, 'unfinished work was counted as delivered');
+  assert.strictEqual(a.bySprint.S1.committed, 14, 'the commitment is not carried alongside it');
+});
+
+check('A BLANK AND A ZERO ARE DIFFERENT THINGS', () => {
+  /* "Delivered nothing that sprint" is a conversation. "Was not on the team
+     that sprint" is not, and a table that rendered them identically would
+     start the wrong one. */
+  const { plan, snap, team } = peopleFixture([
+    // B has work in sprint 1 and NONE AT ALL in sprint 2 — not even unfinished.
+    { number: 1, work: [{ ...A, pts: 5, done: true }, { ...B, pts: 4, done: true }] },
+    { number: 2, work: [{ ...A, pts: 5, done: true }, { ...B, pts: 3, done: false }] },
+  ]);
+  const pp = m.perPerson(plan, snap, team, { sprints: 12 });
+  const b = pp.people.find(x => x.name === 'B');
+  assert.strictEqual(b.bySprint.S2.delivered, 0, 'committed and delivered nothing must be a zero');
+  assert.strictEqual(b.bySprint.S2.committed, 3);
+
+  const { plan: p2, snap: s2, team: t2 } = peopleFixture([
+    { number: 1, work: [{ ...A, pts: 5, done: true }] },
+    { number: 2, work: [{ ...A, pts: 5, done: true }, { ...B, pts: 4, done: true }] },
+  ]);
+  const b2 = m.perPerson(p2, s2, t2, { sprints: 12 }).people.find(x => x.name === 'B');
+  assert.strictEqual(b2.bySprint.S1, undefined, 'a sprint someone had no part in must have no cell at all');
+});
+
+check('THE COLUMN TOTAL IS THE SPRINT\'S OWN FIGURE, not the sum of the rows', () => {
+  /* Work with no assignee still delivered points. Adding the column up would
+     drop it and leave this table disagreeing with the velocity chart directly
+     above it — which is exactly the kind of difference nobody can explain in a
+     review. */
+  const { plan, snap, team } = peopleFixture([
+    { number: 1, work: [
+      { ...A, pts: 6, done: true },
+      { acc: null, name: null, pts: 4, done: true },     // nobody holding it
+    ] },
+  ]);
+  const pp = m.perPerson(plan, snap, team, { sprints: 12 });
+  const t = pp.totals.S1;
+  assert.strictEqual(t.attributed, 6, 'the rows add up to 6');
+  assert.strictEqual(t.delivered, 10, 'but the sprint delivered 10');
+  assert.strictEqual(t.unattributed, 4);
+  assert.strictEqual(pp.unattributed, 4, 'and the window says so once, for the footnote');
+  assert.match(pp.basis, /delivered by nobody on the roster/);
+});
+
+check('SOMEONE WHOSE ONLY TICKET IS UNESTIMATED STILL GETS A ROW', () => {
+  /* Found on the live board: Phuong Uyen Le held one unestimated ticket in
+     Katalon Squad Sprint 2 — committed 0, delivered 0 — and was the only member
+     of her squad missing from the table. Filtering on points alone makes the
+     person carrying work nobody has sized invisible, which is the opposite of
+     what you want to see. The row exists; the cells are honest zeros. */
+  const { plan, snap, team } = peopleFixture([
+    { number: 1, work: [{ ...A, pts: 5, done: true }, { ...B, pts: null, done: false }] },
+  ]);
+  const pp = m.perPerson(plan, snap, team, { sprints: 12 });
+  const b = pp.people.find(x => x.name === 'B');
+  assert.ok(b, 'the person holding an unestimated ticket is missing from the table');
+  assert.strictEqual(b.delivered, 0);
+  assert.strictEqual(b.committed, 0);
+  assert.strictEqual(b.items, 1, 'and the row has to carry the item count, or nothing explains the zeros');
+  assert.strictEqual(b.bySprint.S1.items, 1);
+});
+
+check('BUT SOMEONE WITH NOTHING AT ALL GETS NO ROW', () => {
+  /* The other side of it. A roster of fourteen where four never appeared in a
+     sprint is a table of em dashes, and the filter has to still mean something. */
+  const { plan, snap, team } = peopleFixture([
+    { number: 1, work: [{ ...A, pts: 5, done: true }] },
+  ]);
+  const pp = m.perPerson(plan, snap, team, { sprints: 12 });
+  assert.deepStrictEqual(pp.people.map(x => x.name), ['A'], 'B had no work at all and should not be listed');
+});
+
+check('SOMEONE WHO DID THE WORK BUT IS NOT ON THE TEAM LIST STILL GETS A ROW', () => {
+  /* They delivered it. Leaving them out would hide the points AND the fact
+     that the roster is wrong. */
+  const { plan, snap, team } = peopleFixture([
+    { number: 1, work: [{ ...A, pts: 5, done: true }, { acc: 'acc-z', name: 'Zed', pts: 7, done: true }] },
+  ]);
+  const pp = m.perPerson(plan, snap, team, { sprints: 12 });
+  const z = pp.people.find(x => x.name === 'Zed');
+  assert.ok(z, 'the person who delivered 7 pts is missing from the table');
+  assert.strictEqual(z.onRoster, false, 'and the row has to say so, or the screen cannot mark it');
+  assert.strictEqual(z.delivered, 7);
+  assert.strictEqual(pp.totals.S1.unattributed, 0, 'their points are attributed — to them');
+});
+
+check('AN EXCLUDED PERSON\'S DELIVERY IS STILL COUNTED, and marked as off the list', () => {
+  /* The case the off-roster branch exists for, and the only way to reach it: a
+     CLOSED sprint absorbs everyone who did work into its own roster, so the
+     branch is unreachable there. On an OPEN sprint `plan.excluded` is honoured
+     — someone you took off the team keeps their tickets, and those points are
+     still in the sprint's delivered figure.
+
+     Dropping them would hide real delivery AND hide that the roster is wrong,
+     while leaving the sprint total disagreeing with the rows for no visible
+     reason. */
+  const onlyA = [TEAM.members[0]];
+  const { plan, snap, team } = peopleFixture([
+    { number: 1, state: 'active', work: [{ ...A, pts: 5, done: true }, { acc: 'acc-z', name: 'Zed', pts: 7, done: true }] },
+  ], onlyA);
+  // Zed did the work and was taken off the team. The exclusion keeps him out of
+  // the roster; it does not take his tickets out of the sprint.
+  plan.excluded = { t1: ['acc-z'] };
+  const pp = m.perPerson(plan, snap, team, { sprints: 12 });
+  const z = pp.people.find(x => x.name === 'Zed');
+  assert.ok(z, 'an excluded person\'s 7 delivered pts vanished from the table');
+  assert.strictEqual(z.delivered, 7);
+  assert.strictEqual(z.onRoster, false, 'and the row has to say they are off the list');
+  assert.strictEqual(pp.totals.S1.unattributed, 0, 'their points are attributed — to them');
+  assert.strictEqual(pp.totals.S1.delivered, 12, 'the sprint total has to include work off the roster');
+});
+
+check('THE SPRINT IN PROGRESS IS INCLUDED AND MARKED', () => {
+  /* Unlike the team average, which excludes it. "What has X landed so far" is
+     a real question; an average that dips every Monday is not a usable number.
+     Both behaviours are right, in different places. */
+  const { plan, snap, team } = peopleFixture([
+    { number: 1, work: [{ ...A, pts: 8, done: true }] },
+    { number: 2, state: 'active', work: [{ ...A, pts: 2, done: true }, { ...A, pts: 9, done: false }] },
+  ]);
+  const pp = m.perPerson(plan, snap, team, { sprints: 12 });
+  const live = pp.columns.find(c => c.sprintId === 'S2');
+  assert.ok(live, 'the active sprint is missing from the columns');
+  assert.strictEqual(live.inProgress, true, 'the active sprint is not marked, so the screen cannot');
+  assert.strictEqual(pp.columns.filter(c => c.inProgress).length, 1);
+  assert.strictEqual(pp.people[0].bySprint.S2.delivered, 2, 'only what has actually landed counts');
+});
+
+check('AND AN EMPTY WINDOW SAYS SO RATHER THAN DRAWING AN EMPTY GRID', () => {
+  const { plan, snap, team } = peopleFixture([{ number: 1, work: [] }]);
+  const pp = m.perPerson(plan, snap, team, { sprints: 12 });
+  assert.deepStrictEqual(pp.people, []);
+  assert.match(pp.basis, /Nobody delivered/);
+});
+
+check('THE TABLE CARRIES ITS OWN CAVEAT', () => {
+  /* A grid of names against numbers invites being read as a productivity
+     ranking, which story points cannot support — they are sized for planning,
+     they are not comparable between people, and whoever takes the unestimated
+     work scores zero for a fortnight of it. The screen says so because the
+     table alone will not. */
+  const { plan, snap, team } = peopleFixture([{ number: 1, work: [{ ...A, pts: 3, done: true }] }]);
+  const pp = m.perPerson(plan, snap, team, { sprints: 12 });
+  assert.match(pp.caveat, /not for comparing people/i);
 });
 
 console.log(`\n${passed} passed, ${failed} failed\n`);

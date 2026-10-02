@@ -2056,3 +2056,52 @@ svg text { font-family: var(--font-family-sans, Poppins, system-ui, sans-serif);
    screen so a stray one left behind by an interrupted print cannot show a
    note twice. */
 .print-note { display: none; }
+
+/* ── THE PUBLIC-HOLIDAY CALENDAR ────────────────────────────────────────
+   Twelve small months that reflow by width rather than by a fixed column
+   count: at a laptop width this is four across, on a narrow window two, and
+   on a phone one — without a breakpoint per step. */
+.hol-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 10px 0 12px; }
+.hol-year {
+  display: grid; gap: 14px;
+  grid-template-columns: repeat(auto-fill, minmax(188px, 1fr));
+}
+.hol-month {
+  border: 1px solid var(--app-line-soft); border-radius: 10px; padding: 9px 10px 10px;
+  background: var(--app-surface);
+}
+.hol-name { font-size: 12px; font-weight: 700; margin-bottom: 6px; letter-spacing: -.01em; }
+.hol-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; }
+.hol-dow {
+  font-size: 9px; text-transform: uppercase; letter-spacing: .06em;
+  color: var(--app-fg-3); text-align: center; padding-bottom: 3px; font-weight: 600;
+}
+.hol-pad { aspect-ratio: 1; }
+.hol-day {
+  aspect-ratio: 1; display: flex; align-items: center; justify-content: center;
+  border: 1px solid transparent; border-radius: 6px; background: none;
+  color: var(--app-fg); font: inherit; font-size: 11px; cursor: pointer;
+  padding: 0; line-height: 1;
+}
+.hol-day:hover { border-color: var(--app-line); }
+.hol-day:focus-visible { outline: 2px solid var(--brand-blue); outline-offset: 1px; }
+.hol-day:disabled { opacity: .5; cursor: progress; }
+/* A WEEKEND IS ALREADY NON-WORKING, so it reads as background rather than as
+   something you have forgotten to mark. */
+.hol-day.wknd { color: var(--app-fg-3); }
+/* TODAY IS AN OUTLINE, NOT A FILL — the fill means "marked", and two things
+   filled differently in one grid is two meanings competing for one signal. */
+.hol-day.today { border-color: var(--app-fg-3); }
+.hol-day.on {
+  background: var(--brand-pink); color: #fff; font-weight: 700; border-color: transparent;
+}
+.hol-day.on.wknd { opacity: .62; }   /* marked, but it changes no availability */
+.hol-paste summary::-webkit-details-marker { display: none; }
+.hol-paste summary { list-style: none; }
+.hol-paste summary::before { content: '＋ '; }
+.hol-paste[open] summary::before { content: '− '; }
+
+@media print {
+  .hol-head, .hol-paste { display: none; }
+  .hol-year { grid-template-columns: repeat(4, 1fr); }
+}

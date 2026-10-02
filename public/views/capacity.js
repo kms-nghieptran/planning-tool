@@ -34,6 +34,12 @@ const CapacityView = (() => {
     const sprint = { ...raw, ...((raw.byTeam || {})[state.teamId] || {}) };
 
     const overCount = data.rows.filter(r => r.flags.some(f => f.code === 'overloaded')).length;
+    /* OVER ON WHAT THEY TOOK ON, as against over on what they are holding.
+       Counted apart because they have different answers: the first is a
+       planning decision to undo before the sprint starts, the second is last
+       sprint's tail and moving new work off it will not help. */
+    const carryCount = data.rows.filter(r => r.flags.some(f => f.code === 'carry-loaded')).length;
+    const carriedPts = data.totals && data.totals.carriedIn;
     const slackCount = data.rows.filter(r => r.flags.some(f => f.code === 'underloaded' || f.code === 'unplanned')).length;
 
     ro = !!(data.lock && data.lock.readOnly);
@@ -85,7 +91,9 @@ const CapacityView = (() => {
       <section class="section">
         <div class="kpis">
           ${UI.kpi({ label: 'Capacity', value: UI.int(t.predicted), unit: 'pts', foot: `${UI.num(t.capacityHours)} h across ${t.headcount} people`, tone: 'brand', featured: true })}
-          ${UI.kpi({ label: 'Committed', value: UI.int(t.planned), unit: 'pts', foot: t.overBy > 0 ? `<span style="color:var(--risk)">${UI.num(t.overBy)} pts over capacity</span>` : `${UI.num(Math.abs(t.overBy))} pts of headroom` })}
+          ${UI.kpi({ label: 'Committed', value: UI.int(t.planned), unit: 'pts',
+    foot: `${t.overBy > 0 ? `<span style="color:var(--risk)">${UI.num(t.overBy)} pts over capacity</span>` : `${UI.num(Math.abs(t.overBy))} pts of headroom`}`
+      + (carriedPts > 0 ? ` · ${UI.num(carriedPts)} carried in` : '') })}
           ${UI.kpi({ label: 'Team load', value: UI.pct(t.workloadPct), foot: `Target ${s.workloadUnderPct}–${s.workloadOverPct}%`, tone: t.workloadPct == null ? '' : t.workloadPct > s.workloadOverPct ? 'risk' : t.workloadPct < s.workloadUnderPct ? 'warn' : 'ok' })}
           ${UI.kpi({ label: 'Delivered', value: UI.int(t.actual), unit: 'pts', foot: `${UI.pct(t.goalPct)} of commitment` })}
           ${UI.kpi({ label: 'Available days', value: UI.num(t.availableDays), foot: `${sprint.start ? UI.date(sprint.start) : '—'} → ${sprint.end ? UI.date(sprint.end) : '—'}` })}
@@ -98,6 +106,7 @@ const CapacityView = (() => {
           <div class="eyebrow"><i></i>Balance</div>
           <ul class="reasons">
             ${overCount ? `<li class="risk">${overCount} ${overCount > 1 ? 'people are' : 'person is'} over ${s.workloadOverPct}% — move work before the sprint starts, not at the review</li>` : ''}
+            ${carryCount ? `<li class="risk">${carryCount} ${carryCount > 1 ? 'people are' : 'person is'} over only because of work carried in — their new scope fits; the tail from last sprint does not</li>` : ''}
             ${slackCount ? `<li class="warn">${slackCount} ${slackCount > 1 ? 'people have' : 'person has'} unused capacity</li>` : ''}
             ${data.unassigned.points ? `<li class="warn">${UI.num(data.unassigned.points)} pts in this sprint have no assignee <button class="btn ghost sm" data-act="show-unassigned">Show ${data.unassigned.count}</button></li>` : ''}
             ${offRosterLine(data)}
@@ -134,7 +143,7 @@ const CapacityView = (() => {
                 <td class="num">${UI.num(t.availableDays)}</td>
                 <td class="num">${UI.num(t.capacityHours)}</td>
                 <td class="num">${UI.int(t.predicted)}</td>
-                <td class="num">${UI.num(t.planned)}</td>
+                <td class="num">${UI.num(t.planned)}${carriedMark(t)}</td>
                 <td class="num">${UI.num(t.actual)}</td>
                 <td class="num pct ${UI.workloadClass(t.workloadPct, s.workloadOverPct, s.workloadUnderPct)}">${UI.pct(t.workloadPct)}</td>
                 <td>${UI.bar(t.planned, Math.max(t.predicted, t.planned), UI.workloadClass(t.workloadPct, s.workloadOverPct, s.workloadUnderPct))}</td>
@@ -147,10 +156,17 @@ const CapacityView = (() => {
         ${t.exempt ? `
           <p class="muted" style="font-size:11.5px;margin:10px 0 0">
             <strong>${UI.int(t.exempt)} ${t.exempt === 1 ? 'person is' : 'people are'} exempt from this sprint's capacity.</strong>
-            Their hours are out of Capacity h and Capacity pts above. Work already committed to them
+            ${t.autoExempt ? `${t.autoExempt === t.exempt ? 'All of them were' : `${UI.int(t.autoExempt)} of them ${t.autoExempt === 1 ? 'was' : 'were'}`} left out automatically:
+              this sprint is closed, and ${t.autoExempt === 1 ? 'that person is' : 'those people are'} not on the team list
+              and ${t.autoExempt === 1 ? 'has' : 'have'} no availability recorded here, so there are no real hours to count —
+              only the default grid nobody entered. ` : ''}Their hours are out of Capacity h and Capacity pts above. Work already committed to them
             is still counted — it is real work in the sprint, and the burndown would end above zero without it —
             so the team can read as more loaded than its capacity covers. That is the point of the toggle,
             not a side effect of it.
+            ${t.coveragePct != null && t.coveragePct < 90 ? `
+              <br><strong>Read Workload % with that in mind:</strong> only ${UI.pct(t.coveragePct)} of this sprint's
+              committed points sit on someone whose hours are counted, so the percentage is the load against the
+              capacity that was actually recorded — not against everyone who worked the sprint.` : ''}
           </p>` : ''}
       </section>
 
@@ -961,6 +977,22 @@ const CapacityView = (() => {
     return `<p class="muted" style="font-size:12px;margin:8px 0 0">${bits.map(UI.esc).join(' · ')}.</p>`;
   }
 
+  /**
+   * HOW MUCH OF THIS COMMITMENT CAME FROM AN EARLIER SPRINT.
+   *
+   * A suffix in the number's own cell, not a column and not a tag on the name.
+   * The table is already twelve columns wide, and the last tag that went next
+   * to a row name had to be taken off again for making the sheet unreadable.
+   * Nothing when there is none, so the quiet case stays quiet.
+   */
+  function carriedMark(r) {
+    const n = r && r.carriedIn;
+    if (!n || n <= 0) return '';
+    const left = r.newScope == null ? null : r.newScope;
+    return `<span class="muted" style="font-size:11px;margin-left:4px;white-space:nowrap"
+      title="${UI.esc(`${n} of these points came from an earlier sprint — work already in flight, not new scope${left == null ? '' : `. New scope this sprint: ${left} pts`}`)}">↩${UI.num(n)}</span>`;
+  }
+
   function row(r, s, state) {
     const cls = UI.workloadClass(r.workloadPct, s.workloadOverPct, s.workloadUnderPct);
     // How this person came to be on the sprint. Only the non-obvious cases get
@@ -974,6 +1006,14 @@ const CapacityView = (() => {
     const guest = on.historic ? '<span class="tag" title="Was on this sprint, but is not on the team any more">past member</span>'
       : on.notOnTeamList ? '<span class="tag warn" title="Did work in this sprint but is not on the team list">not on the team</span>'
         : '';
+    /* WHY THIS ROW'S HOURS ARE ZERO. Without it the row reads as a bug: a
+       name, some delivered points, and a capacity of nothing. It has to be a
+       tag rather than the checkbox, because on a closed sprint the checkbox is
+       disabled — so the one control that would explain the zero is greyed out
+       and unticked. */
+    const auto = on.autoExempt
+      ? '<span class="tag" title="Not on the team list, and no availability was entered for them in this sprint — so their hours are left out of the capacity total. Their committed and delivered points still count.">capacity not counted</span>'
+      : '';
     // This row's name came from you; the work came from Jira under a different
     // one, and they were matched. Shown because it is the one link the tool
     // worked out rather than was told, and you are the one who would know.
@@ -983,17 +1023,17 @@ const CapacityView = (() => {
     return `
       <tr class="${r.status === 'Released' ? 'released' : ''}${r.calcExempt ? ' exempt' : ''}" data-member="${r.memberId}">
         <td class="muted">${UI.esc(r.role)}</td>
-        <td><div class="name-cell">${UI.avatar(r.name)}<span>${UI.esc(r.name)}${r.status === 'Released' ? ' <span class="tag">Released</span>' : ''}${why}${guest}${matched}</span></div></td>
+        <td><div class="name-cell">${UI.avatar(r.name)}<span>${UI.esc(r.name)}${r.status === 'Released' ? ' <span class="tag">Released</span>' : ''}${why}${guest}${auto}${matched}</span></div></td>
         <td class="num">
           <input type="checkbox" class="exempt-box" data-exempt="${r.memberId}" ${r.calcExempt ? 'checked' : ''} ${ro ? 'disabled' : ''}
-            title="${r.calcExempt ? `${UI.esc(r.name)} is not counted in this sprint's capacity` : `Stop counting ${UI.esc(r.name)}'s hours in this sprint's capacity`}"
+            title="${on.autoExempt ? `${UI.esc(r.name)} is not on the team list and has no availability entered for this sprint, so their hours are not counted` : r.calcExempt ? `${UI.esc(r.name)} is not counted in this sprint's capacity` : `Stop counting ${UI.esc(r.name)}'s hours in this sprint's capacity`}"
             aria-label="Exempt ${UI.esc(r.name)} from this sprint's capacity">
         </td>
         <td class="num"><input type="number" min="0" max="100" step="5" value="${r.supportPct}" data-support="${r.memberId}" ${ro ? 'disabled' : ''} style="width:64px;text-align:right"></td>
         <td class="num">${UI.num(r.availableDays)}</td>
         <td class="num">${UI.num(r.capacityHours)}</td>
         <td class="num">${UI.int(r.predicted)}</td>
-        <td class="num"><a href="#" data-act="member-items" data-member="${r.memberId}">${UI.num(r.planned)}</a></td>
+        <td class="num"><a href="#" data-act="member-items" data-member="${r.memberId}">${UI.num(r.planned)}</a>${carriedMark(r)}</td>
         <td class="num">${UI.num(r.actual)}</td>
         <td class="num pct ${cls}">${UI.pct(r.workloadPct)}</td>
         <td>${UI.bar(r.planned, Math.max(r.predicted, r.planned), cls)}</td>

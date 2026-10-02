@@ -47,9 +47,17 @@ const SprintView = (() => {
     const headroom = (t, p) => {
       if (!t.predicted) return 'no capacity entered';
       const gap = Math.round((t.predicted - p.committed) * 10) / 10;
-      return gap < 0
-        ? `<span style="color:var(--risk)">${UI.num(Math.abs(gap))} pts over capacity</span>`
-        : `${UI.num(gap)} pts of headroom`;
+      if (gap >= 0) return `${UI.num(gap)} pts of headroom`;
+      /* OVER, AND WHY. When the overage is entirely work carried in from an
+         earlier sprint, "over capacity" on its own is a true sentence that
+         leads to the wrong action — there is nothing here to move out, because
+         the new scope already fits. The number does not change; the reason
+         gets said. */
+      const carried = Math.round((p.carriedIn || 0) * 10) / 10;
+      const newFits = carried > 0 && p.newScope != null && p.newScope <= t.predicted;
+      return newFits
+        ? `<span style="color:var(--risk)">${UI.num(Math.abs(gap))} pts over</span> — ${UI.num(carried)} carried in; new scope fits`
+        : `<span style="color:var(--risk)">${UI.num(Math.abs(gap))} pts over capacity</span>${carried > 0 ? ` (${UI.num(carried)} carried in)` : ''}`;
     };
 
     mount.innerHTML = `
@@ -122,10 +130,11 @@ const SprintView = (() => {
           <div class="sub">Delivered against committed</div>
           <div class="table-wrap" style="border:none">
             <table>
-              <thead><tr><th>Name</th><th class="num">Committed</th><th class="num">Done</th><th style="min-width:110px">Progress</th><th class="num">Left</th></tr></thead>
+              <thead><tr><th>Name</th><th class="num" title="Predicted points from this person's available days in this sprint — the same figure Capacity planning shows as Capacity pts. What they can take on; Committed is what they did take on.">Capacity</th><th class="num">Committed</th><th class="num">Done</th><th style="min-width:110px">Progress</th><th class="num">Left</th></tr></thead>
               <tbody>${byMember.map(r => `
                 <tr>
                   <td><div class="name-cell">${UI.avatar(r.name)}${UI.esc(r.name)}</div></td>
+                  ${capacityCell(r)}
                   <td class="num">${UI.num(r.planned)}</td>
                   <td class="num">${UI.num(r.actual)}</td>
                   <td>${UI.bar(r.actual, r.planned || 1, r.goalPct != null && r.goalPct < w.timeElapsedPct - 20 ? 'under' : '')}</td>
@@ -136,6 +145,7 @@ const SprintView = (() => {
                   <td title="Assigned to ${UI.esc(o.name)}, who is not on this sprint's roster — their capacity is not being planned for.">
                     <div class="name-cell">${UI.avatar(o.name)}${UI.esc(o.name)} <span class="tag warn">not on sprint</span></div>
                   </td>
+                  ${noCapacityCell(`${UI.esc(o.name)} is not on this sprint's roster, so no capacity is planned for them — only the work that landed on them.`)}
                   <td class="num">${UI.num(o.planned)}</td>
                   <td class="num">${UI.num(o.actual)}</td>
                   <td>${UI.bar(o.actual, o.planned || 1)}</td>
@@ -144,6 +154,7 @@ const SprintView = (() => {
                 ${un.count ? `
                 <tr class="unassigned-row">
                   <td title="Nobody is in the Assignee field on these items."><span class="tag warn">No assignee</span> <span class="muted">${un.count} item${un.count === 1 ? '' : 's'}</span></td>
+                  ${noCapacityCell('Nobody owns these items, so there is no capacity to measure them against. The points are still in the sprint\'s commitment.')}
                   <td class="num">${UI.num(un.points)}</td>
                   <td class="num">${UI.num(un.done)}</td>
                   <td>${UI.bar(un.done, un.points || 1)}</td>
@@ -599,10 +610,86 @@ const SprintView = (() => {
       </div>`;
   }
 
+  /* ── CAPACITY, BESIDE COMMITTED ───────────────────────────────────────
+   *
+   * IN POINTS, NOT HOURS. The column it sits next to is points, and two
+   * columns in different units side by side is an invitation to compare them
+   * and be wrong. This is `predicted` — the same figure Capacity planning
+   * prints as "Capacity pts", derived from available days — so the two screens
+   * cannot report different capacities for the same person in the same sprint.
+   *
+   * THE COMPARISON IS IN THE TOOLTIP, NOT IN A COLOUR. Capacity planning
+   * already owns the workload percentage and colours it; a second, differently
+   * computed cue here is how two screens come to disagree about who is
+   * overloaded. The hover does the arithmetic the column invites — including
+   * the carry-in split, because "21 against 15" reads as overcommitment when
+   * six of those points are last sprint's work still in flight.
+   */
+  function capacityCell(r) {
+    /* AN EXEMPT ROW HAS NO CAPACITY TO SHOW, and printing its 0 beside a real
+       commitment reads as a broken number rather than a deliberate one. */
+    if (r.calcExempt) {
+      return noCapacityCell(`${UI.esc(r.name)}'s hours are not counted in this sprint's capacity`
+        + `${r.autoExempt ? ' — not on the team list, and no availability was entered' : ''}.`
+        + ' Their committed and delivered points still count.');
+    }
+    const gap = Math.round((r.planned - r.predicted) * 10) / 10;
+    const carry = Math.round((r.carriedIn || 0) * 10) / 10;
+    const title = [
+      `${UI.int(r.predicted)} pts of capacity from ${UI.num(r.availableDays)} available days`,
+      `${UI.num(r.planned)} committed`,
+      gap > 0
+        ? (carry > 0
+          ? `${gap} over — ${carry} of the commitment carried in from an earlier sprint`
+          : `${gap} over capacity`)
+        : gap < 0 ? `${Math.abs(gap)} pts of slack` : 'exactly at capacity',
+    ].join(' · ');
+    return `<td class="num" title="${title}">${UI.int(r.predicted)}</td>`;
+  }
+
+  /**
+   * A capacity cell for a row that HAS no capacity — somebody off the roster,
+   * or work with no owner at all.
+   *
+   * An em dash rather than 0: zero capacity is a real state (a person on leave
+   * all fortnight) and it has to stay distinguishable from "this row is not
+   * the kind of thing capacity is planned for". Both of these rows carry real
+   * committed points, so a 0 here would read as a person who was given work
+   * with no time to do it.
+   */
+  function noCapacityCell(why) {
+    return `<td class="num muted" title="${why}">—</td>`;
+  }
+
+  /**
+   * One of the two attention cards — Blocked in Refinement, Committed without
+   * an estimate — with a way out to Jira.
+   *
+   * THE LINK OPENS WHAT THE CARD LISTED, by key. Both of these sets are
+   * decisions this app made: "blocked" means a blocker recorded on the item's
+   * EPIC, which no Jira filter expresses, and "unestimated" is the story-point
+   * field being empty on an item this tool resolved into the sprint. Spelling
+   * either as JQL would hand Jira a query it evaluates against today's data,
+   * and the day it returns nine where the card shows ten, nothing on either
+   * side says which is wrong. `UI.openInJira` lists the keys, so it cannot
+   * drift from the rows above it.
+   *
+   * `card` renders every item it is given — no slice — so the keys are the
+   * whole card, and the button's count is the card's count.
+   *
+   * No Jira base configured, or no items, and the control is simply absent:
+   * `UI.openInJira` returns an empty string rather than a dead anchor, and the
+   * head collapses back to the heading it already was.
+   */
   function card(title, sub, items, state) {
+    const out = UI.openInJira(items.map(i => i.key));
     return `
       <div class="card">
-        <h3>${UI.esc(title)}</h3>
+        <div style="display:flex;align-items:flex-start;gap:10px;margin-bottom:4px">
+          <h3 style="margin:0">${UI.esc(title)}</h3>
+          <span class="spacer"></span>
+          ${out}
+        </div>
         <div class="sub">${UI.esc(sub)}</div>
         ${items.map(i => `
           <div style="padding:9px 0;border-bottom:1px solid var(--app-line-soft)">

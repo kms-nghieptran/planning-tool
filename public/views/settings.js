@@ -2,6 +2,98 @@
    Secrets are write-only: the browser is told whether a token exists, never what it is. */
 
 const SettingsView = (() => {
+
+  /* ── THE PUBLIC-HOLIDAY CALENDAR ──────────────────────────────────────
+   *
+   * Twelve months of the chosen year, click a day to mark it. What this
+   * replaces was one comma-separated text field, which is a fine way to store
+   * a holiday list and a bad way to enter one: to add Tet you had to know Tet
+   * was 17 February 2026, and nothing on the screen could tell you.
+   *
+   * THE YEAR IS VIEW STATE, not stored. It survives a redraw so a save does
+   * not bounce you back to January of this year halfway through entering next
+   * year's, and it is deliberately not remembered between sessions — the year
+   * you want is almost always the current one.
+   */
+  let holidayYear = null;
+
+  const HOLIDAY_DOW = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+  /* THE SAME ARITHMETIC THE SERVER USES, and it has to be: a grid built from
+     a second implementation of "which weekday does the 1st fall on" is a grid
+     that puts the holidays one column out, looks completely normal, and marks
+     the wrong day on every availability sheet. `lib/holidays.js` is served to
+     the browser for exactly this reason — see the `/shared/` route. */
+  const HCal = (typeof Holidays !== 'undefined') ? Holidays : null;
+
+  function holidayCalendar(list) {
+    if (!HCal) {
+      // The module did not load. The paste box alone still works.
+      return holidayPasteBox(list, 'The calendar could not load — the list still works.');
+    }
+    const today = new Date();
+    const years = HCal.years(list, today);
+    const year = holidayYear = years.includes(holidayYear) ? holidayYear : today.getUTCFullYear();
+    const marked = new Set(HCal.normalise(list).dates);
+    const mine = (HCal.byYear(list)[String(year)] || []);
+    const todayIso = HCal.iso(today);
+
+    const month = (m) => `
+      <div class="hol-month">
+        <div class="hol-name">${UI.esc(m.name)}</div>
+        <div class="hol-grid">
+          ${HOLIDAY_DOW.map(d => `<div class="hol-dow">${d}</div>`).join('')}
+          ${m.weeks.flat().map(d => {
+    if (!d) return '<div class="hol-pad"></div>';
+    const on = marked.has(d);
+    const wknd = HCal.isWeekend(d);
+    /* A WEEKEND CAN BE MARKED AND IT CHANGES NOTHING — the availability
+       grid already has it as WO. Allowed rather than blocked, because a
+       holiday that lands on a Saturday is still a fact about the year,
+       and the tooltip says what it will and will not do. */
+    const why = on
+      ? `${d} — marked${wknd ? ', but it is a weekend, so no availability changes' : ''}`
+      : `${d}${wknd ? ' — a weekend; marking it changes nothing' : ' — click to mark as a public holiday'}`;
+    return `<button type="button" class="hol-day${on ? ' on' : ''}${wknd ? ' wknd' : ''}${d === todayIso ? ' today' : ''}"
+      data-hday="${d}" title="${UI.esc(why)}" aria-pressed="${on ? 'true' : 'false'}"
+      >${Number(d.slice(8, 10))}</button>`;
+  }).join('')}
+        </div>
+      </div>`;
+
+    return `
+      <div class="hol-head">
+        <button class="btn ghost sm" data-hyear="${year - 1}" title="${year - 1}">‹</button>
+        <strong style="min-width:56px;text-align:center">${year}</strong>
+        <button class="btn ghost sm" data-hyear="${year + 1}" title="${year + 1}">›</button>
+        <span class="muted">${mine.length} marked in ${year}${marked.size > mine.length ? ` · ${marked.size} in all` : ''}</span>
+        <div class="spacer"></div>
+        ${years.filter(y => y !== year).map(y => `<button class="btn ghost sm" data-hyear="${y}">${y}</button>`).join('')}
+      </div>
+      <div class="hol-year">${HCal.calendar(year).map(month).join('')}</div>
+      <p class="muted" style="font-size:11.5px;margin:10px 0 0">
+        A holiday sets the DEFAULT for that day — it marks H on availability grids nobody has filled in yet.
+        Sprints whose leave you have already entered keep exactly what you entered.
+      </p>
+      ${holidayPasteBox(list)}`;
+  }
+
+  /* THE LIST, STILL EDITABLE AS TEXT. Folded away rather than removed: a year
+     of holidays usually arrives from HR as a list, and twelve clicks to enter
+     what is already in your clipboard is worse than the field this screen
+     started with. */
+  function holidayPasteBox(list, note = '') {
+    const dates = HCal ? HCal.normalise(list).dates : (list || []);
+    return `
+      <details class="hol-paste" style="margin-top:12px">
+        <summary class="muted" style="cursor:pointer;font-size:12px">Paste a list instead</summary>
+        ${note ? `<div class="sub" style="margin:8px 0 0">${UI.esc(note)}</div>` : ''}
+        <div class="sub" style="margin:8px 0 6px">Commas, semicolons or one per line. This replaces the whole list.</div>
+        <input type="text" id="holidays" value="${UI.esc(dates.join(', '))}" placeholder="2026-09-02, 2027-01-01" style="width:100%">
+        <div class="btn-row"><button class="btn sm" data-act="save-holidays">Save list</button></div>
+      </details>`;
+  }
+
   async function render(state, mount) {
     const s = await UI.api('/api/state');
     const cfg = s.config;
@@ -220,9 +312,8 @@ const SettingsView = (() => {
             <button class="btn sm" data-act="add-sprints">Extend calendar</button>
           </div>
           <h3 style="margin-top:22px">Public holidays</h3>
-          <div class="sub">Applied to every team's availability grid</div>
-          <input type="text" id="holidays" value="${UI.esc((s.plan.holidays || []).join(', '))}" placeholder="2026-09-02, 2027-01-01" style="width:100%">
-          <div class="btn-row"><button class="btn sm" data-act="save-holidays">Save holidays</button></div>
+          <div class="sub">Click a day to mark it. Applied to every team's availability grid</div>
+          ${holidayCalendar(s.plan.holidays || [])}
         </div>
       </section>
 
@@ -696,6 +787,44 @@ const SettingsView = (() => {
     }));
 
     mount.addEventListener('click', async (e) => {
+      /* ── THE HOLIDAY CALENDAR ──────────────────────────────────────────
+         Before the `[data-act]` dispatch below, because these are buttons with
+         no `data-act` of their own — a day is identified by its date and a
+         year chip by its year, and giving them both an action name as well
+         would be two identifiers for one control. */
+      const hy = e.target.closest('[data-hyear]');
+      if (hy) {
+        e.preventDefault();
+        holidayYear = Number(hy.dataset.hyear);
+        App.refresh();
+        return;
+      }
+
+      const hd = e.target.closest('[data-hday]');
+      if (hd) {
+        e.preventDefault();
+        /* OPTIMISTIC, BUT ONLY FOR THE LENGTH OF THE REQUEST. The button
+           flips immediately because a calendar that lags a round trip feels
+           broken, and is put back by the redraw — which renders from the list
+           the SERVER returned, not from this. A save that fails leaves the day
+           exactly as the plan has it. */
+        const was = hd.classList.contains('on');
+        hd.classList.toggle('on', !was);
+        hd.disabled = true;
+        try {
+          const r = await UI.jsonPut('/api/holidays', { toggle: hd.dataset.hday });
+          UI.toast(r.toggled && r.toggled.on
+            ? `${r.toggled.date} marked — ${r.holidays.length} in total`
+            : `${(r.toggled || {}).date} cleared — ${r.holidays.length} left`);
+          App.refresh();
+        } catch (err) {
+          hd.classList.toggle('on', was);
+          hd.disabled = false;
+          UI.toast(`Could not save: ${err.message}`);
+        }
+        return;
+      }
+
       const btn = e.target.closest('[data-act]');
       if (!btn) return;
       const act = btn.dataset.act;
@@ -809,8 +938,17 @@ const SettingsView = (() => {
           await UI.jsonPut('/api/category-rules', { rules: null });
           UI.toast('Back to the shipped defaults'); App.refresh();
         } else if (act === 'save-holidays') {
-          await UI.jsonPut('/api/plan', { holidays: v('holidays').split(',').map(x => x.trim()).filter(Boolean) });
-          UI.toast('Holidays saved'); App.refresh();
+          /* THE PASTE BOX, kept beside the calendar rather than replaced by it.
+             A year of holidays usually arrives from HR as a list, and twelve
+             clicks to enter what you already have in your clipboard is worse
+             than the text field this screen started with. It writes through
+             the same route, so neither path can store what the other refuses. */
+          const r = await UI.jsonPut('/api/holidays', { dates: v('holidays') });
+          holidayYear = holidayYear || new Date().getUTCFullYear();
+          if ((r.errors || []).length) {
+            UI.toast(`Saved ${r.holidays.length} — could not read ${r.errors.map(e => e.value).join(', ')}`);
+          } else UI.toast(`${r.holidays.length} public holiday${r.holidays.length === 1 ? '' : 's'} saved`);
+          App.refresh();
         } else if (act === 'add-sprints') {
           await UI.jsonPost('/api/sprints', { count: Number(v('spCount')) });
           UI.toast('Calendar extended'); App.refresh();

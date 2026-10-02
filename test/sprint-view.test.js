@@ -253,7 +253,12 @@ async function renderHtml(snap = SNAP, plan = PLAN, opts = {}) {
   vm.createContext(ctx);
   // The real ui.js — a hand-written stub drifts from the thing it stands in for.
   vm.runInContext(`${fs.readFileSync(path.join(__dirname, '..', 'public', 'ui.js'), 'utf8')}\n;globalThis.UI = UI;`, ctx);
-  ctx.UI.setJiraBase('https://ipipelinejira.atlassian.net');
+  /* A HOOK FOR THE UNCONFIGURED CASE. Every Jira control in this app is meant
+     to disappear when there is no base, rather than render an anchor that
+     opens the Jira home page — and a harness that always sets one can never
+     check that. `''` is the real shape of it: `setJiraBase` normalises a
+     missing value to the empty string. */
+  ctx.UI.setJiraBase(opts.jiraBase === undefined ? 'https://ipipelinejira.atlassian.net' : opts.jiraBase);
   ctx.UI.api = async () => payload;
   /* WHAT THE DRAWER WAS HANDED. The real `UI.drawer` writes into a document
      this harness only stubs, so a drill-in click did its whole job and left
@@ -681,19 +686,45 @@ check('and their points are theirs, not a lump', async () => {
   assert.ok(row.includes(`>${luong.planned}<`), `Luong Trinh's ${luong.planned} pts are not on his row`);
 });
 
+/* COLUMNS ARE READ BY POSITION, NOT BY ATTRIBUTE SPELLING.
+   These checks used to scrape `<td class="num">` exactly, which silently
+   skipped any cell carrying a title or an extra class — so adding the Capacity
+   column (whose cells have both) left them passing for the wrong reason, and
+   the day somebody dropped the title they would have started summing capacity
+   into committed. Parsing rows into cells costs four lines and cannot be
+   fooled by markup. */
+const PEOPLE_COLS = { name: 0, capacity: 1, committed: 2, done: 3, progress: 4, left: 5 };
+
+/** The people table as rows of WHOLE cells — opening tag included.
+    The attributes are half of what these checks are about: a dash that does
+    not explain itself in a title is not the feature. Capturing only the inner
+    HTML hides every title and class, and a check on one then passes or fails
+    for reasons that have nothing to do with the markup. */
+function peopleRows(html) {
+  const body = peopleSection(html);
+  const tbody = body.slice(body.indexOf('<tbody>'));
+  return [...tbody.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/g)]
+    .map(m => [...m[1].matchAll(/<td\b[^>]*>[\s\S]*?<\/td>/g)].map(c => c[0]));
+}
+
+/** One column's text, trimmed of markup. */
+const cellText = (row, col) => String(row[PEOPLE_COLS[col]] ?? '').replace(/<[^>]*>/g, '').trim();
+
 check('and it carries planned AND done, not just planned', async () => {
-  const table = peopleSection((await renderHtml()).html);
-  const cells = [...table.matchAll(/<td class="num">([\d.]+)<\/td>/g)].map(m => m[1]);
+  const rows = peopleRows((await renderHtml()).html);
   // The last row is the unowned one: planned 10, done 6, then remaining 4.
-  assert.deepStrictEqual(cells.slice(-3), ['10', '6', '4']);
+  const last = rows[rows.length - 1];
+  assert.deepStrictEqual(
+    [cellText(last, 'committed'), cellText(last, 'done'), cellText(last, 'left')],
+    ['10', '6', '4']);
 });
 
 check('THE PEOPLE TABLE NOW ADDS UP TO THE COMMITTED KPI', async () => {
   const { html, payload } = await renderHtml();
-  const table = peopleSection(html);
-  const rows = [...table.matchAll(/<td class="num">([\d.]+)<\/td>\s*<td class="num">([\d.]+)<\/td>/g)];
-  const planned = rows.reduce((t, m) => t + Number(m[1]), 0);
-  const done = rows.reduce((t, m) => t + Number(m[2]), 0);
+  const rows = peopleRows(html).filter(r => r.length === Object.keys(PEOPLE_COLS).length);
+  assert.ok(rows.length, 'no people rows parsed — the column map and the table have parted company');
+  const planned = rows.reduce((t, r) => t + Number(cellText(r, 'committed')), 0);
+  const done = rows.reduce((t, r) => t + Number(cellText(r, 'done')), 0);
   // This is the defect the row exists to fix: without it these two sums were
   // short by exactly the unowned pile, with nothing on screen to say why.
   assert.strictEqual(planned, payload.progress.committed);
@@ -4470,4 +4501,251 @@ check('AND A STALE MARKER SAYS SO, which is the whole reason it carries a count'
   await r.mount.click({ act: 'bc-epics', row: 'PS_MAINT_NLG', tool: 'kse', cell: 'stuck-maint', n: '99', __text: '!' });
   assert.match(r.mount.drawn, /The cell says 99/,
     'a marker showing a stale count opened its drawer without a word about it');
+});
+
+/* ── OPEN IN JIRA, ON THE TWO ATTENTION CARDS ─────────────────────────────
+   "Blocked in Refinement" and "Committed without an estimate" are the two
+   cards you act on during standup, and acting on them means opening the
+   tickets. Both sets are decisions this app made — "blocked" reads a blocker
+   recorded on the item's EPIC, which no Jira filter expresses, and
+   "unestimated" is an empty story-point field on an item this tool resolved
+   into the sprint — so the link lists KEYS. A JQL re-description would be
+   evaluated by Jira against today's data and could open a different set from
+   the one the card is showing, with nothing on either side to say which is
+   right. */
+
+/** One of the two attention cards, cut out by its heading. */
+function attentionCard(html, title) {
+  const at = html.indexOf(`>${title}<`);
+  assert.ok(at > 0, `there is no "${title}" card on the Active sprint screen`);
+  const start = html.lastIndexOf('<div class="card"', at);
+  assert.ok(start >= 0, `the "${title}" heading is not inside a card`);
+  // Cards sit side by side in a grid, so stop at the NEXT card rather than
+  // running to the end of the section and swallowing its neighbour's link.
+  const next = html.indexOf('<div class="card"', at);
+  return html.slice(start, next > 0 ? next : html.indexOf('</section>', at));
+}
+
+/** A fixture with BOTH cards populated: R-1..R-4 blocked, U-1/U-2 unestimated. */
+const ATTENTION = {
+  ...REFINE_SNAP,
+  issues: Object.fromEntries([
+    ...Object.values(REFINE_SNAP.issues),
+    issue({ key: 'U-1', assignee: 'Hien Phan', points: 0 }),
+    issue({ key: 'U-2', assignee: 'Thuan Dinh Cong Ngoc', points: 0 }),
+  ].map(i => [i.key, i])),
+};
+
+const attention = () => renderHtml(ATTENTION);
+
+check('BOTH ATTENTION CARDS CARRY AN "OPEN IN JIRA"', async () => {
+  const { html, payload } = await attention();
+  assert.ok(payload.progress.blocked.count, 'the fixture has no blocked items');
+  assert.ok(payload.progress.unestimated.count, 'the fixture has no unestimated items');
+  for (const title of ['Blocked in Refinement', 'Committed without an estimate']) {
+    assert.match(attentionCard(html, title), /Open in Jira/, `${title} has no way out to Jira`);
+  }
+});
+
+check('and each opens EXACTLY the keys its own card lists — not the other card\'s', async () => {
+  /* The real failure mode for two cards rendered by one helper: both links
+     built from the same list. Asserted by requiring each card's keys present
+     AND the other card's keys absent, because "contains R-1" alone passes for
+     a link that opens the whole sprint. */
+  const { html, payload } = await attention();
+  const p = payload.progress;
+  const blockedKeys = p.blocked.items.map(i => i.key);
+  const unestKeys = p.unestimated.items.map(i => i.key);
+  assert.ok(blockedKeys.length && unestKeys.length);
+  assert.ok(!blockedKeys.some(k => unestKeys.includes(k)),
+    'fixture check: the two sets overlap, so this check cannot tell them apart');
+
+  const href = (title) => {
+    const m = /href="([^"]*issues\/\?jql=[^"]*)"/.exec(attentionCard(html, title));
+    assert.ok(m, `no Jira href on the "${title}" card`);
+    return decodeURIComponent(m[1]);
+  };
+
+  const blocked = href('Blocked in Refinement');
+  for (const k of blockedKeys) assert.ok(blocked.includes(k), `blocked link is missing ${k}`);
+  for (const k of unestKeys) assert.ok(!blocked.includes(k), `blocked link opens ${k}, which is on the other card`);
+
+  const unest = href('Committed without an estimate');
+  for (const k of unestKeys) assert.ok(unest.includes(k), `unestimated link is missing ${k}`);
+  for (const k of blockedKeys) assert.ok(!unest.includes(k), `unestimated link opens ${k}, which is on the other card`);
+});
+
+/** The exact set of keys a card's Jira link asks for. */
+function linkedKeys(html, title) {
+  const m = /href="[^"]*\?jql=([^"]*)"/.exec(attentionCard(html, title));
+  assert.ok(m, `no Jira href on the "${title}" card`);
+  const jql = decodeURIComponent(m[1]);
+  const inner = /^key in \(([^)]*)\)/.exec(jql);
+  assert.ok(inner, `the "${title}" link is not a key list: ${jql}`);
+  return new Set(inner[1].split(',').map(s => s.trim()).filter(Boolean));
+}
+
+check('the link opens EXACTLY the card — no fewer keys, and no extra ones', async () => {
+  /* Both directions, because they fail differently and both are silent. A
+     TRUNCATED list looks right beside a heading that counts the full set. An
+     INFLATED one opens tickets the reader was never shown, and they have no
+     way to tell which of the two numbers is real. `card` renders every item it
+     is handed — no slice — so set equality is the whole check. */
+  const { html, payload } = await attention();
+  for (const [title, bucket] of [
+    ['Blocked in Refinement', payload.progress.blocked],
+    ['Committed without an estimate', payload.progress.unestimated],
+  ]) {
+    const want = bucket.items.map(i => i.key.toUpperCase()).sort();
+    const got = [...linkedKeys(html, title)].sort();
+    assert.deepStrictEqual(got, want,
+      `the "${title}" link and its rows are not the same set`);
+    assert.strictEqual(got.length, bucket.count,
+      `the "${title}" link opens ${got.length} but the card counts ${bucket.count}`);
+  }
+});
+
+check('BY KEY, NEVER BY A RE-DESCRIBED QUERY', async () => {
+  /* `status = Refinement` and `"Story Points" is EMPTY` are the tempting
+     spellings, and both are evaluated by Jira against live data rather than
+     against the set this screen computed. A card that counts ten and opens
+     nine is worse than no link at all. */
+  const { html } = await attention();
+  for (const title of ['Blocked in Refinement', 'Committed without an estimate']) {
+    // The JQL itself, not the whole href — the base URL is not the query.
+    const jql = decodeURIComponent(/href="[^"]*\?jql=([^"]*)"/.exec(attentionCard(html, title))[1]);
+    assert.match(jql, /^key in \(/, `${title} opens a query instead of its own keys`);
+    assert.ok(!/status\s*=|EMPTY|sprint\s*=/i.test(jql),
+      `${title} re-describes its filter in JQL, so Jira can disagree with the card`);
+  }
+});
+
+check('NO JIRA BASE, NO BUTTON — and the cards still render', async () => {
+  /* A dead anchor that opens the Jira home page looks exactly like a working
+     feature until someone clicks it. The heading and the rows are the card's
+     actual job and they must survive the base being unset. */
+  const { html } = await renderHtml(ATTENTION, PLAN, { jiraBase: '' });
+  for (const title of ['Blocked in Refinement', 'Committed without an estimate']) {
+    const card = attentionCard(html, title);
+    assert.ok(!/Open in Jira/.test(card), `${title} rendered a Jira button with no base configured`);
+    assert.ok(!/href="[^"]*jql/.test(card), `${title} rendered a dead Jira link`);
+    assert.match(card, new RegExp(title), 'the card lost its heading along with the button');
+  }
+  assert.match(attentionCard(html, 'Blocked in Refinement'), /R-1/, 'the card lost its rows');
+});
+
+/* ── CAPACITY, BESIDE COMMITTED, ON PER-PERSON PROGRESS ───────────────────
+   The column answers "could they have taken this on", which is the question
+   the Committed number raises and did not answer on this screen. Three things
+   have to hold: it is the SAME capacity Capacity planning reports (two screens
+   disagreeing about one person's capacity is worse than one screen not saying),
+   it is in POINTS like the column it sits beside, and the rows that have no
+   capacity say so rather than printing a zero. */
+
+check('PER-PERSON PROGRESS HAS A CAPACITY COLUMN, immediately before Committed', async () => {
+  const { html } = await renderHtml();
+  const heads = [...peopleSection(html).matchAll(/<th\b[^>]*>([\s\S]*?)<\/th>/g)]
+    .map(m => m[1].replace(/<[^>]*>/g, '').trim());
+  assert.deepStrictEqual(heads, ['Name', 'Capacity', 'Committed', 'Done', 'Progress', 'Left'],
+    'the column order is not Name · Capacity · Committed · …');
+});
+
+check('and the number is the SAME capacity Capacity planning reports', async () => {
+  /* Both screens read `predicted` off the same grid row. Asserted against the
+     payload rather than against a figure typed here, so a change to the
+     capacity model moves both together or fails loudly. */
+  const { html, payload } = await renderHtml();
+  const rows = peopleRows(html).filter(r => r.length === Object.keys(PEOPLE_COLS).length);
+  const onScreen = new Map(rows.map(r => [cellText(r, 'name'), cellText(r, 'capacity')]));
+  const people = payload.rows.filter(r => r.status !== 'Released' && (r.planned || r.actual));
+  assert.ok(people.length, 'fixture check: nobody on the roster has work');
+  for (const r of people) {
+    const shown = [...onScreen].find(([n]) => n.includes(r.name));
+    assert.ok(shown, `${r.name} has no row in the people table`);
+    assert.strictEqual(shown[1], String(r.predicted),
+      `${r.name}: the screen says ${shown[1]} capacity, the model says ${r.predicted}`);
+  }
+});
+
+check('IN POINTS, NOT HOURS — the column beside it is points', async () => {
+  /* The failure this pins is a plausible one: `capacityHours` is the bigger,
+     more obviously "capacity"-shaped field on the same row, and 61 next to a
+     committed 13 reads as a wildly under-loaded person. */
+  const { html, payload } = await renderHtml();
+  const rows = peopleRows(html).filter(r => r.length === Object.keys(PEOPLE_COLS).length);
+  const r0 = payload.rows.find(r => r.planned || r.actual);
+  assert.ok(r0.capacityHours !== r0.predicted,
+    'fixture check: hours and points are equal here, so this check cannot tell them apart');
+  const shown = rows.map(r => cellText(r, 'capacity'));
+  assert.ok(!shown.includes(String(r0.capacityHours)),
+    `the capacity column is showing hours (${r0.capacityHours}), not points`);
+});
+
+check('A ROW WITH NO CAPACITY SHOWS AN EM DASH, never a zero', async () => {
+  /* Zero capacity is a real state — somebody on leave the whole fortnight —
+     and it has to stay distinguishable from "capacity is not planned for this
+     row at all". Both of these rows carry real committed points, so a 0 would
+     read as a person handed work with no time to do it. */
+  const { html, payload } = await renderHtml(OFF_ROSTER, OFF_ROSTER_PLAN);
+  assert.ok(payload.offRoster.people.length, 'fixture check: nobody is off the roster');
+  for (const r of peopleRows(html)) {
+    const name = cellText(r, 'name');
+    if (!/not on sprint|No assignee/.test(r[PEOPLE_COLS.name] || '')) continue;
+    assert.strictEqual(cellText(r, 'capacity'), '—',
+      `${name} is off the roster but shows a capacity figure`);
+  }
+});
+
+check('and the unassigned pile likewise, since nobody owns it', async () => {
+  const { html, payload } = await renderHtml();
+  assert.ok(payload.unassigned.count, 'fixture check: nothing is unassigned');
+  const row = peopleRows(html).find(r => /No assignee/.test(r[PEOPLE_COLS.name] || ''));
+  assert.ok(row, 'no unassigned row');
+  assert.strictEqual(cellText(row, 'capacity'), '—');
+  assert.strictEqual(cellText(row, 'committed'), String(payload.unassigned.points),
+    'the unassigned points moved column when Capacity was inserted');
+});
+
+check('AN EXEMPT MEMBER SHOWS A DASH AND SAYS WHY, rather than a bare 0', async () => {
+  /* `calcExempt` zeroes the row's hours by design, so `predicted` is 0 — and a
+     0 printed beside a real commitment looks like a defect rather than a
+     decision somebody made on the Capacity screen. */
+  const { html, payload } = await renderHtml(SNAP, EXEMPT_PLAN);
+  const ex = payload.rows.find(r => r.calcExempt && (r.planned || r.actual));
+  assert.ok(ex, 'fixture check: the exempt member has no work, so they are not in this table');
+  assert.strictEqual(ex.predicted, 0, 'fixture check: an exempt row should predict 0');
+  const row = peopleRows(html).find(r => cellText(r, 'name').includes(ex.name));
+  assert.ok(row, `${ex.name} has no row`);
+  assert.strictEqual(cellText(row, 'capacity'), '—', 'an exempt row printed its zero');
+  assert.match(row[PEOPLE_COLS.capacity], /not counted in this sprint's capacity/,
+    'the dash does not explain itself');
+});
+
+check('THE TOOLTIP DOES THE ARITHMETIC THE COLUMN INVITES', async () => {
+  /* Capacity beside Committed is an invitation to subtract one from the other
+     on every row. The hover does it — and distinguishes "took on too much"
+     from "still finishing last sprint's work", which is the distinction the
+     carry-in work exists to make. No colour, because Capacity planning already
+     owns the workload cue and a second one computed here is how two screens
+     come to disagree about who is overloaded. */
+  const { html, payload } = await renderHtml();
+  const rows = peopleRows(html).filter(r => r.length === Object.keys(PEOPLE_COLS).length);
+  const over = payload.rows.find(r => (r.planned || r.actual) && r.planned > r.predicted);
+  const under = payload.rows.find(r => (r.planned || r.actual) && r.planned < r.predicted);
+  assert.ok(over || under, 'fixture check: nobody is off their capacity either way');
+  const cellFor = (name) => (rows.find(r => cellText(r, 'name').includes(name)) || [])[PEOPLE_COLS.capacity] || '';
+  if (over) assert.match(cellFor(over.name), /over capacity|carried in/, 'an over-capacity row says nothing');
+  if (under) assert.match(cellFor(under.name), /pts of slack/, 'an under-capacity row says nothing');
+  for (const r of rows) {
+    assert.ok(!/class="[^"]*\b(risk|warn|over|under)\b/.test(r[PEOPLE_COLS.capacity] || ''),
+      'the capacity cell carries its own workload colour — that cue belongs to Capacity planning');
+  }
+});
+
+check('and it names the days behind the number, because that is what it is derived from', async () => {
+  const { html, payload } = await renderHtml();
+  const r0 = payload.rows.find(r => (r.planned || r.actual) && !r.calcExempt);
+  const row = peopleRows(html).find(r => cellText(r, 'name').includes(r0.name));
+  assert.match(row[PEOPLE_COLS.capacity], new RegExp(`${r0.availableDays} available days`),
+    'the capacity figure appears with nothing to say where it came from');
 });

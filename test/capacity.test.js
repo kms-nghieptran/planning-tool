@@ -288,5 +288,130 @@ check('mix vs target flags maintenance running hot', () => {
   assert.strictEqual(maint.status, 'over');
 });
 
+/* ── CARRIED-IN WORK AND WHAT IT MEANS TO BE OVER ─────────────────────────
+ *
+ * The case: someone commits to their capacity, delivers 80% of it, and carries
+ * the rest into the next sprint. The carried points are charged at full value
+ * — the work still has to be done — so they start the sprint already loaded,
+ * and the old flag called them overcommitted for having finished most of what
+ * they took on.
+ *
+ * The points do not change. The sentence does.
+ */
+
+/* One person, full availability: 14 days x 7h - 9h ceremony = 89h, which at
+   2.9 h/pt is 30 predicted points. The 110% line is therefore about 33.8 pts. */
+const onePerson = () => ({
+  id: 't', name: 'T', settings: { ceremonyHours: 9, hoursPerDay: 7, hoursPerPoint: 2.9 },
+  members: [{ id: 'a', name: 'A', role: 'Auto QA', status: 'Active', supportPct: 0 }],
+});
+const load = (planned, carriedIn) => cap.sprintGrid(
+  onePerson(), { id: 'S1' }, { a: new Array(14).fill('1') },
+  { a: { planned, actual: 0, carriedIn, items: [], carriedInItems: [] } },
+).rows[0];
+
+check('THE COMMITTED NUMBER DOES NOT MOVE because work was carried in', () => {
+  /* The one number everyone plans against, and the one that has to reconcile
+     against Jira. Discounting carryover here would make it a number nobody
+     could check. */
+  const row = load(36, 10);
+  assert.strictEqual(row.planned, 36, 'the commitment was quietly discounted');
+  assert.strictEqual(row.carriedIn, 10);
+  assert.strictEqual(row.newScope, 26, 'new scope is committed minus carried');
+  assert.ok(row.workloadPct > 110, 'fixture check: this row has to be over the line');
+});
+
+check('AND BEING OVER BECAUSE OF CARRYOVER SAYS SO, instead of "overcommitted"', () => {
+  const row = load(36, 10);                     // 36 over 30 predicted, 10 of it carried
+  const flag = row.flags.find(f => f.code === 'carry-loaded');
+  assert.ok(flag, `expected a carry-loaded flag, got ${row.flags.map(f => f.code).join(', ') || 'none'}`);
+  assert.strictEqual(flag.level, 'risk', 'the hours really are over — it stays red');
+  assert.match(flag.text, /10 pts carried in/, 'the flag does not say how much was carried');
+  assert.ok(!row.flags.some(f => f.code === 'overloaded'),
+    'it was flagged as overcommitted as well, so the screen says both things');
+});
+
+check('NEW SCOPE LANDING EXACTLY ON THE LINE IS WITHIN CAPACITY, not over it', () => {
+  /* The boundary, which is where this kind of bug lives. `workloadOverPct` is
+     the threshold work must EXCEED to be overcommitted — 110% is not over 110%
+     — so new scope sitting exactly on it has not over-committed either, and
+     the carry explanation applies. An off-by-one here is invisible except to
+     the one person a fortnight who lands on the number.
+
+     Arranged so the boundary is a whole number rather than 33.7586 pts: one
+     hour a day, one hour a point, no ceremonies, and the line at 100%. */
+  const team = {
+    id: 't', name: 'T',
+    settings: { hoursPerDay: 1, hoursPerPoint: 1, ceremonyHours: 0, workloadOverPct: 100, workloadUnderPct: 50 },
+    members: [{ id: 'a', name: 'A', role: 'Auto QA', status: 'Active', supportPct: 0 }],
+  };
+  const at = cap.sprintGrid(team, { id: 'S1' }, { a: new Array(14).fill('1') },
+    { a: { planned: 20, actual: 0, carriedIn: 6, items: [], carriedInItems: [] } }).rows[0];
+  assert.strictEqual(at.capacityHours, 14, 'fixture check: capacity should be 14 h');
+  assert.strictEqual(at.newScope, 14, 'fixture check: new scope has to land exactly on the line');
+  assert.ok(at.workloadPct > 100, 'fixture check: the row must be over overall');
+  assert.ok(at.flags.some(f => f.code === 'carry-loaded'),
+    `new scope exactly at the threshold is not over it: ${at.flags.map(f => f.code).join(', ')}`);
+
+  // And one point past the line is over it, carryover or not.
+  const past = cap.sprintGrid(team, { id: 'S1' }, { a: new Array(14).fill('1') },
+    { a: { planned: 21, actual: 0, carriedIn: 6, items: [], carriedInItems: [] } }).rows[0];
+  assert.ok(past.flags.some(f => f.code === 'overloaded'),
+    'new scope a point past the line must still be overcommitted');
+});
+
+check('BUT SOMEONE OVER ON NEW SCOPE ALONE IS STILL OVERCOMMITTED', () => {
+  /* The guard that keeps this honest. Carryover explains being over; it does
+     not excuse it. Someone who carries work AND takes on a full new load has
+     over-committed, and hiding that behind the gentler sentence is how a
+     chronic problem stops being visible. */
+  const row = load(40, 4);                      // 36 pts of NEW scope, still over on its own
+  assert.ok(row.flags.some(f => f.code === 'overloaded'),
+    `new scope alone is over capacity and must still say so: ${row.flags.map(f => f.code).join(', ')}`);
+  assert.ok(!row.flags.some(f => f.code === 'carry-loaded'));
+  assert.match(row.flags.find(f => f.code === 'overloaded').text, /4 of it carried in/,
+    'even then the carried share is worth naming');
+});
+
+check('AND WITH NO CARRYOVER THE OLD SENTENCE IS UNCHANGED', () => {
+  const row = load(40, 0);
+  const flag = row.flags.find(f => f.code === 'overloaded');
+  assert.ok(flag, 'a plainly overcommitted row stopped being flagged');
+  assert.match(flag.text, /Overcommitted at/);
+  assert.ok(!/carried in/.test(flag.text), 'it mentions carryover where there is none');
+});
+
+check('CARRYOVER DOES NOT INVENT A FLAG ON A ROW THAT IS WITHIN CAPACITY', () => {
+  const row = load(28, 10);                     // under the line, carried or not
+  assert.ok(!row.flags.some(f => f.code === 'carry-loaded' || f.code === 'overloaded'),
+    `a row inside capacity was flagged: ${row.flags.map(f => f.code).join(', ')}`);
+});
+
+check('THE GRID TOTALS CARRY IT TOO, with a new-scope workload beside the real one', () => {
+  const grid = cap.sprintGrid(
+    onePerson(), { id: 'S1' }, { a: new Array(14).fill('1') },
+    { a: { planned: 36, actual: 0, carriedIn: 10, items: [], carriedInItems: [] } },
+  );
+  assert.strictEqual(grid.totals.planned, 36, 'the team commitment moved');
+  assert.strictEqual(grid.totals.carriedIn, 10);
+  assert.strictEqual(grid.totals.newScope, 26);
+  assert.ok(grid.totals.workloadPct > grid.totals.newScopeWorkloadPct,
+    'the two workload figures are the same, so one of them is not what it claims');
+  assert.ok(grid.totals.newScopeWorkloadPct > 0, 'new-scope workload came out empty');
+});
+
+check('A MEMBER WITH NO CARRYOVER DATA AT ALL STILL WORKS', () => {
+  /* Every caller that has not been taught about carryover yet — the forecast,
+     the scenario grid — passes `work` without it. Those must read as zero
+     rather than NaN, which would propagate into the workload percentage and
+     paint the row grey. */
+  const row = cap.sprintGrid(onePerson(), { id: 'S1' }, { a: new Array(14).fill('1') },
+    { a: { planned: 20, actual: 5 } }).rows[0];
+  assert.strictEqual(row.carriedIn, 0);
+  assert.strictEqual(row.newScope, 20);
+  assert.deepStrictEqual(row.carriedInItems, []);
+  assert.ok(Number.isFinite(row.workloadPct));
+});
+
 console.log(`\n${passed} passed, ${failed} failed\n`);
 process.exit(failed ? 1 : 0);
