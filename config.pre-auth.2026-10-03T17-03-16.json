@@ -1,0 +1,31 @@
+{
+  "jira": {
+    "baseUrl": "https://ipipelinejira.atlassian.net/",
+    "email": "nghieptran@kms-technology.com",
+    "projectKey": "AUTOKAT",
+    "apiToken": "ATATT3xFfGF0Nl81bceVwwS2ctD_l17Ym3hDMbTyEVtbxGQUqHt4nbBQBIALHdzxY80o-kq8OCL32rA9mQbcPzXP6z432C-pVfI_RaaAANUS8aFg304KmOKBbg2-77hRKr732AvAVOxk8qZ5YVPgHJPgo-w0gXtznpHPrGRhegYWTtX9slmtA9E=1B12572A",
+    "storyPointsField": "customfield_10002",
+    "sprintField": "customfield_10905",
+    "automationStatusField": "customfield_16513",
+    "teamField": "customfield_11800",
+    "extraFields": [],
+    "syncAllFields": false
+  },
+  "testops": {
+    "baseUrl": "https://testops.katalon.io",
+    "projectIds": [],
+    "apiKey": "dcb00fd1-2aac-49d5-b9d7-7cc71e74b679"
+  },
+  "github": {
+    "repos": [],
+    "token": "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"
+  },
+  "mail": {
+    "host": "smtp.gmail.com",
+    "port": 587,
+    "user": "nghieptran@kms-technology.com",
+    "from": "nghieptran@kms-technology.com",
+    "fromName": "Nghiep Tran",
+    "pass": "bzpa fugd dnqn focw"
+  }
+}

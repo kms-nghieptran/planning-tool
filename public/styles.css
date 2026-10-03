@@ -2105,3 +2105,68 @@ svg text { font-family: var(--font-family-sans, Poppins, system-ui, sans-serif);
   .hol-head, .hol-paste { display: none; }
   .hol-year { grid-template-columns: repeat(4, 1fr); }
 }
+
+/* ─────────────────────────── sign in ───────────────────────────
+   The door renders with `.shell` hidden, so this is a whole page rather than a
+   panel — centred, narrow, and carrying the brand, because an unbranded login
+   form on an internal hostname is indistinguishable from a phishing page. */
+.auth-wrap {
+  min-height: 100vh; display: flex; align-items: center; justify-content: center;
+  padding: 24px; background: var(--app-bg);
+}
+.auth-card {
+  width: 100%; max-width: 400px; background: var(--app-surface);
+  border: 1px solid var(--app-line); border-radius: 14px; padding: 28px 26px 24px;
+}
+.auth-brand { display: flex; gap: 12px; align-items: center; margin-bottom: 22px; }
+.auth-brand h1 { font-size: 17px; margin: 2px 0 0; }
+.auth-card h2 { font-size: 20px; margin: 0 0 6px; }
+.auth-sub { color: var(--app-fg-3); font-size: 12.5px; margin: 0 0 18px; line-height: 1.5; }
+.auth-note { color: var(--app-fg-3); font-size: 11.5px; margin: 16px 0 0; line-height: 1.5; }
+.auth-field { display: block; margin-bottom: 13px; }
+.auth-field > span { display: block; font-size: 12px; color: var(--app-fg-2); margin-bottom: 5px; }
+.auth-field input {
+  width: 100%; padding: 9px 11px; font: inherit; font-size: 13.5px;
+  color: var(--app-fg); background: var(--app-bg); border: 1px solid var(--app-line);
+  border-radius: 8px; box-sizing: border-box;
+}
+.auth-field input:focus { outline: 2px solid var(--brand-blue); outline-offset: -1px; }
+.auth-card .btn { width: 100%; justify-content: center; margin-top: 6px; }
+.auth-pre {
+  background: var(--app-bg); border: 1px solid var(--app-line); border-radius: 8px;
+  padding: 10px 12px; font-size: 12.5px; margin: 0;
+}
+/* Hidden until there is something to say, so an empty red box never flashes
+   between a submit and its answer. */
+.auth-error {
+  margin-top: 12px; padding: 9px 11px; border-radius: 8px; font-size: 12.5px; line-height: 1.45;
+  background: color-mix(in srgb, var(--sev-high, #e5484d) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--sev-high, #e5484d) 35%, transparent);
+  color: var(--app-fg);
+}
+
+/* ─────────────────────────── who am I ─────────────────────────── */
+.whoami { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--app-line-soft); }
+.whoami-row { display: flex; align-items: center; gap: 8px; }
+.whoami-name {
+  font-size: 12px; font-weight: var(--font-weight-semibold, 600); color: var(--app-fg);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1;
+}
+.whoami-role { font-size: 11px; color: var(--app-fg-3); margin-top: 2px; line-height: 1.35; }
+@media print { .whoami { display: none !important; } }
+
+/* ─────────────────────────── accounts ───────────────────────────
+   The role options are radio + explanation rather than a bare select: the
+   difference between the three is what each one may DO, and a dropdown reading
+   "Lead" says none of it. */
+.role-opt {
+  display: flex; gap: 10px; align-items: flex-start; padding: 9px 11px; margin-bottom: 7px;
+  border: 1px solid var(--app-line); border-radius: 9px; cursor: pointer;
+}
+.role-opt:hover { border-color: var(--app-line-strong, var(--app-line)); }
+.role-opt input { margin-top: 2px; }
+.role-teams {
+  margin: 4px 0 2px; padding: 11px 13px;
+  background: var(--app-bg); border: 1px solid var(--app-line); border-radius: 9px;
+}
+.tag.muted-tag { opacity: .7; }

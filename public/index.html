@@ -11,6 +11,11 @@
 </head>
 <body>
 
+<!-- Sign-in, first-run setup and the forced password change render here,
+     with .shell hidden. A login form inside the shell would sit beside a
+     nav and a team picker belonging to an app the reader cannot use yet. -->
+<div id="authGate" hidden></div>
+
 <div class="shell">
 
   <aside class="sidebar" id="sidebar">
@@ -30,6 +35,9 @@
       <button class="btn ghost sm" id="syncBtn">Sync Jira</button>
       <button class="btn ghost sm icon" id="themeBtn" title="Light / dark">◐</button>
       <div class="sync-state" id="syncState">—</div>
+      <!-- Empty, and hidden, unless somebody is signed in. Who you are and what
+           you can do is the first thing to check when a button is missing. -->
+      <div class="whoami" id="whoami" hidden></div>
     </div>
   </aside>
 
@@ -80,6 +88,10 @@
 <script src="views/sources.js"></script>
 <script src="views/adjustments.js"></script>
 <script src="views/settings.js"></script>
+<script src="views/users.js"></script>
+<script src="views/account.js"></script>
+<!-- The door. Loaded before app.js, which calls into it during boot. -->
+<script src="views/login.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

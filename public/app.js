@@ -57,22 +57,73 @@ const App = (() => {
     { id: 'blockers', label: 'Blockers', view: () => BlockersView },
 
     { group: 'Data' },
-    { id: 'sources', label: 'Data sources', view: () => SourcesView },
+    /* ADMIN ONLY. This page reads /api/sources, which returns the Jira and
+       GitHub connection — the routes that matter most once the tool is
+       reachable from more than loopback. */
+    { id: 'sources', label: 'Data sources', view: () => SourcesView, minRole: 'project-admin' },
     // Global: an override belongs to an item, not to whichever team happens to
     // be selected, and the whole point of the screen is seeing all of them.
     { id: 'adjustments', label: 'Adjustments', view: () => AdjustmentsView, global: true },
-    { id: 'fields', label: 'Jira fields', view: () => FieldsView, global: true },
-    { id: 'settings', label: 'Integrations & setup', view: () => SettingsView },
+    { id: 'fields', label: 'Jira fields', view: () => FieldsView, global: true, minRole: 'project-admin' },
+    { id: 'settings', label: 'Integrations & setup', view: () => SettingsView, minRole: 'project-admin' },
+    /* ADMIN ONLY, and `minRole` hides it from the nav rather than relying on
+       the page to refuse. The server refuses regardless — this only stops
+       people walking into a wall. */
+    { id: 'users', label: 'Accounts', view: () => UsersView, global: true, minRole: 'project-admin' },
+    /* EVERY ROLE HAS THIS ONE. Your password, your sessions and your own Jira
+       token are personal; Settings is the project's configuration and is
+       admin-only. Putting the one personal thing a member needs behind a
+       screen only an admin can open is how a feature becomes unreachable by
+       the people it was built for. Hidden entirely when authentication is off,
+       because then there is no "you". */
+    { id: 'account', label: 'Your account', view: () => AccountView, global: true, needsAuth: true },
   ];
 
   const state = {
     route: 'team',
+    /* WHO IS LOOKING. null when authentication is switched off, which is the
+       default — so every `state.actor &&` below reads as "if we know who this
+       is", and the tool behaves exactly as it always did when we do not. */
+    actor: null, authEnabled: false,
     teamId: null, sprintId: null,
     teams: [], sprints: [], categories: {}, teamIndex: {},
     currentSprintByTeam: {}, jiraSprints: {},
   };
 
   const routeFor = (id) => ROUTES.find(r => r.id === id) || ROUTES.find(r => r.id === 'team');
+
+  /**
+   * MAY THE SIGNED-IN PERSON CHANGE THIS TEAM?
+   *
+   * For views to grey out what the server would refuse. It is NOT the
+   * enforcement — `lib/policy.js` is, on every request — and the difference
+   * matters: a tab left open since a demotion still has live buttons, and
+   * `fetch` from a console never saw this function at all. This exists so
+   * nobody walks into a wall, not so the wall can be removed.
+   *
+   * TRUE WHEN AUTHENTICATION IS OFF, so the tool behaves exactly as it always
+   * has for a single user with no accounts.
+   */
+  function canWrite(teamId = state.teamId) {
+    if (!state.authEnabled || !state.actor) return true;
+    const a = state.actor;
+    if (a.role === 'project-admin') return true;
+    if (a.role !== 'lead') return false;
+    return !!teamId && (a.leadTeams || []).includes(String(teamId));
+  }
+
+  /** Why not, in words a person can act on. Null when they can. */
+  function whyReadOnly(teamId = state.teamId) {
+    if (canWrite(teamId)) return null;
+    const a = state.actor || {};
+    if (a.role === 'member') return 'You have read access to this tool. Changes are made by the team leads.';
+    const mine = (a.leadTeams || []).map(id => {
+      const t = (state.teams || []).find(x => x.id === id);
+      return t ? (t.name || t.id) : id;
+    });
+    const here = (state.teams || []).find(x => x.id === teamId);
+    return `You lead ${mine.join(' and ') || 'no teams'}, so ${here ? (here.name || here.id) : 'this team'} is read-only for you.`;
+  }
 
   async function boot() {
     const stored = localStorage.getItem('pt-theme');
@@ -131,6 +182,23 @@ const App = (() => {
       team: printing ? (q.get('team') || null) : null,
       sprint: printing ? (q.get('sprint') || null) : null,
     };
+
+    /* ── THE DOOR, BEFORE ANYTHING ELSE ──────────────────────────────
+       `/api/auth/status` is the one route reachable without a session, and it
+       says only three things: whether authentication is on, whether this
+       install still needs its first admin, and whether this caller is signed
+       in. Asked BEFORE `/api/state` because that route 401s when it is not
+       satisfied, and a boot that failed on it could not tell "you are not
+       signed in" from "the server is broken".
+
+       WRAPPED, because a server too old to have this route must still boot —
+       the whole auth layer ships switched off, and a tool that refused to
+       start without it would make the dark launch anything but. */
+    let status = { enabled: false, needsSetup: false, signedIn: false, actor: null };
+    try { status = await UI.api('/api/auth/status'); } catch (_) { /* auth is off, or older server */ }
+    state.authEnabled = !!status.enabled;
+    state.actor = status.actor || null;
+    if (status.enabled && typeof LoginView !== 'undefined' && LoginView.render(status)) return;
 
     const s = await UI.api('/api/state');
     adopt(s);
@@ -270,7 +338,54 @@ const App = (() => {
    * was never there.
    */
   function visibleRoutes() {
-    const shown = ROUTES.filter(r => r.group || !r.hidden);
+    /* A route the signed-in person could not use is not shown. The server is
+       what refuses it; this is so nobody clicks a thing that cannot work.
+       With authentication off `state.actor` is null and nothing is filtered,
+       which is the behaviour the tool has always had. */
+    /**
+     * WHO YOU ARE, AND WHAT THAT MEANS, in the sidebar.
+     *
+     * A lead of Ruby looking at Titan sees read-only screens with no
+     * explanation; the first question is always "am I signed in as the right
+     * person". Naming the teams rather than only the role is the point —
+     * "Team lead" alone reads as a rank when it is a scope.
+     */
+    function drawWhoami() {
+      const box = UI.$('#whoami');
+      if (!box) return;
+      if (!state.authEnabled || !state.actor) { box.hidden = true; return; }
+      const a = state.actor;
+      const role = a.role === 'project-admin' ? 'Project admin'
+        : a.role === 'lead' ? `Team lead · ${(a.leadTeams || []).map(teamLabel).join(', ') || 'no teams'}`
+          : 'Member · read only';
+      box.hidden = false;
+      box.innerHTML = `
+        <div class="whoami-row">
+          <span class="whoami-name" title="${UI.esc(a.email)}">${UI.esc(a.name || a.email)}</span>
+          <button class="btn ghost xs" id="signOutBtn" title="Sign out">Sign out</button>
+        </div>
+        <div class="whoami-role">${UI.esc(role)}</div>`;
+      const out = UI.$('#signOutBtn');
+      if (out) out.addEventListener('click', async () => {
+        try { await UI.jsonPost('/api/auth/logout', {}); } catch (_) { /* going anyway */ }
+        location.reload();
+      });
+    }
+
+    const teamLabel = (id) => {
+      const t = (state.teams || []).find(x => x.id === id);
+      return t ? (t.name || t.id) : id;
+    };
+
+    const RANK = { member: 0, lead: 1, 'project-admin': 2 };
+    const canSee = (r) => {
+      // A personal screen is meaningless with authentication off.
+      if (r.needsAuth && !state.actor) return false;
+      if (!r.minRole || !state.actor) return true;
+      return (RANK[state.actor.role] || 0) >= RANK[r.minRole];
+    };
+    const shown = ROUTES.filter(r => (r.group || !r.hidden) && canSee(r));
+    drawWhoami();
     return shown.filter((r, i) => {
       if (!r.group) return true;
       const next = shown[i + 1];
@@ -661,7 +776,7 @@ const App = (() => {
     }
   }
 
-  return { boot, refresh, reload, go, state, ROUTES, sprintLabel, newestFirst };
+  return { boot, refresh, reload, go, state, ROUTES, sprintLabel, newestFirst, canWrite, whyReadOnly };
 })();
 
 App.boot();

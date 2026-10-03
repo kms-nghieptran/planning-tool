@@ -899,6 +899,47 @@ check('a QUICK request never flashes the bar at all', async () => {
   assert.strictEqual(bar.classList.on, false, 'and never shown after it finished either');
 });
 
+check('A CONTROL RENDERED INTO THE DRAWER IS BOUND IN THE DRAWER', () => {
+  /* THE BUG THIS GENERALISES. `UI.drawer` writes into `#drawerBody`, which
+     lives beside the view's mount rather than inside it — so a delegated
+     listener on the mount never sees a click in the drawer. The Accounts
+     screen shipped that way: "Add an account" opened a form whose Create
+     button did nothing. Markup right, handler right, two different subtrees,
+     and no error anywhere.
+
+     Checked structurally rather than by driving each view, because the point
+     is to catch the NEXT one. A view that renders `data-act` controls into a
+     drawer has to bind them against the drawer — `#drawerBody`, `#drawer`, or
+     a helper named for it — and not rely on the mount alone. */
+  const code = (src) => src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  const offenders = [];
+
+  for (const f of fs.readdirSync(VIEWS)) {
+    if (!f.endsWith('.js')) continue;
+    const src = code(fs.readFileSync(path.join(VIEWS, f), 'utf8'));
+    if (!/UI\.drawer\(/.test(src)) continue;
+
+    // Does any UI.drawer(`...`) template contain an interactive data-act?
+    let rendersControls = false;
+    for (const m of src.matchAll(/UI\.drawer\(`([\s\S]*?)`\)/g)) {
+      if (/data-act=/.test(m[1])) { rendersControls = true; break; }
+    }
+    if (!rendersControls) continue;
+
+    /* THE LITERAL LOOKUP, not a mention of the name. A first draft of this
+       check matched the identifier `drawerBody` anywhere in the file, which
+       passed happily when the getter it named was pointed at a different
+       element — the check was satisfied by the variable's existence rather
+       than by anything it did. Requiring the actual element lookup is what
+       makes it a check. */
+    const bindsAgainstDrawer = /getElementById\(['"]drawerBody['"]\)|\$\(['"]#drawerBody['"]\)|\$\(['"]#drawer['"]\)/.test(src);
+    if (!bindsAgainstDrawer) offenders.push(f);
+  }
+
+  assert.deepStrictEqual(offenders, [],
+    `these views put controls in the drawer but bind only on their mount, so the controls do nothing:\n       ${offenders.join('\n       ')}`);
+});
+
 check('NOTHING RELOADS THE BROWSER', () => {
   /* The one that did was "remove a team" — which changes the sidebar, the team
      selector and every screen's scoping, and reached for the browser to get
@@ -909,9 +950,24 @@ check('NOTHING RELOADS THE BROWSER', () => {
   // `location.reload()`, and a check that cannot tell code from prose fails on
   // its own documentation.
   const code = (src) => src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+
+  /* ONE EXEMPTION, AND THE REASON IT IS NOT A WEAKENING.
+     `login.js` runs BEFORE the app has booted — it is what decides whether
+     boot happens at all — so there is no `App` to refresh, no nav to redraw
+     and no table state to preserve. More to the point, signing in changes the
+     session cookie, and everything downstream of that has to be rebuilt from
+     nothing: a half-booted app wearing a new identity is precisely the bug
+     this rule exists to avoid elsewhere. Named rather than pattern-matched, so
+     a second view reaching for reload still fails. */
+  const MAY_RELOAD = new Set(['login.js']);
+
   for (const f of fs.readdirSync(VIEWS)) {
     const hit = code(fs.readFileSync(path.join(VIEWS, f), 'utf8'))
       .split('\n').find(l => /location\.reload\s*\(/.test(l));
+    if (MAY_RELOAD.has(f)) {
+      assert.ok(hit, `${f} is exempt from the no-reload rule but no longer reloads — drop the exemption`);
+      continue;
+    }
     assert.ok(!hit, `${f} reloads the whole page: ${String(hit).trim()}`);
   }
 });

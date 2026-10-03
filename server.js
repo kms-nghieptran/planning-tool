@@ -73,6 +73,8 @@ const MIME = {
  * say it out loud instead of quietly producing superseded results.
  */
 const staleness = require('./lib/staleness').tracker(__dirname);
+const auth = require('./lib/auth');
+const policy = require('./lib/policy');
 
 /* ───────────────────────────── config ───────────────────────────── */
 
@@ -83,6 +85,15 @@ function loadConfig() {
   cfg.testops = Object.assign({ baseUrl: 'https://testops.katalon.io', apiKey: '', projectIds: [] }, cfg.testops);
   cfg.github = Object.assign({ baseUrl: 'https://api.github.com', token: '', repos: [], loginMap: {} }, cfg.github);
   cfg.server = Object.assign({ port: 4322, readOnly: false }, cfg.server);
+  /* OFF BY DEFAULT, deliberately. The whole auth layer lands dark and is
+     switched on when he is ready — so a half-finished policy table cannot lock
+     him out of his own tool mid-build, and so nothing changes for anybody until
+     there is a first admin account to change it for.
+     `secureCookies` is separate from `enabled` because setting Secure on a
+     plain-HTTP install makes the browser silently discard the cookie: the login
+     returns 200 and the next request is anonymous. It goes true when there is
+     TLS in front, and not before. */
+  cfg.auth = Object.assign({ enabled: false, secureCookies: false, sessionDays: 14 }, cfg.auth);
   cfg.metrics = Object.assign({ excludeComponentsFromGrid: ['Katalon', 'TrueTest'], coverageScope: 'Epic' }, cfg.metrics);
   cfg.mail = Object.assign({ host: '', port: 587, user: '', pass: '', from: '', fromName: '' }, cfg.mail);
   // env wins, so you can run without writing secrets to disk at all
@@ -96,15 +107,15 @@ function loadConfig() {
   return cfg;
 }
 
-function saveConfig(patch) {
+function saveConfig(patch, actor = null) {
   let cfg = {};
   try { cfg = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')); } catch (_) { /* new file */ }
-  for (const section of ['jira', 'testops', 'github', 'server', 'metrics', 'mail']) {
+  for (const section of ['jira', 'testops', 'github', 'server', 'metrics', 'mail', 'auth']) {
     if (patch[section]) cfg[section] = Object.assign({}, cfg[section], patch[section]);
   }
   fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2), { mode: 0o600 });
   try { fs.chmodSync(CONFIG_FILE, 0o600); } catch (_) { /* windows */ }
-  store.audit('config.save', { sections: Object.keys(patch) });
+  store.audit('config.save', { sections: Object.keys(patch) }, actor);
   return loadConfig();
 }
 
@@ -132,10 +143,20 @@ function redact(cfg) {
 
 /* ───────────────────────────── helpers ───────────────────────────── */
 
+/**
+ * RETURNS TRUE, so that a caller can use `return json(...)` both to answer the
+ * request and to say it answered it.
+ *
+ * The auth gate and the account routers are composed ahead of the main route
+ * chain — `if (handled) return` — and `undefined` cannot express "I replied".
+ * Without this the gate refuses a request, falls through anyway, and the route
+ * answers a second time: ERR_HTTP_HEADERS_SENT, on every refusal.
+ */
 const json = (res, code, body) => {
   const payload = JSON.stringify(body);
   res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(payload), 'Cache-Control': 'no-store' });
   res.end(payload);
+  return true;
 };
 
 /**
@@ -172,13 +193,26 @@ function slugField(name) {
     || 'field';
 }
 
+/**
+ * READ ONCE, HAND OUT MANY TIMES.
+ *
+ * A request body is a stream and a stream can only be consumed once. The
+ * authorization gate has to see the body — a lead's scope is in `teamId`, and
+ * `/api/availability` carries one per entry — and so does the handler. Without
+ * this cache the second reader waits for an 'end' that already fired and hangs
+ * forever, which presents as the tool freezing on save rather than as anything
+ * resembling its cause.
+ */
 function readBody(req, limit = 8 * 1024 * 1024) {
-  return new Promise((resolve, reject) => {
+  if (req.__rawBody !== undefined) return Promise.resolve(req.__rawBody);
+  if (req.__rawBodyPromise) return req.__rawBodyPromise;
+  req.__rawBodyPromise = new Promise((resolve, reject) => {
     let data = '';
     req.on('data', c => { data += c; if (data.length > limit) { reject(new Error('Request too large')); req.destroy(); } });
-    req.on('end', () => resolve(data));
+    req.on('end', () => { req.__rawBody = data; resolve(data); });
     req.on('error', reject);
   });
+  return req.__rawBodyPromise;
 }
 
 /**
@@ -451,7 +485,7 @@ function figuresFor(kind, cfg, plan, body = {}) {
  * unattended; without a record, a send that failed at 8am on Monday is
  * invisible until the client asks why they got nothing.
  */
-async function sendReport(cfg, body = {}, { trigger = 'manual' } = {}) {
+async function sendReport(cfg, body = {}, { trigger = 'manual', actor = null } = {}) {
   const plan = store.getPlan();
   const mail = cfg.mail || {};
   const started = new Date().toISOString();
@@ -629,7 +663,11 @@ async function sendReport(cfg, body = {}, { trigger = 'manual' } = {}) {
 
   try {
     const sent = await smtp.send(mail, { ...msg, from: mimeLib.bare(mail.from) });
-    store.audit('mail.sent', { template: tpl.name, to: msg.to.length, trigger, chart: !!chart });
+    /* WHO SENT IT. A report email leaves the building with the team's figures
+       in it, so "the Friday schedule sent this" and "a lead sent this at 2am"
+       have to be distinguishable in the log. The scheduler passes nothing and
+       is recorded as system, which is exactly right. */
+    store.audit('mail.sent', { template: tpl.name, to: msg.to.length, trigger, chart: !!chart }, actor);
     /* A SUCCESS THAT SAYS WHAT IS MISSING FROM IT. The mail went; the chart it
        asked for did not make it. Reported on the SUCCESS rather than swallowed,
        because the alternative is him finding out from the client. */
@@ -873,6 +911,452 @@ function backlogEpics(snap, plan, scope, picked, byKey) {
     .map(i => ({ key: i.key, components: i.components || [], transitions: byKey.get(i.key) || [] }));
 }
 
+/* ───────────────────────────── auth gate ───────────────────────────── */
+
+/**
+ * Routes reachable WITHOUT being signed in, named here and nowhere else.
+ *
+ * Deliberately not a row in `policy.js`: that table's rows all presuppose an
+ * actor, and adding one that anonymous callers satisfy puts a shape in the file
+ * that is one copy-paste away from being the shape of a second one. Three
+ * routes, listed by hand, reviewed as a list.
+ */
+const PUBLIC_ROUTES = new Set([
+  'POST /api/auth/login',
+  'POST /api/auth/setup',
+  'GET /api/auth/status',
+]);
+
+/** The client's address, for the audit log and the login throttle. */
+function clientIp(req) {
+  return (req.socket && (req.socket.remoteAddress || '')) || null;
+}
+
+/**
+ * Resolve the actor and apply the policy.
+ *
+ * Returns `{ actor }` to carry on, or `{ handled }` when it has already
+ * answered the request.
+ */
+async function authorize(req, res, url, cfg) {
+  const p = url.pathname;
+  const key = `${req.method} ${p}`;
+
+  /* AUTH OFF MEANS NOTHING CHANGES. Not "everyone is an admin" — there is no
+     actor at all, exactly as before, and the audit log says 'system'. A flag
+     that silently promoted every caller would make the dark launch untestable:
+     the gate would be running but never refusing anything. */
+  if (!cfg.auth.enabled) return { actor: null };
+
+  const token = auth.readCookie(req.headers.cookie, auth.SESSION_COOKIE);
+  const actor = token ? auth.sessionActor(token) : null;
+  if (actor) {
+    actor.ip = clientIp(req);
+    try { auth.touchSession(token); } catch (_) { /* last-seen is not load bearing */ }
+  }
+
+  if (PUBLIC_ROUTES.has(key)) return { actor };
+
+  /* FIRST RUN. With no accounts yet, every route would 401 and the only way in
+     — the setup route — is public, so the app would be a login page that
+     cannot be satisfied. Saying so explicitly is what lets the UI show the
+     setup screen rather than an error. */
+  if (auth.needsSetup()) {
+    return {
+      handled: json(res, 401, {
+        error: 'This tool has no accounts yet. Run the server and use the setup link it printed.',
+        code: 'needs-setup', needsSetup: true,
+      }),
+    };
+  }
+
+  const body = req.method === 'GET' || req.method === 'HEAD' ? null : await peekBody(req);
+  const verdict = policy.allow({
+    method: req.method, path: p, actor, body, query: url.searchParams,
+    plan: () => store.getPlan(),
+  });
+
+  if (!verdict.ok) {
+    /* Refusals are audited, successes are not. A refused request is either
+       somebody hitting a wall the UI should have hidden, or somebody trying
+       something — and both are worth being able to look up later. Auditing the
+       allowed ones too would bury them. */
+    store.audit('auth.refused', { method: req.method, path: p, code: verdict.code }, actor);
+    return {
+      handled: json(res, verdict.status, {
+        error: verdict.reason, code: verdict.code,
+        ...(verdict.code === 'anonymous' ? { signedOut: true } : {}),
+      }),
+    };
+  }
+  return { actor };
+}
+
+/**
+ * The body, for the gate's eyes only.
+ *
+ * Parse failures are SWALLOWED here: a malformed body is the handler's error to
+ * report, in its own words, and a 400 from the authorization layer would tell
+ * the caller their JSON was bad before anything established they were allowed
+ * to send it at all. The gate sees `{}` and the scope check refuses for want of
+ * a team, which is the correct outcome either way.
+ */
+async function peekBody(req) {
+  try {
+    const raw = await readBody(req);
+    return raw ? JSON.parse(raw) : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+/** Audit as whoever is making this request. */
+const auditAs = (req, action, detail) => store.audit(action, detail, req && req.actor);
+
+/* ─────────────────── read-only because of WHO you are ───────────────────
+ *
+ * The screens already understand read-only: `lock.readOnly` closes a finished
+ * sprint, and every edit control on Capacity planning and Active sprint is
+ * already wired through it — around fifty of them. A member or an out-of-scope
+ * lead needs exactly the same treatment, so this reuses that seam rather than
+ * inventing a parallel one the views would have to learn.
+ *
+ * DECIDED ON THE SERVER, not in the browser. The payload already carries the
+ * answer to "can this be edited"; adding a second, client-side opinion is how
+ * two parts of one screen come to disagree. The policy gate still refuses the
+ * writes — this only stops people walking into a wall.
+ *
+ * THE CLOSED-SPRINT REASON WINS when both apply. "This sprint is closed" is
+ * the more useful thing to be told: it is true for everybody, and a lead who
+ * is told instead that they lack permission would go asking for permission
+ * they already have.
+ */
+function roleLock(req, cfg, existing, teamId) {
+  const base = existing || { state: 'unmapped', readOnly: false, reason: null };
+  if (!cfg.auth.enabled || !req.actor) return base;
+  if (base.readOnly) return base;
+
+  const verdict = policy.allow({
+    method: 'PUT', path: '/api/calc-exempt', actor: req.actor,
+    body: { teamId }, query: new URLSearchParams(), plan: () => store.getPlan(),
+  });
+  if (verdict.ok) return base;
+
+  const a = req.actor;
+  const reason = a.role === 'member'
+    ? 'You have read access to this tool. The team leads make the changes.'
+    : `You lead ${(a.leadTeams || []).join(' and ') || 'no teams'}, so this team is read-only for you.`;
+  return { ...base, readOnly: true, reason, byRole: true, role: a.role };
+}
+
+/* ──────────────────── writes to Jira go out as the actor ────────────────────
+ *
+ * THE SHARED TOKEN IS FOR READING. Sync, dashboards and the snapshot all use
+ * the one in config.json, because the snapshot is shared and nobody should
+ * need a Jira token to look at a capacity grid.
+ *
+ * A WRITE IS DIFFERENT. `setStoryPoints`, `setDueDate` and `setSprint` change
+ * a real ticket. Sent under the shared token, this tool becomes a way around
+ * Jira's own permissions — a lead could edit a ticket in a project they have
+ * no access to — and Jira's history records one name for every change anyone
+ * ever made. Under the actor's own token, Jira decides, and its audit trail is
+ * true.
+ *
+ * NO SILENT FALLBACK. Somebody without a token is REFUSED, not quietly
+ * upgraded to the admin's. A fallback would rebuild exactly the problem this
+ * solves while looking like it had been solved — and the failure would be
+ * invisible, because the write would succeed.
+ *
+ * AUTH OFF MEANS ONE USER. With no actor there is nobody to be, and the tool
+ * behaves as it always has: the shared token, as a single-user tool.
+ */
+function jiraForWrite(req, cfg) {
+  if (!cfg.auth.enabled || !req.actor) return new Jira(cfg.jira || {});
+
+  const creds = auth.jiraCredsFor(req.actor.id);
+  if (!creds) {
+    const hint = auth.jiraHint(req.actor.id);
+    const e = new Error(hint.unreadable
+      ? 'Your saved Jira token cannot be read any more — the encryption key changed. Re-enter it in Settings.'
+      : 'Add your own Jira API token in Settings before pushing changes to Jira. Changes go out under your Jira account, not a shared one.');
+    e.status = 403; e.code = hint.unreadable ? 'jira-token-unreadable' : 'jira-token-missing';
+    throw e;
+  }
+  /* The FIELD MAPPING and base URL stay the project's — those are settings,
+     not credentials, and a per-user copy of "which field holds story points"
+     is a per-user way to write to the wrong field. */
+  return new Jira({ ...(cfg.jira || {}), email: creds.email, apiToken: creds.token });
+}
+
+/* ───────────────────────── sign in / sign out ───────────────────────── */
+
+const cookieOpts = (cfg) => ({ secure: !!cfg.auth.secureCookies });
+
+/** The public shape of an actor — never the password hash, never the token. */
+const publicActor = (a) => (a ? {
+  id: a.id, email: a.email, name: a.name, role: a.role,
+  leadTeams: a.leadTeams || [], mustChangePassword: !!a.mustChangePassword,
+} : null);
+
+async function authRoutes(req, res, url, cfg) {
+  const p = url.pathname;
+  if (!p.startsWith('/api/auth/')) return null;
+
+  /* What the login page needs before anybody has signed in: whether auth is on
+     at all, and whether this install is still waiting for its first admin.
+     Deliberately says NOTHING else — not how many accounts exist, not whether
+     an address is one of them. */
+  if (p === '/api/auth/status' && req.method === 'GET') {
+    return json(res, 200, {
+      enabled: !!cfg.auth.enabled,
+      needsSetup: cfg.auth.enabled ? auth.needsSetup() : false,
+      signedIn: !!req.actor,
+      actor: publicActor(req.actor),
+    });
+  }
+
+  if (p === '/api/auth/setup' && req.method === 'POST') {
+    if (!cfg.auth.enabled) return json(res, 400, { error: 'Authentication is switched off.' });
+    const body = await readJsonBody(req);
+    const u = await auth.claimSetupToken(String(body.token || ''), {
+      email: body.email, name: body.name || null, password: body.password,
+    });
+    const s = auth.startSession(u.id, { ip: clientIp(req), userAgent: req.headers['user-agent'] || null });
+    store.audit('auth.setup', { email: u.email }, { id: u.id, email: u.email, role: 'project-admin', ip: clientIp(req) });
+    res.setHeader('Set-Cookie', auth.sessionCookie(s.token, { expiresAt: s.expiresAt, ...cookieOpts(cfg) }));
+    return json(res, 200, { ok: true, actor: publicActor(auth.actorFor(u.id)) });
+  }
+
+  if (p === '/api/auth/login' && req.method === 'POST') {
+    if (!cfg.auth.enabled) return json(res, 400, { error: 'Authentication is switched off.' });
+    const body = await readJsonBody(req);
+    const out = await auth.signIn({
+      email: body.email, password: body.password,
+      ip: clientIp(req), userAgent: req.headers['user-agent'] || null,
+    });
+    store.audit('auth.login', { email: out.actor.email }, { ...out.actor, ip: clientIp(req) });
+    res.setHeader('Set-Cookie', auth.sessionCookie(out.token, { expiresAt: out.expiresAt, ...cookieOpts(cfg) }));
+    return json(res, 200, { ok: true, actor: publicActor(out.actor) });
+  }
+
+  if (p === '/api/auth/logout' && req.method === 'POST') {
+    const token = auth.readCookie(req.headers.cookie, auth.SESSION_COOKIE);
+    if (token) auth.endSession(token);
+    auditAs(req, 'auth.logout', {});
+    res.setHeader('Set-Cookie', auth.clearCookie(cookieOpts(cfg)));
+    return json(res, 200, { ok: true });
+  }
+
+  if (p === '/api/auth/me' && req.method === 'GET') {
+    return json(res, 200, { actor: publicActor(req.actor) });
+  }
+
+  /* CHANGING YOUR OWN PASSWORD REQUIRES THE OLD ONE, even though you are
+     already signed in. The session proves you held the password once; it does
+     not prove the person at the keyboard now is you. An unattended laptop is
+     the whole threat, and it is the common one. */
+  if (p === '/api/auth/password' && req.method === 'POST') {
+    const body = await readJsonBody(req);
+    const me = auth.findUser(req.actor.id);
+    const ok = await auth.verifyPassword(body.current, me.password_hash);
+    if (!ok) {
+      store.audit('auth.password.refused', {}, req.actor);
+      return json(res, 403, { error: 'That is not your current password.', code: 'bad-current' });
+    }
+    await auth.setPassword(req.actor.id, body.password);
+    /* EVERY OTHER SESSION ENDS. A password change is usually a response to
+       "someone may have my password" — leaving their other sessions live
+       answers the question with "yes, and they still do". */
+    const token = auth.readCookie(req.headers.cookie, auth.SESSION_COOKIE);
+    auth.endAllSessions(req.actor.id);
+    const s = auth.startSession(req.actor.id, { ip: clientIp(req), userAgent: req.headers['user-agent'] || null });
+    auditAs(req, 'auth.password.changed', { otherSessionsEnded: true });
+    res.setHeader('Set-Cookie', auth.sessionCookie(s.token, { expiresAt: s.expiresAt, ...cookieOpts(cfg) }));
+    return json(res, 200, { ok: true, reauthenticated: !!token });
+  }
+
+  /* ── your own Jira credentials ──────────────────────────────────────
+     Self-service by design: a token is personal, and an admin typing one in
+     on somebody's behalf defeats the point of the writes being attributable.
+     The token NEVER comes back out — the GET returns only whether one is
+     saved, whose Jira account it is, and its last four characters. */
+  if (p === '/api/auth/jira' && req.method === 'GET') {
+    return json(res, 200, { jira: auth.jiraHint(req.actor.id) });
+  }
+
+  if (p === '/api/auth/jira' && req.method === 'PUT') {
+    const body = await readJsonBody(req);
+    /* CHECKED AGAINST JIRA BEFORE IT IS STORED. A token that does not work is
+       worse than none: the screen says "saved", and the failure arrives later
+       on an unrelated action that looks like the tool is broken. */
+    const probe = new Jira({ ...(cfg.jira || {}), email: body.email, apiToken: body.token });
+    let me = null;
+    try {
+      me = await probe.myself();
+    } catch (err) {
+      return json(res, 400, {
+        error: `Jira would not accept that: ${err.message}`,
+        code: 'jira-token-rejected',
+      });
+    }
+    const hint = auth.setJiraToken(req.actor.id, { email: body.email, token: body.token });
+    auth.markJiraChecked(req.actor.id);
+    auditAs(req, 'jira.token.saved', { jiraEmail: body.email, accountId: me && me.accountId ? me.accountId : null });
+    return json(res, 200, { ok: true, jira: { ...hint, checkedAt: new Date().toISOString() }, displayName: me && me.displayName });
+  }
+
+  if (p === '/api/auth/jira' && req.method === 'DELETE') {
+    auth.clearJiraToken(req.actor.id);
+    auditAs(req, 'jira.token.removed', {});
+    return json(res, 200, { ok: true, jira: auth.jiraHint(req.actor.id) });
+  }
+
+  if (p === '/api/auth/sessions' && req.method === 'GET') {
+    return json(res, 200, { sessions: auth.sessionsFor(req.actor.id) });
+  }
+
+  if (p === '/api/auth/sessions' && req.method === 'DELETE') {
+    const n = auth.endAllSessions(req.actor.id);
+    auditAs(req, 'auth.sessions.revoked', { count: n, self: true });
+    res.setHeader('Set-Cookie', auth.clearCookie(cookieOpts(cfg)));
+    return json(res, 200, { ok: true, ended: n });
+  }
+
+  return null;
+}
+
+/* ───────────────────────────── accounts ───────────────────────────── */
+
+/** One account, as the Users screen shows it. Never the hash. */
+function userRow(u) {
+  const roles = auth.rolesFor(u.id);
+  const actor = auth.actorFor(u.id);
+  return {
+    id: u.id, email: u.email, name: u.name, status: u.status,
+    role: actor.role, leadTeams: actor.leadTeams,
+    roles,
+    hasPassword: !!u.password_hash,
+    mustChangePassword: !!u.must_change_password,
+    createdAt: u.created_at, lastSeenAt: u.last_seen_at,
+    sessions: auth.sessionsFor(u.id).filter(s => !s.revokedAt && s.expiresAt > new Date().toISOString()).length,
+  };
+}
+
+/**
+ * THE LAST ADMIN CANNOT BE REMOVED.
+ *
+ * Demote or disable the only project admin and the tool has no one who can put
+ * it right — the Users screen is admin-only, so the fix is behind the door that
+ * just locked. Recoverable only by deleting auth.db and starting over, which
+ * takes every account with it. Checked on demotion AND on disable, because
+ * either one produces the same dead end.
+ */
+function assertNotLastAdmin(uid, what) {
+  const admins = auth.listUsers().filter(u => u.status === 'active' && auth.actorFor(u.id).role === 'project-admin');
+  if (admins.length > 1 || !admins.some(a => a.id === uid)) return;
+  const e = new Error(`That is the only project admin left — ${what} would leave nobody able to manage accounts.`);
+  e.status = 409; e.code = 'last-admin';
+  throw e;
+}
+
+async function userRoutes(req, res, url, cfg) {
+  const p = url.pathname;
+  if (!p.startsWith('/api/users')) return null;
+
+  if (p === '/api/users' && req.method === 'GET') {
+    return json(res, 200, { users: auth.listUsers().map(userRow) });
+  }
+
+  if (p === '/api/users' && req.method === 'POST') {
+    const body = await readJsonBody(req);
+    const roles = [];
+    if (body.role === 'project-admin') roles.push({ role: 'project-admin' });
+    else if (body.role === 'lead') for (const t of (body.leadTeams || [])) roles.push({ role: 'lead', teamId: t });
+    const u = await auth.createUser({
+      email: body.email, name: body.name || null,
+      password: body.password || null, roles, createdBy: req.actor ? req.actor.id : null,
+    });
+    auditAs(req, 'users.created', { email: u.email, role: body.role || 'member', leadTeams: body.leadTeams || [] });
+    return json(res, 200, { ok: true, user: userRow(auth.findUser(u.id)) });
+  }
+
+  if (p === '/api/users' && req.method === 'PUT') {
+    const body = await readJsonBody(req);
+    const u = auth.findUser(body.id);
+    if (!u) return json(res, 404, { error: 'No such account.' });
+    if (body.status && body.status !== u.status) {
+      if (body.status === 'disabled') assertNotLastAdmin(u.id, 'disabling them');
+      auth.setStatus(u.id, body.status);
+      auditAs(req, 'users.status', { email: u.email, status: body.status });
+    }
+    if (body.name !== undefined) {
+      auth.db().prepare('UPDATE user SET name = ? WHERE id = ?').run(body.name || null, u.id);
+    }
+    return json(res, 200, { ok: true, user: userRow(auth.findUser(u.id)) });
+  }
+
+  if (p === '/api/users' && req.method === 'DELETE') {
+    const body = await readJsonBody(req);
+    const u = auth.findUser(body.id);
+    if (!u) return json(res, 404, { error: 'No such account.' });
+    assertNotLastAdmin(u.id, 'disabling them');
+    /* DISABLED, NOT DELETED. The audit log names people by id; deleting the row
+       turns every entry they ever made into an orphan. Disabling ends their
+       sessions and refuses new ones, which is the whole of what removal is
+       actually for. */
+    auth.setStatus(u.id, 'disabled');
+    auditAs(req, 'users.disabled', { email: u.email });
+    return json(res, 200, { ok: true, user: userRow(auth.findUser(u.id)) });
+  }
+
+  /* ROLES ARE REPLACED WHOLESALE, not patched. "Make Thao a lead of Ruby and
+     Titan" has to be able to REMOVE Titan, and a grant-only endpoint cannot
+     express that — the screen would show a change that never took. */
+  if (p === '/api/users/roles' && req.method === 'PUT') {
+    const body = await readJsonBody(req);
+    const u = auth.findUser(body.id);
+    if (!u) return json(res, 404, { error: 'No such account.' });
+    const role = body.role || 'member';
+    const teams = role === 'lead' ? [...new Set((body.leadTeams || []).filter(Boolean).map(String))] : [];
+    if (role === 'lead' && !teams.length) {
+      return json(res, 400, { error: 'A team lead has to lead at least one team.', code: 'role-needs-team' });
+    }
+    const before = auth.actorFor(u.id).role;
+    if (before === 'project-admin' && role !== 'project-admin') assertNotLastAdmin(u.id, 'changing their role');
+
+    for (const r of auth.rolesFor(u.id)) auth.revoke(u.id, r.role, r.teamId);
+    if (role === 'project-admin') auth.grant(u.id, 'project-admin');
+    else for (const t of teams) auth.grant(u.id, 'lead', t);
+
+    auditAs(req, 'users.roles', { email: u.email, from: before, to: role, leadTeams: teams });
+    return json(res, 200, { ok: true, user: userRow(auth.findUser(u.id)) });
+  }
+
+  if (p === '/api/users/password' && req.method === 'PUT') {
+    const body = await readJsonBody(req);
+    const u = auth.findUser(body.id);
+    if (!u) return json(res, 404, { error: 'No such account.' });
+    await auth.setPassword(u.id, body.password, { mustChange: body.mustChange !== false });
+    /* An admin setting somebody's password ends that person's sessions. Either
+       the account was compromised — in which case the live sessions are the
+       problem — or they forgot it, in which case there are none to lose. */
+    const ended = auth.endAllSessions(u.id);
+    auditAs(req, 'users.password.reset', { email: u.email, sessionsEnded: ended });
+    return json(res, 200, { ok: true, sessionsEnded: ended });
+  }
+
+  if (p === '/api/users/sessions' && req.method === 'DELETE') {
+    const body = await readJsonBody(req);
+    const u = auth.findUser(body.id);
+    if (!u) return json(res, 404, { error: 'No such account.' });
+    const n = auth.endAllSessions(u.id);
+    auditAs(req, 'users.sessions.revoked', { email: u.email, count: n });
+    return json(res, 200, { ok: true, ended: n });
+  }
+
+  return null;
+}
+
 /* ───────────────────────────── routes ───────────────────────────── */
 
 async function handleApi(req, res, url) {
@@ -881,6 +1365,30 @@ async function handleApi(req, res, url) {
   const q = url.searchParams;
   const writeBlocked = cfg.server.readOnly && req.method !== 'GET';
   if (writeBlocked) return json(res, 403, { error: 'This instance is running read-only (server.readOnly in config.json).' });
+
+  /* ──────────────────────── WHO, AND MAY THEY ────────────────────────
+   *
+   * ONE GATE, HERE, beside the read-only block that already proves this is the
+   * funnel every route passes through. The alternative — a check at the top of
+   * each handler — cannot be audited: a handler that forgot its check looks
+   * exactly like one that does not need it, and there is no way to list the
+   * unguarded routes. `lib/policy.js` is a table precisely so that it CAN be
+   * listed, and compared against the server's real routes by a test.
+   *
+   * The order is deliberate. Identity first, then authorization, then the
+   * handler's own rules — so "you are not allowed to touch Titan" is answered
+   * before "that sprint is closed", and a lead poking at another team never
+   * learns anything about that team's state from the error they get back.
+   */
+  const gate = await authorize(req, res, url, cfg);
+  if (gate.handled) return;
+  req.actor = gate.actor;
+
+  /* ---- sign in, sign out, set up ---- */
+  const authed = await authRoutes(req, res, url, cfg);
+  if (authed) return authed;
+  const usered = await userRoutes(req, res, url, cfg);
+  if (usered) return usered;
 
   /* ---- bootstrap ---- */
   if (p === '/api/state' && req.method === 'GET') {
@@ -954,6 +1462,9 @@ async function handleApi(req, res, url) {
     const team = findTeam(plan, q.get('team'));
     const sprint = findSprint(plan, q.get('sprint'), team.id);
     const grid = insights.capacityView(plan, snap, team, sprint);
+    /* `capacityView` sets `grid.lock` from the sprint alone — it has no actor.
+       Widened here, where the request is. */
+    grid.lock = roleLock(req, cfg, grid.lock, team.id);
     /* THE "BY COMPONENT" SHEET IS ATTACHED HERE, not inside `capacityView`.
        `prioritization` already requires `insights` — for the sprint index and
        the epic walk — so building it there would close a require cycle. This
@@ -1015,6 +1526,12 @@ async function handleApi(req, res, url) {
          sweep for one number. */
   if (p === '/api/sprint/points' && req.method === 'PUT') {
     const body = await readJsonBody(req);           // closed-sprint guard runs here
+    /* THE CREDENTIAL CHECK COMES FIRST, before the payload is picked apart.
+       Somebody with no Jira token of their own is told exactly that,
+       whatever else is wrong with the request — rather than being sent to
+       fix a key or a date and only then discovering they could never have
+       pushed it. The scope check already ran, in the gate, above all this. */
+    const jira = jiraForWrite(req, cfg);
     const plan = store.getPlan(), snap = store.getSnapshot();
     const key = String(body.key || '').trim().toUpperCase();
     if (!key) return json(res, 400, { error: 'Which issue?' });
@@ -1051,7 +1568,6 @@ async function handleApi(req, res, url) {
       }
     }
 
-    const jira = new Jira(cfg.jira || {});
     if (!jira.configured) return json(res, 400, { error: 'Jira is not configured — add credentials in Settings.' });
     const field = jira.storyPointsField || (snap.fields || {}).storyPointsField;
     if (!field) return json(res, 400, { error: 'No Story Points field is known yet — run a sync first.' });
@@ -1081,7 +1597,7 @@ async function handleApi(req, res, url) {
          "screen shows a number the database no longer holds" failure the
          cache's own comment warns about. */
       store.invalidate();
-      store.audit('jira.points.set', { key, from: liveNum, to: points, team: team.id, sprint: sprint.id });
+      auditAs(req, 'jira.points.set', { key, from: liveNum, to: points, team: team.id, sprint: sprint.id });
       return json(res, 200, { ok: true, key, points, from: liveNum });
     } catch (err) {
       return json(res, 502, { error: err.message });
@@ -1095,6 +1611,12 @@ async function handleApi(req, res, url) {
      should find no surprises. What differs is only what a value IS. */
   if (p === '/api/sprint/duedate' && req.method === 'PUT') {
     const body = await readJsonBody(req);           // closed-sprint guard runs here
+    /* THE CREDENTIAL CHECK COMES FIRST, before the payload is picked apart.
+       Somebody with no Jira token of their own is told exactly that,
+       whatever else is wrong with the request — rather than being sent to
+       fix a key or a date and only then discovering they could never have
+       pushed it. The scope check already ran, in the gate, above all this. */
+    const jira = jiraForWrite(req, cfg);
     const plan = store.getPlan(), snap = store.getSnapshot();
     const key = String(body.key || '').trim().toUpperCase();
     if (!key) return json(res, 400, { error: 'Which issue?' });
@@ -1128,7 +1650,6 @@ async function handleApi(req, res, url) {
       }
     }
 
-    const jira = new Jira(cfg.jira || {});
     if (!jira.configured) return json(res, 400, { error: 'Jira is not configured — add credentials in Settings.' });
 
     try {
@@ -1153,7 +1674,7 @@ async function handleApi(req, res, url) {
       // Jira first, local second — see the points route for why.
       repo.writeField(key, 'dueDate', due);
       store.invalidate();
-      store.audit('jira.duedate.set', { key, from: live, to: due, team: team.id, sprint: sprint.id });
+      auditAs(req, 'jira.duedate.set', { key, from: live, to: due, team: team.id, sprint: sprint.id });
       return json(res, 200, { ok: true, key, dueDate: due, from: live });
     } catch (err) {
       return json(res, 502, { error: err.message });
@@ -1187,6 +1708,12 @@ async function handleApi(req, res, url) {
          from the board somebody is watching. */
   if (p === '/api/backlog/sprint' && req.method === 'PUT') {
     const body = await readJsonBody(req);
+    /* THE CREDENTIAL CHECK COMES FIRST, before the payload is picked apart.
+       Somebody with no Jira token of their own is told exactly that,
+       whatever else is wrong with the request — rather than being sent to
+       fix a key or a date and only then discovering they could never have
+       pushed it. The scope check already ran, in the gate, above all this. */
+    const jira = jiraForWrite(req, cfg);
     const plan = store.getPlan(), snap = store.getSnapshot();
     const key = String(body.key || '').trim().toUpperCase();
     if (!key) return json(res, 400, { error: 'Which issue?' });
@@ -1222,7 +1749,6 @@ async function handleApi(req, res, url) {
       }
     }
 
-    const jira = new Jira(cfg.jira || {});
     if (!jira.configured) return json(res, 400, { error: 'Jira is not configured — add credentials in Settings.' });
 
     try {
@@ -1262,7 +1788,7 @@ async function handleApi(req, res, url) {
         : kept;
       repo.writeField(key, 'sprints', next);
       store.invalidate();
-      store.audit('jira.sprint.set', { key, from: liveName, to: toName, team: team.id });
+      auditAs(req, 'jira.sprint.set', { key, from: liveName, to: toName, team: team.id });
       return json(res, 200, { ok: true, key, sprintId: toId, sprint: toName, from: liveName });
     } catch (err) {
       return json(res, 502, { error: err.message });
@@ -1312,7 +1838,7 @@ async function handleApi(req, res, url) {
          — so the page needs to know before it renders, or it offers boxes
          that can only fail. The capacity route has carried this for the same
          reason; this screen only needed it once it gained an editable cell. */
-      lock: lock.status(sprint, team.id),
+      lock: roleLock(req, cfg, lock.status(sprint, team.id), team.id),
     });
   }
 
@@ -1574,7 +2100,7 @@ async function handleApi(req, res, url) {
     const { list, errors } = keywords.validate(body.teams);
     plan.coverageTeams = list;
     store.savePlan(plan);
-    store.audit('coverageTeams.set', { teams: list });
+    auditAs(req, 'coverageTeams.set', { teams: list });
     return json(res, 200, { ok: true, coverageTeams: list, notes: errors });
   }
 
@@ -1584,7 +2110,7 @@ async function handleApi(req, res, url) {
     const { list, errors } = keywords.validate(body.components);
     plan.excludedComponents = list;
     store.savePlan(plan);
-    store.audit('excludedComponents.set', { components: list });
+    auditAs(req, 'excludedComponents.set', { components: list });
     return json(res, 200, { ok: true, excludedComponents: list, notes: errors });
   }
 
@@ -1607,7 +2133,7 @@ async function handleApi(req, res, url) {
 
     plan.componentPriority = map;
     store.savePlan(plan);
-    store.audit('componentPriority.set', {
+    auditAs(req, 'componentPriority.set', {
       component: body.component ?? null, level: body.level ?? null, total: Object.keys(map).length,
     });
     return json(res, 200, { ok: true, componentPriority: map, set: Object.keys(map).length });
@@ -1649,7 +2175,7 @@ async function handleApi(req, res, url) {
 
     plan.componentRank = map;
     store.savePlan(plan);
-    store.audit('componentRank.set', { level, components: order.length, total: Object.keys(map).length });
+    auditAs(req, 'componentRank.set', { level, components: order.length, total: Object.keys(map).length });
     return json(res, 200, { ok: true, componentRank: map, level, order });
   }
 
@@ -1667,7 +2193,7 @@ async function handleApi(req, res, url) {
 
     plan.componentNote = map;
     store.savePlan(plan);
-    store.audit('componentNote.set', {
+    auditAs(req, 'componentNote.set', {
       component: body.component ?? null,
       // The text itself stays out of the audit trail: it is his working note,
       // and a log that quietly keeps every draft of it is not what a note is.
@@ -1706,7 +2232,7 @@ async function handleApi(req, res, url) {
 
     plan.sprintComponentNote = map;
     store.savePlan(plan);
-    store.audit('sprintNote.set', {
+    auditAs(req, 'sprintNote.set', {
       sprint: key,
       component: body.component ?? null,
       /* The text stays out of the audit trail, same as the global note: it is
@@ -1967,7 +2493,7 @@ async function handleApi(req, res, url) {
 
     const truncated = epics.filter(e => e.truncated).length;
     const withHistory = epics.filter(e => e.transitions.length).length;
-    store.audit('coverage.history.backfill', { epics: epics.length, dates: dates.length, written, kept, truncated, transitions: saved.written });
+    auditAs(req, 'coverage.history.backfill', { epics: epics.length, dates: dates.length, written, kept, truncated, transitions: saved.written });
     return json(res, 200, {
       ok: true, epics: epics.length, withHistory, truncated,
       dates: dates.length, written, keptObservations: kept,
@@ -2090,7 +2616,7 @@ async function handleApi(req, res, url) {
     if (errors.length) return json(res, 400, { error: errors.join(' '), errors });
 
     const saved = saveConfig({ mail: patch });
-    store.audit('mail.config.save', { host: patch.host, hasPass: !!patch.pass });
+    auditAs(req, 'mail.config.save', { host: patch.host, hasPass: !!patch.pass });
     return json(res, 200, { ok: true, mail: redact(saved).mail });
   }
 
@@ -2158,7 +2684,7 @@ async function handleApi(req, res, url) {
         : [...plan.mailTemplates, row];
     }
     store.savePlan(plan);
-    store.audit(`mail.template.${req.method.toLowerCase()}`, { id: body.id || body.name });
+    auditAs(req, `mail.template.${req.method.toLowerCase()}`, { id: body.id || body.name });
     return json(res, 200, { ok: true, templates: plan.mailTemplates });
   }
 
@@ -2283,7 +2809,7 @@ async function handleApi(req, res, url) {
 
   if (p === '/api/mail/send' && req.method === 'POST') {
     const body = await readJsonBody(req);
-    return json(res, 200, await sendReport(cfg, body, { trigger: 'manual' }));
+    return json(res, 200, await sendReport(cfg, body, { trigger: 'manual', actor: req.actor }));
   }
 
   if (p === '/api/blockers' && req.method === 'GET') {
@@ -2331,7 +2857,7 @@ async function handleApi(req, res, url) {
     /* WHAT CHANGED, not just that something did. A holiday list is edited
        rarely and consulted by every availability grid; "holidays.saved" with
        no detail is an audit line nobody can answer a question from. */
-    store.audit('holidays.saved', {
+    auditAs(req, 'holidays.saved', {
       count: next.length, before: before.length, toggled,
       rejected: errors.map(e => e.value),
     });
@@ -2346,7 +2872,7 @@ async function handleApi(req, res, url) {
     const plan = store.getPlan();
     const next = { ...plan, ...body, version: plan.version };
     store.savePlan(next);
-    store.audit('plan.replace', { keys: Object.keys(body) });
+    auditAs(req, 'plan.replace', { keys: Object.keys(body) });
     return json(res, 200, { ok: true });
   }
 
@@ -2363,7 +2889,7 @@ async function handleApi(req, res, url) {
     if (body.rules === null) {                       // back to the shipped defaults
       plan.categoryRules = null;
       store.savePlan(plan);
-      store.audit('categoryRules.reset', { count: classify.DEFAULT_RULES.length });
+      auditAs(req, 'categoryRules.reset', { count: classify.DEFAULT_RULES.length });
       return json(res, 200, { ok: true, reset: true, rules: classify.DEFAULT_RULES, hits: classify.ruleHits(issues(), null) });
     }
     const { rules, errors } = classify.validateRules(body.rules);
@@ -2373,7 +2899,7 @@ async function handleApi(req, res, url) {
     if (!rules.length) return json(res, 400, { error: 'Keep at least one rule — an empty list files every issue under Other', errors: [] });
     plan.categoryRules = rules;
     store.savePlan(plan);
-    store.audit('categoryRules.save', { count: rules.length });
+    auditAs(req, 'categoryRules.save', { count: rules.length });
     return json(res, 200, { ok: true, rules, hits: classify.ruleHits(issues(), rules) });
   }
 
@@ -2431,7 +2957,7 @@ async function handleApi(req, res, url) {
     const entries = body.entries || [body];
     for (const e of entries) plan.availability[`${e.teamId}|${e.sprintId}|${e.memberId}`] = e.row;
     store.savePlan(plan);
-    store.audit('availability.set', { count: entries.length, sprintId: entries[0] && entries[0].sprintId });
+    auditAs(req, 'availability.set', { count: entries.length, sprintId: entries[0] && entries[0].sprintId });
     return json(res, 200, { ok: true });
   }
 
@@ -2448,7 +2974,7 @@ async function handleApi(req, res, url) {
     const key = `${team.id}|${body.sprintId}|${body.memberId}`;
     if (body.exempt) plan.calcExempt[key] = true; else delete plan.calcExempt[key];
     store.savePlan(plan);
-    store.audit('capacity.exempt', { teamId: team.id, sprintId: body.sprintId, memberId: body.memberId, exempt: !!body.exempt });
+    auditAs(req, 'capacity.exempt', { teamId: team.id, sprintId: body.sprintId, memberId: body.memberId, exempt: !!body.exempt });
     return json(res, 200, { ok: true, exempt: !!body.exempt });
   }
 
@@ -2458,6 +2984,7 @@ async function handleApi(req, res, url) {
     plan.support = plan.support || {};
     plan.support[`${body.teamId}|${body.sprintId}|${body.memberId}`] = Number(body.pct) || 0;
     store.savePlan(plan);
+    auditAs(req, 'support.set', { teamId: body.teamId, sprintId: body.sprintId, memberId: body.memberId, pct: Number(body.pct) || 0 });
     return json(res, 200, { ok: true });
   }
 
@@ -2467,6 +2994,7 @@ async function handleApi(req, res, url) {
     plan.ceremony = plan.ceremony || {};
     plan.ceremony[`${body.teamId}|${body.sprintId}`] = Number(body.hours) || 0;
     store.savePlan(plan);
+    auditAs(req, 'ceremony.set', { teamId: body.teamId, sprintId: body.sprintId, hours: Number(body.hours) || 0 });
     return json(res, 200, { ok: true });
   }
 
@@ -2478,7 +3006,7 @@ async function handleApi(req, res, url) {
     if (body.planned == null && body.actual == null) delete plan.overrides[key];
     else plan.overrides[key] = { planned: body.planned, actual: body.actual };
     store.savePlan(plan);
-    store.audit('override.set', { key, planned: body.planned, actual: body.actual });
+    auditAs(req, 'override.set', { key, planned: body.planned, actual: body.actual });
     return json(res, 200, { ok: true });
   }
 
@@ -2499,7 +3027,7 @@ async function handleApi(req, res, url) {
     else if (req.method === 'PUT') plan.risks = plan.risks.map(r => (r.id === body.id ? { ...r, ...body, updatedAt: new Date().toISOString() } : r));
     else plan.risks.push({ ...body, id: `r${Date.now().toString(36)}`, createdAt: new Date().toISOString() });
     store.savePlan(plan);
-    store.audit(`risk.${req.method.toLowerCase()}`, { id: body.id || body.title });
+    auditAs(req, `risk.${req.method.toLowerCase()}`, { id: body.id || body.title });
     return json(res, 200, { ok: true, risks: plan.risks });
   }
 
@@ -2584,7 +3112,7 @@ async function handleApi(req, res, url) {
     }
 
     store.savePlan(plan);
-    store.audit(`blocker.${req.method.toLowerCase()}`, { id: body.id || body.title });
+    auditAs(req, `blocker.${req.method.toLowerCase()}`, { id: body.id || body.title });
     return json(res, 200, { ok: true, blockers: plan.blockers });
   }
 
@@ -2669,7 +3197,7 @@ async function handleApi(req, res, url) {
       if (body[k] !== undefined) team[k] = body[k];
     }
     store.savePlan(plan);
-    store.audit('team.update', { teamId: team.id, keys: Object.keys(body).filter(k => k !== 'teamId') });
+    auditAs(req, 'team.update', { teamId: team.id, keys: Object.keys(body).filter(k => k !== 'teamId') });
     return json(res, 200, { ok: true, team, notes });
   }
 
@@ -2691,7 +3219,7 @@ async function handleApi(req, res, url) {
           body.teamId, { name: body.name, accountId: body.accountId, role: body.role }, { directory });
         store.savePlan(plan);
         const member = (plan.teams.find(t => t.id === body.teamId).members || []).find(m => m.id === added);
-        store.audit('member.add', {
+        auditAs(req, 'member.add', {
           teamId: body.teamId, name: body.name,
           from: member && member.jiraAccountId ? (body.accountId ? 'jira' : 'jira-by-name') : 'manual',
         });
@@ -2705,7 +3233,7 @@ async function handleApi(req, res, url) {
       if (body[k] !== undefined) member[k] = body[k];
     }
     store.savePlan(plan);
-    store.audit('member.update', { teamId: body.teamId, memberId: body.memberId });
+    auditAs(req, 'member.update', { teamId: body.teamId, memberId: body.memberId });
     return json(res, 200, { ok: true });
   }
 
@@ -2715,7 +3243,7 @@ async function handleApi(req, res, url) {
     try {
       const name = reconcile.excludeMember(plan, body.teamId, body.memberId);
       store.savePlan(plan);
-      store.audit('member.exclude', { teamId: body.teamId, name });
+      auditAs(req, 'member.exclude', { teamId: body.teamId, name });
       return json(res, 200, { ok: true, name });
     } catch (err) { return json(res, 400, { error: err.message }); }
   }
@@ -2727,7 +3255,7 @@ async function handleApi(req, res, url) {
     // Bring them straight back rather than making the user run a sync for it.
     reconcile.reconcileMembers(plan, store.getSnapshot());
     store.savePlan(plan);
-    store.audit('member.unexclude', { teamId: body.teamId, key: body.key });
+    auditAs(req, 'member.unexclude', { teamId: body.teamId, key: body.key });
     return json(res, 200, { ok: true });
   }
 
@@ -2737,7 +3265,7 @@ async function handleApi(req, res, url) {
     try {
       const name = reconcile.removeTeam(plan, body.teamId);
       store.savePlan(plan);
-      store.audit('team.remove', { teamId: body.teamId, name });
+      auditAs(req, 'team.remove', { teamId: body.teamId, name });
       return json(res, 200, { ok: true, name, teams: plan.teams.map(t => ({ id: t.id, name: t.name })) });
     } catch (err) { return json(res, 400, { error: err.message }); }
   }
@@ -2748,7 +3276,7 @@ async function handleApi(req, res, url) {
     reconcile.unignoreBoard(plan, body.boardId);
     const rec = reconcile.reconcileAll(plan, store.getSnapshot());
     store.savePlan(plan);
-    store.audit('board.unignore', { boardId: body.boardId });
+    auditAs(req, 'board.unignore', { boardId: body.boardId });
     return json(res, 200, { ok: true, reconcile: rec });
   }
 
@@ -2760,7 +3288,7 @@ async function handleApi(req, res, url) {
     const rec = reconcile.reconcileAll(plan, snap);
     store.saveSnapshot(snap);   // reconcileAll builds snap.byTeam — persist it, or the rebuild is lost
     store.savePlan(plan);
-    store.audit('reconcile.manual', rec);
+    auditAs(req, 'reconcile.manual', rec);
     return json(res, 200, rec);
   }
 
@@ -2785,7 +3313,7 @@ async function handleApi(req, res, url) {
     if (!start && !end) {
       delete plan.sprintDates[id];
       store.savePlan(plan);
-      store.audit('sprint.dates.cleared', { sprintId: id, name: sprint.name });
+      auditAs(req, 'sprint.dates.cleared', { sprintId: id, name: sprint.name });
       return json(res, 200, { ok: true, cleared: true, sprintDates: plan.sprintDates });
     }
     // Both or neither: half an override leaves the other end on Jira's value
@@ -2797,7 +3325,7 @@ async function handleApi(req, res, url) {
 
     plan.sprintDates[id] = { start, end };
     store.savePlan(plan);
-    store.audit('sprint.dates.set', { sprintId: id, name: sprint.name, start, end });
+    auditAs(req, 'sprint.dates.set', { sprintId: id, name: sprint.name, start, end });
 
     // What it works out to, so the caller can check the number it came for
     // rather than re-deriving the working-day rule at the other end.
@@ -2834,6 +3362,7 @@ async function handleApi(req, res, url) {
       plan.sprints.push({ id: `S${number}`, number, name: `Sprint ${number}`, start: start.toISOString().slice(0, 10), end: end.toISOString().slice(0, 10) });
     }
     store.savePlan(plan);
+    auditAs(req, 'sprints.generated', { count, from: last.id });
     return json(res, 200, { ok: true, sprints: plan.sprints });
   }
 
@@ -3187,7 +3716,7 @@ async function handleApi(req, res, url) {
       snap.fields = { ...(snap.fields || {}), probedAt };
       store.saveSnapshot(snap);
 
-      store.audit('jira.fields.probe', { sampled: sample.length, fields: profiled.length });
+      auditAs(req, 'jira.fields.probe', { sampled: sample.length, fields: profiled.length });
       return json(res, 200, {
         sampled: sample.length,
         probedAt,
@@ -3225,7 +3754,7 @@ async function handleApi(req, res, url) {
     if ('syncAllFields' in body) patch.syncAllFields = Boolean(body.syncAllFields);
 
     const saved = saveConfig({ jira: patch });
-    store.audit('jira.fields.save', {
+    auditAs(req, 'jira.fields.save', {
       storyPoints: patch.storyPointsField, extras: (patch.extraFields || []).length, all: patch.syncAllFields,
     });
     return json(res, 200, {
@@ -3284,7 +3813,7 @@ async function handleApi(req, res, url) {
     const at = plan.savedSearches.findIndex(s => s.id === id);
     if (at >= 0) plan.savedSearches[at] = entry; else plan.savedSearches.push(entry);
     store.savePlan(plan);
-    store.audit('search.save', { id, name, query: entry.query });
+    auditAs(req, 'search.save', { id, name, query: entry.query });
     return json(res, 200, { ok: true, saved: entry, savedSearches: plan.savedSearches });
   }
 
@@ -3295,7 +3824,7 @@ async function handleApi(req, res, url) {
     plan.savedSearches = (plan.savedSearches || []).filter(s => s.id !== body.id);
     if (plan.savedSearches.length === before) return json(res, 404, { error: 'No such saved search.' });
     store.savePlan(plan);
-    store.audit('search.delete', { id: body.id });
+    auditAs(req, 'search.delete', { id: body.id });
     return json(res, 200, { ok: true, savedSearches: plan.savedSearches });
   }
 
@@ -3324,7 +3853,7 @@ async function handleApi(req, res, url) {
     const roster = rosterLib.forSprint(plan, team, sprint, raw, lock.stateFor(sprint, team.id));
     return json(res, 200, {
       teamId: team.id, sprintId: sprint.id, sprintName: sprint.name,
-      lock: lock.status(sprint, team.id),
+      lock: roleLock(req, cfg, lock.status(sprint, team.id), team.id),
       counts: roster.counts,
       members: roster.members.map(m => ({
         id: m.id, name: m.name, role: m.role || null, status: m.status || 'Active',
@@ -3384,7 +3913,7 @@ async function handleApi(req, res, url) {
     // act on the Team screen.
 
     store.savePlan(plan);
-    store.audit('roster.set', { key, memberId: id, state: body.state });
+    auditAs(req, 'roster.set', { key, memberId: id, state: body.state });
     return json(res, 200, { ok: true });
   }
 
@@ -3430,7 +3959,7 @@ async function handleApi(req, res, url) {
     plan.scenarios = plan.scenarios || [];
     plan.scenarios.push(sc);
     store.savePlan(plan);
-    store.audit('scenario.save', { id: sc.id, team: team.id, sprint: sprint.id, name: sc.name });
+    auditAs(req, 'scenario.save', { id: sc.id, team: team.id, sprint: sprint.id, name: sc.name });
     return json(res, 200, sc);
   }
 
@@ -3449,7 +3978,7 @@ async function handleApi(req, res, url) {
     applyScenario(plan, sc);
     sc.appliedAt = new Date().toISOString();
     store.savePlan(plan);
-    store.audit('scenario.apply', { id: sc.id, team: sc.teamId, sprint: sc.sprintId });
+    auditAs(req, 'scenario.apply', { id: sc.id, team: sc.teamId, sprint: sc.sprintId });
     return json(res, 200, { ok: true, applied: sc.id });
   }
 
@@ -3492,7 +4021,7 @@ async function handleApi(req, res, url) {
     const drop = new Set(removing.map(r => r.id));
     plan.scenarios = all.filter(sc => !drop.has(sc.id));
     store.savePlan(plan);
-    store.audit('scenario.dedupe', { removed: removing.length, ids: [...drop] });
+    auditAs(req, 'scenario.dedupe', { removed: removing.length, ids: [...drop] });
     return json(res, 200, { removed: removing.length, remaining: plan.scenarios.length });
   }
 
@@ -3503,7 +4032,7 @@ async function handleApi(req, res, url) {
     plan.scenarios = (plan.scenarios || []).filter(x => x.id !== body.id);
     if (plan.scenarios.length === before) return json(res, 404, { error: 'No such scenario.' });
     store.savePlan(plan);
-    store.audit('scenario.delete', { id: body.id });
+    auditAs(req, 'scenario.delete', { id: body.id });
     return json(res, 200, { ok: true });
   }
 
@@ -3530,7 +4059,7 @@ async function handleApi(req, res, url) {
     try {
       const out = repo.adjust(body.entity || 'issue', body.id, body.field, body.value, { reason: body.reason || null });
       store.invalidate();   // the projection is cached; an override must show at once
-      store.audit('adjustment.set', { id: body.id, field: body.field, reason: body.reason || null });
+      auditAs(req, 'adjustment.set', { id: body.id, field: body.field, reason: body.reason || null });
       return json(res, 200, out);
     } catch (err) {
       return json(res, 400, { error: err.message });
@@ -3546,7 +4075,7 @@ async function handleApi(req, res, url) {
     try {
       const out = repo.revert(body.entity || 'issue', body.id, body.field);
       store.invalidate();
-      store.audit('adjustment.revert', { id: body.id, field: body.field });
+      auditAs(req, 'adjustment.revert', { id: body.id, field: body.field });
       return json(res, 200, out);
     } catch (err) {
       return json(res, 400, { error: err.message });
@@ -3570,7 +4099,7 @@ async function handleApi(req, res, url) {
     const report = reset.resetToJira(plan, { mode });
     store.savePlan(plan);
     if (body.clearSnapshot) reset.clearSnapshot();
-    store.audit('plan.reset', { mode, backup, ...report.removed });
+    auditAs(req, 'plan.reset', { mode, backup, ...report.removed });
     return json(res, 200, { ok: true, backup, clearedSnapshot: !!body.clearSnapshot, ...report });
   }
 
@@ -3578,14 +4107,14 @@ async function handleApi(req, res, url) {
     const body = await readJsonBody(req);
     if (!body.teams || !body.sprints) return json(res, 400, { error: 'That does not look like a plan backup (no teams/sprints).' });
     store.savePlan(body);
-    store.audit('plan.restore', { teams: body.teams.length });
+    auditAs(req, 'plan.restore', { teams: body.teams.length });
     return json(res, 200, { ok: true });
   }
 
   /* ---- config + audit ---- */
   if (p === '/api/config' && req.method === 'PUT') {
     const body = await readJsonBody(req);
-    return json(res, 200, { ok: true, config: redact(saveConfig(body)) });
+    return json(res, 200, { ok: true, config: redact(saveConfig(body, req.actor)) });
   }
   if (p === '/api/audit' && req.method === 'GET') return json(res, 200, store.readAudit(Number(q.get('limit')) || 150));
 
@@ -3664,12 +4193,31 @@ store.ensureDirs();
  * `PORT=0` means "I am the test harness": the module exports the server and
  * lets the caller listen. Anything else behaves exactly as before.
  */
-module.exports = { server, handleApi, captureScenario, applyScenario, runDueSchedules };
+module.exports = { server, handleApi, captureScenario, applyScenario, runDueSchedules, roleLock };
 
 if (process.env.PORT !== '0') {
   server.listen(cfg.server.port, '127.0.0.1', () => {
     const url = `http://localhost:${cfg.server.port}`;
     console.log(`\n  Automation Planning Tool  →  ${url}`);
+    /* THE FIRST ADMIN IS CREATED FROM THE CONSOLE, by the one person who can
+       read it — whoever started the process. The alternative everybody reaches
+       for is a bootstrap password in config.json, and it is always still there
+       a year later. Printed on every boot while there are no accounts, and
+       never once there is one. */
+    if (cfg.auth.enabled) {
+      try {
+        const token = auth.issueSetupToken();
+        if (token) {
+          console.log('\n  ┌─ No accounts yet ─────────────────────────────────────────');
+          console.log('  │  Open this link to create the first project admin.');
+          console.log('  │  It works once, and expires in 30 minutes.');
+          console.log(`  │  ${url}/#setup?token=${token}`);
+          console.log('  └───────────────────────────────────────────────────────────');
+        }
+      } catch (err) {
+        console.error(`  Could not prepare the account setup: ${err.message}`);
+      }
+    }
     console.log(`  Data: ${store.STORE_DIR}`);
     console.log(cfg.jira.apiToken ? `  Jira: ${cfg.jira.baseUrl} (${cfg.jira.projectKey})` : '  Jira: not configured yet — open Settings in the app.');
 

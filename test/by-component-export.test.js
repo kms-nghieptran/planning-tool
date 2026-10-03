@@ -149,6 +149,21 @@ fs.writeFileSync(path.join(SCRATCH, 'store', 'snapshot.json'), JSON.stringify({
   },
 }));
 
+/* ── A CONFIG OF ITS OWN ───────────────────────────────────────────────
+   Without this, booting the server here reads whatever `config.json` happens
+   to be on the machine running the suite — and the day authentication was
+   switched on in a real install, nine files like this one began getting 401s
+   from a server they believed they were driving anonymously. The failure was
+   in the TEST's environment, not in anything it was testing, and it said so
+   only as "401 !== 200" from an unrelated assertion.
+
+   A test's result must not depend on the machine it runs on. Written before
+   the server module is required, because the config is read at require time. */
+process.env.CONFIG_FILE = path.join(SCRATCH, 'config.json');
+fs.writeFileSync(process.env.CONFIG_FILE, JSON.stringify({
+  auth: { enabled: false }, server: { port: 0, readOnly: false },
+}));
+
 const { server } = require('../server.js');
 
 let base = '';
